@@ -1,0 +1,16 @@
+# Bỏ qua các tệp thực thi đã được biên dịch (Binaries)
+*.exe
+*.dll
+
+# Bỏ qua các tệp biên dịch trung gian (nếu sau này dự án lớn lên và sinh ra)
+*.o
+*.obj
+
+# Bỏ qua các tệp log, tệp gỡ lỗi
+*.log
+*.pdb
+*.ilk
+
+# Bỏ qua các tệp tạm của hệ điều hành
+.DS_Store
+Thumbs.db
