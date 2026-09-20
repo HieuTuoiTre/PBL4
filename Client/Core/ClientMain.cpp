@@ -1,5 +1,5 @@
 #include <windows.h>
-#include "../Shared/Network.h"
+#include "../../Shared/Network.h"
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     // Khởi tạo thư viện mạng

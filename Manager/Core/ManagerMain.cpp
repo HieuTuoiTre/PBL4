@@ -1,5 +1,5 @@
 #include <windows.h>
-#include "../Shared/Network.h"
+#include "../../Shared/Network.h"
 
 // Biến toàn cục để duy trì kết nối mạng trong suốt vòng đời cửa sổ
 TcpClient client; 
