@@ -14,3 +14,4 @@
 # Bỏ qua các tệp tạm của hệ điều hành
 .DS_Store
 Thumbs.db
+.vscode/c_cpp_properties.json
