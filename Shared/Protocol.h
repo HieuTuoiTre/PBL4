@@ -38,18 +38,56 @@ namespace Protocol
     };
 
     enum MouseEventType : uint8_t {
-        
-    }
+        MOUSE_ACTION_MOVE = 1,
+        MOUSE_ACTION_PRESS, 
+        MOUSE_ACTION_RELEASE,
+        MOUSE_ACTION_WHEEL
+    };
+
+    enum MouseButtonType : uint8_t {
+        BUTTON_NONE = 0,
+        BUTTON_LEFT,
+        BUTTON_RIGHT,
+        BUTTON_MIDDLE
+    };
 
     #pragma pack(push, 1)
 
     struct PacketHeader{ //total size = type (1 byte) + content (4 byte) = 5 byte
         MessageType type;
         uint32_t size; // 4 byte, 2 byte (uint16_t) would be too small; while 16 byte (uint64_t) wouldve been too large and unneeded
-    }
+    };
 
+    struct MousePayload{
+        uint8_t actionType;
+        uint8_t buttonType;
+        int16_t x;
+        int16_t y;
+        int16_t wheelDelta;
+    };
 
+    struct KeyboardPayload{
+        uint32_t vkCode;
+        uint8_t isDown; //down = pressed, vice versa
+    };
 
+    struct SysInfoPayload{
+        uint8_t cpuUsage;
+        uint8_t ramUsage;
+        uint8_t diskUsage;
+    };
+
+    struct ProcessInfo{
+        uint32_t pid;
+        uint32_t ramUsageMB;
+        uint32_t diskUsageMB;
+        char name[256];
+    };
+
+    struct FileManager{
+        uint64_t fileSize;
+        char fileName[256];
+    };
     
-
-} 
+    #pragma pack(pop)
+}   
