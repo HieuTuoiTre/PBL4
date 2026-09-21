@@ -1,0 +1,65 @@
+1. Thư mục Shared/ (Ngôn ngữ và đường truyền chung)
+A. Tệp Shared/Protocol.h
+Tệp này không có class hay hàm, chỉ chứa định nghĩa cấu trúc dữ liệu. Bạn cần thiết kế:
+
+enum MessageType: Liệt kê các cờ (flag) để phân loại gói tin (VD: MSG_VIDEO_FRAME, MSG_AUDIO_CHUNK, MSG_MOUSE_EVENT, MSG_KEY_EVENT, MSG_FILE_INFO, MSG_FILE_CHUNK).
+
+struct PacketHeader: Cấu trúc bọc ngoài cùng của mọi gói tin. Chứa 2 trường: Loại tin nhắn (type) và Kích thước dữ liệu đi kèm (size).
+
+Các Struct Payload: MousePayload (chứa X, Y, loại click), KeyPayload (chứa mã phím), FileInfoPayload (chứa tên file, tổng dung lượng).
+
+B. Tệp Shared/Network.h & Shared/Network.cpp
+Tệp này chứa các class quản lý kết nối TCP, là lõi truyền tải của dự án.
+
+Class Network (Tiện ích hệ thống mạng)
+
+Initialize(): Khởi tạo thư viện Winsock2 (gọi WSAStartup) trước khi dùng bất kỳ tính năng mạng nào.
+
+Cleanup(): Dọn dẹp tài nguyên Winsock2 khi tắt phần mềm.
+
+Class TcpServer (Dùng cho máy Client - Máy bị điều khiển)
+
+Start(int port): Mở cổng và bắt đầu lắng nghe kết nối đến (bind, listen).
+
+AcceptConnection(): Chặn luồng và chờ Manager kết nối vào. Trả về true nếu có người vào thành công.
+
+Close(): Ngắt kết nối với Manager hiện tại và đóng Server.
+
+SendPacket(MessageType type, const char* payload, int payloadSize): Đóng gói dữ liệu. Hàm này tự động tạo PacketHeader, gửi header đi trước, sau đó gửi payload đi sau, giúp Dev 2 không cần tự ghép nối.
+
+ReceiveExact(char* buffer, int length): Đọc dữ liệu từ mạng. Hàm này bắt buộc phải dùng vòng lặp (while) cộng dồn số byte nhận được cho tới khi đủ length yêu cầu, ngăn chặn lỗi cắt xén dữ liệu.
+
+Class TcpClient (Dùng cho máy Manager - Máy điều khiển)
+
+Connect(std::string ip, int port): Chủ động kết nối đến máy Client.
+
+Close(): Ngắt kết nối.
+
+SendPacket(...) và ReceiveExact(...): Chức năng tương tự như bên TcpServer, nhưng hoạt động trên socket của Manager.
+
+C. Tệp Shared/Utils.h & Shared/Utils.cpp
+Chứa các hàm tiện ích hỗ trợ.
+
+Utf8ToWide(std::string) / WideToUtf8(std::wstring): Chuyển đổi qua lại giữa chuỗi byte thông thường (dùng để gửi qua mạng) và chuỗi Unicode (dùng cho Win32 API).
+
+2. Thư mục Client/FileTransfer/ (Gửi file từ máy bị điều khiển)
+Tệp FileWorker.h & FileWorker.cpp
+Module này giúp Dev 2 đọc file lớn từ ổ cứng mà không làm treo RAM máy tính.
+
+OpenFileForRead(std::string filePath): Mở luồng đọc file dạng nhị phân (binary). Kiểm tra file có tồn tại và lấy tổng dung lượng file.
+
+ReadNextChunk(char* buffer, int maxChunkSize): Đọc một lượng nhỏ byte (ví dụ 4KB hoặc 8KB) từ file vào buffer. Trả về số byte thực tế vừa đọc được.
+
+IsEOF(): Kiểm tra xem đã đọc tới cuối file chưa.
+
+CloseFile(): Đóng luồng đọc file và giải phóng con trỏ.
+
+3. Thư mục Manager/FileTransfer/ (Nhận file tại máy điều khiển)
+Tệp FileManager.h & FileManager.cpp
+Module này giúp Dev 3 hứng các mảnh nhỏ (chunk) từ mạng và lắp ráp lại thành file hoàn chỉnh.
+
+OpenFileForWrite(std::string savePath): Khởi tạo một file trống trên máy Manager để chuẩn bị ghi dữ liệu dạng nhị phân.
+
+WriteChunk(const char* data, int length): Nối thêm một mảng byte (chunk) vừa nhận được từ mạng vào đuôi file.
+
+CloseFile(): Lưu hoàn tất và đóng file, kết thúc quá trình tải về.
