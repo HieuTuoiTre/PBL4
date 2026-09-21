@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chương trình theo dõi/điều khiển máy tính từ xa</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+        }
+
+        body {
+            background-color: #f0f2f5;
+            color: #333;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 16px;
+        }
+
+        /* ---------------- VIEW 1: CỬA SỔ CHÍNH (MANAGER) ---------------- */
+        .window-panel {
+            background: #ffffff;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+            width: 100%;
+            max-width: 900px;
+            height: 550px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .title-bar {
+            background: #2b5797;
+            color: #ffffff;
+            padding: 10px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .content-area {
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            gap: 16px;
+        }
+
+        .action-row {
+            display: flex;
+            gap: 12px;
+        }
+
+        .input-ip-wrapper {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            border-radius: 4px;
+            background: #fff;
+            transition: box-shadow 0.2s ease;
+        }
+
+        .input-ip-wrapper:focus-within {
+            box-shadow: 0 0 0 3px rgba(43, 87, 151, 0.2);
+        }
+
+        .input-ip-wrapper.ip-updated {
+            animation: ip-updated 0.55s ease-out;
+        }
+
+        @keyframes ip-updated {
+            0% {
+                background: #bfdbfe;
+                box-shadow: 0 0 0 0 rgba(13, 110, 253, 0.55);
+                transform: scale(1);
+            }
+            45% {
+                background: #dbeafe;
+                box-shadow: 0 0 0 5px rgba(13, 110, 253, 0.18);
+                transform: scale(1.01);
+            }
+            100% {
+                background: #fff;
+                box-shadow: 0 0 0 0 rgba(13, 110, 253, 0);
+                transform: scale(1);
+            }
+        }
+
+        .input-ip {
+            width: 100%;
+            padding: 8px 12px;
+            font-size: 14px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            outline: none;
+            position: relative;
+            z-index: 1;
+            background: transparent;
+        }
+
+        .input-ip:focus {
+            border-color: #2b5797;
+        }
+
+        .input-ripple {
+            position: absolute;
+            border-radius: 50%;
+            background: rgba(43, 87, 151, 0.25);
+            transform: translate(-50%, -50%) scale(0);
+            animation: input-ripple 0.55s ease-out forwards;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        @keyframes input-ripple {
+            from {
+                opacity: 0.8;
+                transform: translate(-50%, -50%) scale(0);
+            }
+            to {
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(1);
+            }
+        }
+
+        .btn {
+            padding: 8px 18px;
+            font-size: 14px;
+            font-weight: 500;
+            border: 1px solid transparent;
+            border-radius: 4px;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+            isolation: isolate;
+            transition: background 0.15s ease-in-out, transform 0.15s ease-in-out;
+        }
+
+        .btn:active {
+            transform: scale(0.97);
+        }
+
+        .btn-label {
+            position: relative;
+            z-index: 1;
+        }
+
+        .button-ripple {
+            position: absolute;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.45);
+            transform: translate(-50%, -50%) scale(0);
+            animation: button-ripple 0.55s ease-out forwards;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        @keyframes button-ripple {
+            from {
+                opacity: 0.8;
+                transform: translate(-50%, -50%) scale(0);
+            }
+            to {
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(1);
+            }
+        }
+
+        .btn-primary {
+            background-color: #0d6efd;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: #0b5ed7;
+        }
+
+        .btn-danger {
+            background-color: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background-color: #bb2d3b;
+        }
+
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background-color: #5c636a;
+        }
+
+        /* Danh sách thiết bị (ListView) */
+        .table-container {
+            flex: 1;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            overflow-y: auto;
+            background: #fff;
+            position: relative;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 13px;
+        }
+
+        thead {
+            background: #f8f9fa;
+            position: sticky;
+            top: 0;
+            border-bottom: 2px solid #dee2e6;
+        }
+
+        th, td {
+            padding: 10px 14px;
+            border: 1px solid #dee2e6;
+        }
+
+        tbody tr:hover {
+            background-color: #f1f5f9;
+            cursor: pointer;
+        }
+
+        tbody tr {
+            transition: background-color 0.2s ease, transform 0.15s ease;
+        }
+
+        tbody tr:active {
+            transform: scale(0.995);
+        }
+
+        tbody tr.selected {
+            background-color: #94a3b8;
+            color: #0f172a;
+            font-weight: 600;
+            animation: select-row 0.3s ease-out;
+        }
+
+        @keyframes select-row {
+            from {
+                background-color: #e2e8f0;
+            }
+            to {
+                background-color: #94a3b8;
+            }
+        }
+
+        .row-ripple-layer {
+            position: absolute;
+            overflow: hidden;
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        .ripple {
+            position: absolute;
+            border-radius: 50%;
+            background: rgba(71, 85, 105, 0.5);
+            transform: translate(-50%, -50%) scale(0);
+            animation: ripple 0.65s ease-out forwards;
+            pointer-events: none;
+        }
+
+        @keyframes ripple {
+            from {
+                opacity: 0.7;
+                transform: translate(-50%, -50%) scale(0);
+            }
+            to {
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(1);
+            }
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status-online {
+            background-color: #d1e7dd;
+            color: #0f5132;
+        }
+
+        .status-offline {
+            background-color: #f8d7da;
+            color: #842029;
+        }
+
+        .status-busy {
+            background-color: #fff3cd;
+            color: #664d03;
+        }
+
+        /* ---------------- VIEW 2: CỬA SỔ STREAM (VIEWER) ---------------- */
+        #viewerContainer {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #eef2f7;
+            flex-direction: column;
+            gap: 14px;
+            padding: 18px;
+            z-index: 100;
+        }
+
+        .viewer-toolbar {
+            height: 58px;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .viewer-session-info {
+            flex: 1;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            border-radius: 8px;
+            background: #1e40af;
+            font-size: 14px;
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .viewer-toolbar > div:last-child {
+            height: 100%;
+            display: flex !important;
+        }
+
+        .viewer-toolbar .btn-secondary {
+            display: none;
+        }
+
+        .viewer-toolbar .btn-danger {
+            min-width: 160px;
+            height: 100%;
+            border-radius: 8px;
+        }
+
+        .viewer-workspace {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            gap: 14px;
+        }
+
+        .viewer-canvas-area {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            background: #111;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        #remoteCanvas {
+            max-width: 100%;
+            max-height: 100%;
+            background-color: #000;
+            cursor: crosshair;
+        }
+
+        .task-manager-panel {
+            width: 360px;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            background: #fff;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .task-manager-title {
+            padding: 14px 16px;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 15px;
+            font-weight: 700;
+            color: #0f172a;
+        }
+
+        .task-table-wrapper {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .task-table {
+            font-size: 12px;
+        }
+
+        .task-table thead {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: #f8fafc;
+            border-bottom: 1px solid #cbd5e1;
+        }
+
+        .task-table th,
+        .task-table td {
+            padding: 9px 8px;
+            border: 0;
+            border-right: 1px solid #e2e8f0;
+        }
+
+        .task-table th:last-child,
+        .task-table td:last-child {
+            border-right: 0;
+        }
+
+        .task-table th {
+            font-weight: 500;
+            color: #475569;
+            vertical-align: bottom;
+        }
+
+        .task-table th:first-child {
+            width: 45%;
+            text-align: left;
+        }
+
+        .task-table th:not(:first-child),
+        .task-table td:not(:first-child) {
+            width: 18.33%;
+            text-align: right;
+        }
+
+        .task-metric {
+            display: block;
+            margin-bottom: 3px;
+            font-size: 19px;
+            font-weight: 500;
+            color: #0f172a;
+        }
+
+        .task-process {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .process-icon {
+            flex: 0 0 18px;
+            width: 18px;
+            height: 18px;
+            border-radius: 4px;
+            background: #2563eb;
+        }
+
+        .process-icon.edge { background: #0ea5e9; }
+        .process-icon.explorer { background: #eab308; }
+        .process-icon.system { background: #64748b; }
+        .process-icon.security { background: #22c55e; }
+        .process-icon.terminal { background: #475569; }
+
+        .task-table tbody tr {
+            transition: background-color 0.15s ease;
+        }
+
+        .task-table tbody tr:hover {
+            background: #f1f5f9;
+            cursor: default;
+        }
+
+        .task-usage {
+            background: #e0f2fe;
+        }
+
+        .task-usage.medium {
+            background: #bae6fd;
+        }
+
+        .task-usage.high {
+            background: #7dd3fc;
+        }
+
+        @media (max-width: 850px) {
+            #viewerContainer {
+                padding: 12px;
+                gap: 12px;
+            }
+
+            .viewer-workspace {
+                flex-direction: column;
+            }
+
+            .task-manager-panel {
+                width: 100%;
+                min-height: 240px;
+            }
+        }
+
+        /* ---------------- MODAL HỘP THOẠI ---------------- */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.45);
+            justify-content: center;
+            align-items: center;
+            z-index: 200;
+        }
+
+        .modal-box {
+            background: #fff;
+            padding: 24px;
+            border-radius: 6px;
+            min-width: 340px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+            text-align: center;
+        }
+
+        .modal-box p {
+            margin-bottom: 20px;
+            font-size: 14px;
+            color: #333;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 1. MAIN PANEL (BẢNG QUẢN LÝ KẾT NỐI) -->
+    <div class="window-panel" id="mainPanel">
+        <div class="title-bar">
+            <span>Manager App - Connection Panel</span>
+        </div>
+        <div class="content-area">
+            <div class="action-row">
+                <input type="text" id="targetIpInput" class="input-ip" value="" placeholder="Nhập địa chỉ IP...">
+                <button class="btn btn-primary" onclick="handleConnectRequest()">Yêu cầu kết nối</button>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 55px;">ID</th>
+                            <th>Tên máy</th>
+                            <th>Địa chỉ IP</th>
+                            <th>Trạng thái</th>
+                        </tr>
+                    </thead>
+                    <tbody id="agentTableBody">
+                        <tr onclick="selectAgent('192.168.1.10', 'DESKTOP-AGENT-01', this, event)">
+                            <td>1</td>
+                            <td>DESKTOP-AGENT-01</td>
+                            <td>192.168.1.10</td>
+                            <td><span class="badge status-online">Có thể kết nối</span></td>
+                        </tr>
+                        <tr onclick="selectAgent('192.168.1.15', 'DESKTOP-LAB-02', this, event)">
+                            <td>2</td>
+                            <td>DESKTOP-LAB-02</td>
+                            <td>192.168.1.15</td>
+                            <td><span class="badge status-busy">Đang bận</span></td>
+                        </tr>
+                        <tr onclick="selectAgent('192.168.1.22', 'DESKTOP-OFFLINE', this, event)">
+                            <td>3</td>
+                            <td>DESKTOP-OFFLINE</td>
+                            <td>192.168.1.22</td>
+                            <td><span class="badge status-offline">Không thể kết nối</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. VIEWER PANEL (STREAM MÀN HÌNH ĐIỀU KHIỂN) -->
+    <div id="viewerContainer">
+        <div class="viewer-toolbar">
+            <div class="viewer-session-info" id="sessionLabel">
+                Đang điều khiển: [192.168.1.10 - DESKTOP-AGENT-01]
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn btn-secondary" onclick="alert('Mở hộp thoại cấu hình FPS / Chất lượng JPEG')">Cấu hình</button>
+                <button class="btn btn-danger" onclick="closeViewer()">Ngắt kết nối</button>
+            </div>
+        </div>
+
+        <div class="viewer-workspace">
+            <div class="viewer-canvas-area" id="canvasWrapper">
+                <canvas id="remoteCanvas" width="1280" height="720"></canvas>
+            </div>
+
+            <aside class="task-manager-panel" aria-label="Danh sách tiến trình">
+                <div class="task-manager-title">Tiến trình đang chạy</div>
+                <div class="task-table-wrapper">
+                    <table class="task-table">
+                        <thead>
+                            <tr>
+                                <th>Tên</th>
+                                <th><span class="task-metric">28%</span>CPU</th>
+                                <th><span class="task-metric">72%</span>Bộ nhớ</th>
+                                <th><span class="task-metric">2%</span>Đĩa</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon"></span>Visual Studio Code (13)</div></td>
+                                <td class="task-usage medium">0,6%</td>
+                                <td class="task-usage high">1.101,3 MB</td>
+                                <td class="task-usage">0 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon edge"></span>Microsoft Edge (21)</div></td>
+                                <td class="task-usage medium">0,5%</td>
+                                <td class="task-usage high">828,5 MB</td>
+                                <td class="task-usage">0,3 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon"></span>Zalo (32 bit) (8)</div></td>
+                                <td class="task-usage">0,4%</td>
+                                <td class="task-usage medium">297,6 MB</td>
+                                <td class="task-usage">0,1 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon explorer"></span>Windows Explorer</div></td>
+                                <td class="task-usage">0%</td>
+                                <td class="task-usage">130,2 MB</td>
+                                <td class="task-usage">0 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon system"></span>Desktop Window Manager</div></td>
+                                <td class="task-usage medium">1,0%</td>
+                                <td class="task-usage">101,0 MB</td>
+                                <td class="task-usage">0 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon system"></span>Trình quản lý Tác vụ</div></td>
+                                <td class="task-usage medium">1,1%</td>
+                                <td class="task-usage">100,5 MB</td>
+                                <td class="task-usage">0 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon security"></span>360 Total Security (32 bit)</div></td>
+                                <td class="task-usage">0%</td>
+                                <td class="task-usage">84,9 MB</td>
+                                <td class="task-usage">0 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon system"></span>Intel Connectivity Network Service</div></td>
+                                <td class="task-usage">0,4%</td>
+                                <td class="task-usage">61,8 MB</td>
+                                <td class="task-usage">0 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon system"></span>Secure System</div></td>
+                                <td class="task-usage">0%</td>
+                                <td class="task-usage">55,6 MB</td>
+                                <td class="task-usage">0 MB/s</td>
+                            </tr>
+                            <tr>
+                                <td><div class="task-process"><span class="process-icon terminal"></span>Windows PowerShell</div></td>
+                                <td class="task-usage">0%</td>
+                                <td class="task-usage">22,3 MB</td>
+                                <td class="task-usage">0 MB/s</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <!-- 3. MODAL CONFIRMATION DIALOG -->
+    <div class="modal-overlay" id="confirmModal">
+        <div class="modal-box">
+            <p id="confirmMessage">Bạn có muốn kết nối đến IP này không?</p>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="onConfirmConnect(true)">Đồng ý</button>
+                <button class="btn btn-secondary" onclick="onConfirmConnect(false)">Hủy</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 4. MODAL ERROR DIALOG -->
+    <div class="modal-overlay" id="errorModal">
+        <div class="modal-box">
+            <p style="color: #c0392b; font-weight: 600;">Error: Địa chỉ IP không thể kết nối tới hoặc đã bị từ chối!</p>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="document.getElementById('errorModal').style.display='none'">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ipInput = document.getElementById('targetIpInput');
+        const confirmModal = document.getElementById('confirmModal');
+        const errorModal = document.getElementById('errorModal');
+        const viewerContainer = document.getElementById('viewerContainer');
+        const sessionLabel = document.getElementById('sessionLabel');
+        const canvas = document.getElementById('remoteCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let selectedMachineName = 'DESKTOP-AGENT-01';
+
+        // Chọn máy từ danh sách table
+        function selectAgent(ip, name, selectedRow, event) {
+            ipInput.value = ip;
+            selectedMachineName = name;
+            showIpUpdatedEffect();
+            document.querySelectorAll('#agentTableBody tr').forEach((row) => {
+                row.classList.remove('selected');
+            });
+            selectedRow.classList.add('selected');
+            createRowRipple(selectedRow, event);
+        }
+
+        function showIpUpdatedEffect() {
+            const inputWrapper = ipInput.closest('.input-ip-wrapper');
+
+            inputWrapper.classList.remove('ip-updated');
+            void inputWrapper.offsetWidth;
+            inputWrapper.classList.add('ip-updated');
+            inputWrapper.addEventListener('animationend', () => {
+                inputWrapper.classList.remove('ip-updated');
+            }, { once: true });
+        }
+
+        function createRowRipple(selectedRow, event) {
+            const tableContainer = document.querySelector('.table-container');
+            const containerRect = tableContainer.getBoundingClientRect();
+            const rowRect = selectedRow.getBoundingClientRect();
+            const x = event.clientX - rowRect.left;
+            const y = event.clientY - rowRect.top;
+            const radius = Math.hypot(
+                Math.max(x, rowRect.width - x),
+                Math.max(y, rowRect.height - y)
+            );
+            const rippleLayer = document.createElement('div');
+            const ripple = document.createElement('span');
+
+            rippleLayer.className = 'row-ripple-layer';
+            rippleLayer.style.left = `${rowRect.left - containerRect.left + tableContainer.scrollLeft}px`;
+            rippleLayer.style.top = `${rowRect.top - containerRect.top + tableContainer.scrollTop}px`;
+            rippleLayer.style.width = `${rowRect.width}px`;
+            rippleLayer.style.height = `${rowRect.height}px`;
+            ripple.className = 'ripple';
+            ripple.style.left = `${x}px`;
+            ripple.style.top = `${y}px`;
+            ripple.style.width = `${radius * 2}px`;
+            ripple.style.height = `${radius * 2}px`;
+            rippleLayer.appendChild(ripple);
+            tableContainer.appendChild(rippleLayer);
+            ripple.addEventListener('animationend', () => rippleLayer.remove());
+        }
+
+        function createButtonRipple(event) {
+            const button = event.currentTarget;
+            const buttonRect = button.getBoundingClientRect();
+            const diameter = Math.max(buttonRect.width, buttonRect.height) * 2;
+            const ripple = document.createElement('span');
+
+            ripple.className = 'button-ripple';
+            ripple.style.left = `${event.clientX - buttonRect.left}px`;
+            ripple.style.top = `${event.clientY - buttonRect.top}px`;
+            ripple.style.width = `${diameter}px`;
+            ripple.style.height = `${diameter}px`;
+            button.appendChild(ripple);
+            ripple.addEventListener('animationend', () => ripple.remove());
+        }
+
+        function initButtonRipples() {
+            document.querySelectorAll('.btn').forEach((button) => {
+                const label = document.createElement('span');
+
+                label.className = 'btn-label';
+                while (button.firstChild) {
+                    label.appendChild(button.firstChild);
+                }
+                button.appendChild(label);
+                button.addEventListener('pointerdown', createButtonRipple);
+            });
+        }
+
+        function createInputRipple(event) {
+            const input = event.currentTarget;
+            const inputWrapper = input.closest('.input-ip-wrapper');
+            const wrapperRect = inputWrapper.getBoundingClientRect();
+            const diameter = Math.max(wrapperRect.width, wrapperRect.height) * 2;
+            const ripple = document.createElement('span');
+
+            ripple.className = 'input-ripple';
+            ripple.style.left = `${event.clientX - wrapperRect.left}px`;
+            ripple.style.top = `${event.clientY - wrapperRect.top}px`;
+            ripple.style.width = `${diameter}px`;
+            ripple.style.height = `${diameter}px`;
+            inputWrapper.appendChild(ripple);
+            ripple.addEventListener('animationend', () => ripple.remove());
+        }
+
+        function initInputRipples() {
+            document.querySelectorAll('.input-ip').forEach((input) => {
+                const inputWrapper = document.createElement('div');
+
+                inputWrapper.className = 'input-ip-wrapper';
+                input.parentNode.insertBefore(inputWrapper, input);
+                inputWrapper.appendChild(input);
+                input.addEventListener('pointerdown', createInputRipple);
+            });
+        }
+
+        initButtonRipples();
+        initInputRipples();
+
+        // Bấm nút "Yêu cầu kết nối"
+        function handleConnectRequest() {
+            const ip = ipInput.value.trim();
+            if (!ip) {
+                alert('Vui lòng nhập địa chỉ IP hợp lệ.');
+                return;
+            }
+            document.getElementById('confirmMessage').innerText = `Bạn có muốn kết nối đến IP: ${ip} không?`;
+            confirmModal.style.display = 'flex';
+        }
+
+        // Xử lý xác nhận modal
+        function onConfirmConnect(isAccepted) {
+            confirmModal.style.display = 'none';
+
+            if (isAccepted) {
+                // Mô phỏng kết nối thành công nếu IP không phải dạng offline (.22)
+                if (ipInput.value.includes('.22')) {
+                    errorModal.style.display = 'flex';
+                } else {
+                    openViewer(ipInput.value, selectedMachineName);
+                }
+            } else {
+                errorModal.style.display = 'flex';
+            }
+        }
+
+        // Mở màn hình Viewer
+        function openViewer(ip, name) {
+            sessionLabel.innerText = `Đang điều khiển: [${ip} - ${name}]`;
+            sessionLabel.textContent = `Địa chỉ IP / Tên máy: ${ip} / ${name}`;
+            viewerContainer.style.display = 'flex';
+            drawPlaceholder();
+            initInputHandler();
+        }
+
+        // Đóng màn hình Viewer
+        function closeViewer() {
+            viewerContainer.style.display = 'none';
+        }
+
+        // Vẽ placeholder màn hình giả lập
+        function drawPlaceholder() {
+            ctx.fillStyle = "#1e1e1e";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = "#38bdf8";
+            ctx.font = "22px Segoe UI";
+            ctx.textAlign = "center";
+            ctx.fillText("[KHUNG NHẬN STREAM JPEG TỪ AGENT SẼ VẼ LÊN ĐÂY]", canvas.width / 2, canvas.height / 2);
+        }
+
+        // ---------------- INPUT HANDLER (HOOK CHUỘT / PHÍM) ----------------
+        function initInputHandler() {
+            // Chuột di chuyển & click
+            canvas.onmousemove = (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+
+                const remoteX = Math.round((e.clientX - rect.left) * scaleX);
+                const remoteY = Math.round((e.clientY - rect.top) * scaleY);
+
+                // Dữ liệu gói tin đóng gói gửi qua WebSocket / Socket
+                // console.log(`Mouse Move: X=${remoteX}, Y=${remoteY}`);
+            };
+
+            canvas.onmousedown = (e) => {
+                // console.log(`Mouse Down: Button=${e.button}`);
+            };
+
+            // Bắt phím bấm
+            window.onkeydown = (e) => {
+                if (viewerContainer.style.display === 'flex') {
+                    // console.log(`Key Down: Code=${e.code}, Key=${e.key}`);
+                }
+            };
+        }
+    </script>
+</body>
+</html>
