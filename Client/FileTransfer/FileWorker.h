@@ -1,14 +1,18 @@
 #pragma once
 
-#include <string>
 #include <fstream>
+#include <string>
+#include <cstdint>
 
 class FileWorker{
     private:
-        std::ofstream fileStream;
-    
+        std::ifstream fileStream;
+        uint64_t fileSize = 0;
+
     public:
-        bool OpenFileForWrite(const std::string& savePath);
-        bool WriteChunk(const char* data, int length);
+        bool OpenFileForRead(const std::string& filePath);
+        int ReadNextChunk(char* buffer, int maxChunkSize);
+        bool IsEOF();
         void CloseFile();
+        uint64_t GetFileSize() const {return fileSize; }
 };
