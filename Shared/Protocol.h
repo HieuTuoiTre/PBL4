@@ -77,14 +77,14 @@ namespace Protocol
         uint8_t diskUsage;
     };
 
-    struct ProcessInfo{
+    struct ProcessInfoPayload{
         uint32_t pid;
         uint32_t ramUsageMB;
         uint32_t diskUsageMB;
         char name[256];
     };
 
-    struct FileManager{
+    struct FileInfoPayload{
         uint64_t fileSize;
         char fileName[256];
     };
