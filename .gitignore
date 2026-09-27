@@ -21,6 +21,3 @@ Thumbs.db
 
 .vscode/
 Instruction.txt
-
-#Bỏ qua file txt
-*.txt
