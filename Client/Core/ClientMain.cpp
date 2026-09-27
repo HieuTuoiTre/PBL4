@@ -1,7 +1,7 @@
+#include "../../Shared/Network.h"
 #include <windows.h>
 #include <thread>
 
-#include "../../Shared/Network.h"
 #include "SessionManager.h"
 #include "TrayIcon.h"
 

@@ -1,9 +1,9 @@
 @echo off
 chcp 65001
-echo Đang biên dịch Manager...
-g++ Manager\*.cpp Shared\*.cpp -o Manager.exe -O2 -luser32 -lgdi32 -lws2_32 -mwindows -DUNICODE -D_UNICODE
+echo Đang bien dich Manager...
+g++ Manager\Core\*.cpp Manager\FileTransfer\*.cpp Manager\Media\*.cpp Manager\UI\*.cpp Shared\*.cpp -o Manager.exe -O2 -luser32 -lgdi32 -lws2_32 -mwindows -DUNICODE -D_UNICODE
 
-echo Đang biên dịch Client...
-g++ Client\*.cpp Shared\*.cpp -o Client.exe -O2 -luser32 -lgdi32 -lws2_32 -mwindows -DUNICODE -D_UNICODE
+echo Đang bien dich Client...
+g++ Client\Core\*.cpp Client\FileTransfer\*.cpp Client\Media\*.cpp Client\System\*.cpp Shared\*.cpp -o Client.exe -O2 -luser32 -lgdi32 -lgdiplus -lole32 -lws2_32 -mwindows -DUNICODE -D_UNICODE
 
-echo Hoàn tất!
+echo Hoan tat!
