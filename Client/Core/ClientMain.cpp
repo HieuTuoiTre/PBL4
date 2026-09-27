@@ -5,10 +5,27 @@
 #include "SessionManager.h"
 #include "TrayIcon.h"
 
+#include "../System/InputInjector.h"
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow){
-   // 1. Khởi tạo Winsock (Gọi hàm do Dev 1 viết)
+
+    // --- BẬT CƠ CHẾ CHỈ CHO PHÉP 1 TIẾN TRÌNH DUY NHẤT ---
+    HANDLE hMutex = CreateMutexA(NULL, TRUE, "PBL4_RemoteDesktop_Client_Mutex");
+    
+    // Kiểm tra nếu thẻ bài (Mutex) này đã tồn tại trên hệ thống
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (hMutex) {
+            ReleaseMutex(hMutex);
+            CloseHandle(hMutex);
+        }
+        return 0; // Lập tức tắt tiến trình mới này, giữ nguyên tiến trình cũ đang chạy
+    }
+    // --------------------------------------------------
+
+    // 1. Khởi tạo Winsock (Gọi hàm do Dev 1 viết)
     if (!Network::Initialize()) {
         MessageBoxW(NULL, L"Không thể khởi tạo Winsock2!", L"Lỗi nghiêm trọng", MB_OK | MB_ICONERROR);
+        if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); } // Dọn dẹp Mutex
         return 1;
     }
 
@@ -16,6 +33,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (!TrayIcon::Initialize(hInstance)) {
         MessageBoxW(NULL, L"Không thể khởi tạo System Tray Icon!", L"Lỗi nghiêm trọng", MB_OK | MB_ICONERROR);
         Network::Cleanup();
+        if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); } // Dọn dẹp Mutex
         return 1;
     }
 
@@ -43,6 +61,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     TrayIcon::Cleanup();      // Xóa icon khỏi màn hình
     SessionManager::Stop();   // Đóng socket, tắt luồng mạng
     Network::Cleanup();       // Tắt Winsock
+
+    // Giải phóng Mutex trước khi app tắt hoàn toàn
+    if (hMutex) {
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+    }
 
     return 0;
 }
