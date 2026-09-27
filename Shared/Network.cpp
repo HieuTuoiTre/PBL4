@@ -116,14 +116,75 @@ TcpClient::~TcpClient(){
     Close();
 }
 
-bool Connect(const std::string& ip, int port){
+bool TcpClient::Connect(const std::string& ip, int port){
+    connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
+    if (connectSocket == INVALID_SOCKET){
+        return false;
+    }
+
+    sockaddr_in serverAddress;
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, ip.c_str(), &serverAddress.sin_addr) <= 0){
+        Close();
+        return false;
+    }
+
+    if (connect(connectSocket, (sockaddr*)&serverAddress, sizeof(serverAddress)) == SOCKET_ERROR){
+        Close();
+        return false;
+    }
+
+    return true;
 }
 
-bool SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
-
+void TcpClient::Close(){
+    if (connectSocket != INVALID_SOCKET){
+        closesocket(connectSocket);
+        connectSocket = INVALID_SOCKET;
+    }
 }
 
- bool ReceiveExact(char* buffer, int length){
+bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
+    if (connectSocket == INVALID_SOCKET){
+        return false;
+    }
 
- }
+    Protocol::PacketHeader header;
+    header.type = type;
+    header.size = payloadSize;
+
+    if (send(connectSocket, (const char*)&header, sizeof(Protocol::PacketHeader), 0) == SOCKET_ERROR) {
+        return false;
+    }
+
+    int byteSent = 0;
+    while (byteSent < payloadSize){
+        int result = send(connectSocket, payload + byteSent, payloadSize - byteSent, 0);
+        if (result == SOCKET_ERROR){
+            return false;
+        }
+        byteSent += result;
+    }
+
+    return true;
+}
+
+bool TcpClient::ReceiveExact(char* buffer, int length){
+    if (connectSocket == INVALID_SOCKET){
+        return false;
+    }
+
+    int byteReceived = 0;
+    while (byteReceived < length){
+        int result = recv(connectSocket, buffer + byteReceived, length - byteReceived, 0);
+        if (result <= 0){
+            return false;
+        }
+        byteReceived += result;
+    }
+
+    return true;
+}
