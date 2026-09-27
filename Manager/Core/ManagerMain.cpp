@@ -3,7 +3,7 @@
 
 
 // Biến toàn cục để duy trì kết nối mạng trong suốt vòng đời cửa sổ
-TcpClient client; 
+Network::TcpClient client;
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
@@ -11,11 +11,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // Thử kết nối tới Client đang chạy ở máy hiện tại, port 8080
             if (client.Connect("127.0.0.1", 8080)) {
                 // Gửi tin nhắn đi
-                client.SendData("Ping! Manager ket noi.", 22);
+                client.SendPacket(Protocol::MSG_PING, "Ping! Manager ket noi.", 22);
                 
                 // Chờ nhận phản hồi
                 char buffer[256] = {0};
-                client.ReceiveData(buffer, sizeof(buffer));
+                client.ReceiveExact(buffer, sizeof(buffer));
                 
                 // Hiển thị phản hồi từ Client
                 MessageBoxA(hwnd, buffer, "Manager - Nhan phan hoi", MB_OK | MB_ICONINFORMATION);
