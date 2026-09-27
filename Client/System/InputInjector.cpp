@@ -55,4 +55,24 @@ namespace InputInjector {
         SendInput(1, &input, sizeof(INPUT));
     }
 
+    void InjectKeyboard(const Protocol::KeyboardPayload& payload) {
+        // Khởi tạo cấu trúc INPUT thô
+        INPUT input = { 0 };
+        input.type = INPUT_KEYBOARD;
+
+        // Gán mã phím ảo (Virtual-Key code). Ví dụ: phím 'A' là 0x41, phím Enter là 0x0D
+        input.ki.wVk = (WORD)payload.vkCode;
+
+        // Xử lý trạng thái Nhấn xuống (Down) hoặc Nhả ra (Up)
+        // Nếu payload.isDown == 0 (false), tức là lệnh nhả phím
+        if (payload.isDown == 0) {
+            input.ki.dwFlags = KEYEVENTF_KEYUP;
+        } else {
+            input.ki.dwFlags = 0; // 0 mặc định là nhấn phím xuống (KeyDown)
+        }
+
+        // Gửi lệnh xuống hệ điều hành
+        SendInput(1, &input, sizeof(INPUT));
+    }
+
 }
