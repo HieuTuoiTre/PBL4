@@ -5,7 +5,8 @@
 //Network
 bool Network::Initialize(){ 
     WSADATA wsadata;
-    return WSAStartup(MAKEWORD(2,2), &wsadata);
+    // Thêm "== 0" để so sánh. Nếu WSAStartup trả về 0 (thành công) thì hàm này sẽ return true.
+    return WSAStartup(MAKEWORD(2,2), &wsadata) == 0;
 }
 
 void Network::Cleanup(){
