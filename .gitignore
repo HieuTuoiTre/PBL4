@@ -18,5 +18,9 @@ Thumbs.db
 
 #Bỏ qua ảnh .jpg
 *.jpg
+
 .vscode/
 Instruction.txt
+
+#Bỏ qua file txt
+*.txt
