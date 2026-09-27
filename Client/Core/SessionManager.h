@@ -1,7 +1,9 @@
 #pragma once
 
 namespace SessionManager {
-    // Khai báo hàm để ClientMain.cpp có thể nhìn thấy
+    // Hàm mở server chờ Manager kết nối tới
     void StartServer(int port);
+    
+    // Hàm đóng kết nối và dọn dẹp
     void Stop();
 }
