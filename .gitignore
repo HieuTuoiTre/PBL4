@@ -16,7 +16,8 @@
 Thumbs.db
 .vscode/c_cpp_properties.json
 
-#Bỏ qua ảnh .jpg
+#Bỏ qua ảnh
+*.png
 *.jpg
 
 .vscode/
