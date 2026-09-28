@@ -111,7 +111,7 @@ namespace SessionManager {
                 rxThread.join();
                 
                 // Đóng socket của Manager hiện tại để chờ Manager mới
-                g_server.Close(); 
+                g_server.CloseClient(); 
             } else {
                 // Nếu accept lỗi, ngủ 1 chút rồi thử lại
                 std::this_thread::sleep_for(std::chrono::seconds(1));
