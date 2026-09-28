@@ -5,7 +5,8 @@
 //Network
 bool Network::Initialize(){ 
     WSADATA wsadata;
-    return WSAStartup(MAKEWORD(2,2), &wsadata);
+    // Thêm "== 0" để so sánh. Nếu WSAStartup trả về 0 (thành công) thì hàm này sẽ return true.
+    return WSAStartup(MAKEWORD(2,2), &wsadata) == 0;
 }
 
 void Network::Cleanup(){
@@ -62,6 +63,14 @@ void TcpServer::Close(){
     if (listenSocket != INVALID_SOCKET){
         closesocket(listenSocket);
         listenSocket = INVALID_SOCKET;
+    }
+}
+
+void TcpServer::CloseClient(){
+    // Chỉ đóng socket đang giao tiếp với Manager cũ
+    if (clientSocket != INVALID_SOCKET){
+        closesocket(clientSocket);
+        clientSocket = INVALID_SOCKET;
     }
 }
 

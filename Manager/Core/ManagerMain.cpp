@@ -3,7 +3,7 @@
 
 
 // Biến toàn cục để duy trì kết nối mạng trong suốt vòng đời cửa sổ
-Network::TcpClient client;
+TcpClient client;
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {

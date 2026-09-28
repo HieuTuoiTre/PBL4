@@ -32,6 +32,7 @@ namespace Protocol
         MSG_DRIVE_LIST_RESPONSE,
         MSG_DIR_REQUEST,      //request to see path content  
         MSG_DIR_RESPONSE,     //response of path conten
+        MSG_FILE_DOWNLOAD_REQ,
         MSG_FILE_INFO,        //name, size of file
         MSG_FILE_CHUNK,
         MSG_FILE_END

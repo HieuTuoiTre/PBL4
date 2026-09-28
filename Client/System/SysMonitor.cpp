@@ -1,5 +1,7 @@
-#include "SysMonitor.h"
 #include <windows.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+#include "SysMonitor.h"
 
 namespace {
     // Các biến toàn cục ẩn dùng để lưu mốc thời gian CPU lần đo trước đó
@@ -81,5 +83,55 @@ namespace SysMonitor {
         }
 
         return payload;
+    }
+
+    // ==========================================
+    // 4. LẤY DANH SÁCH TIẾN TRÌNH ĐANG CHẠY
+    // ==========================================
+    std::vector<Protocol::ProcessInfoPayload> GetProcessList() {
+        std::vector<Protocol::ProcessInfoPayload> processList;
+        
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnapshot == INVALID_HANDLE_VALUE) return processList;
+
+        PROCESSENTRY32 pe32;
+        pe32.dwSize = sizeof(PROCESSENTRY32);
+
+        if (Process32First(hSnapshot, &pe32)) {
+            do {
+                Protocol::ProcessInfoPayload pInfo = {0};
+                pInfo.pid = pe32.th32ProcessID;
+
+                // Copy tên file .exe
+                WideCharToMultiByte(CP_UTF8, 0, pe32.szExeFile, -1, pInfo.name, sizeof(pInfo.name), NULL, NULL);
+                // Mở process để lấy dung lượng RAM
+                HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
+                if (hProcess) {
+                    PROCESS_MEMORY_COUNTERS pmc;
+                    if (GetProcessMemoryInfo(hProcess, &pmc, sizeof(pmc))) {
+                        pInfo.ramUsageMB = (uint32_t)(pmc.WorkingSetSize / (1024 * 1024));
+                    }
+                    CloseHandle(hProcess);
+                }
+                
+                pInfo.diskUsageMB = 0;
+                processList.push_back(pInfo);
+            } while (Process32Next(hSnapshot, &pe32));
+        }
+        
+        CloseHandle(hSnapshot);
+        return processList;
+    }
+
+    // ==========================================
+    // 5. BUỘC DỪNG TIẾN TRÌNH THEO PID
+    // ==========================================
+    bool KillProcess(uint32_t pid) {
+        HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if (hProcess == NULL) return false;
+        
+        bool result = TerminateProcess(hProcess, 0);
+        CloseHandle(hProcess);
+        return result;
     }
 }
