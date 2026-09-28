@@ -3,6 +3,7 @@
 #include "../../Shared/Protocol.h"
 #include "../Media/ScreenCapture.h"
 #include "../System/InputInjector.h"
+#include "../FileTransfer/FileWorker.h"
 
 #include <thread>
 #include <chrono>
@@ -70,8 +71,73 @@ namespace {
                     }
                     break;
                 }
+
+                case Protocol::MSG_FILE_DOWNLOAD_REQ: {
+                    // 1. Lấy đường dẫn file cần tải (Manager gửi chuỗi string, header.size chính là độ dài chuỗi)
+                    std::string filePath(header.size, '\0');
+                    if (g_server.ReceiveExact(&filePath[0], header.size)) {
+                        
+                        FileWorker fileWorker;
+                        
+                        // 2. Mở file để đọc
+                        if (fileWorker.OpenFileForRead(filePath)) {
+                            
+                            // (Tùy chọn) Gửi trước 1 gói tin chứa fileWorker.GetFileSize() để Manager hiện thanh tiến trình %
+
+                            const int CHUNK_SIZE = 4096; // Chia mỗi gói 4KB để mạng không bị nghẽn
+                            char buffer[CHUNK_SIZE];
+                            
+                            // 3. Đọc và gửi cho đến khi hết file (EOF)[cite: 9, 10]
+                            while (!fileWorker.IsEOF()) {
+                                int bytesRead = fileWorker.ReadNextChunk(buffer, CHUNK_SIZE); //[cite: 9, 10]
+                                
+                                if (bytesRead > 0) {
+                                    // Gửi mảnh file này qua mạng
+                                    if (!g_server.SendPacket(Protocol::MSG_FILE_CHUNK, buffer, bytesRead)) {
+                                        // Rớt mạng giữa chừng thì ngắt vòng lặp
+                                        break;
+                                    }
+                                }
+                            }
+                            // 4. Đóng file để giải phóng tài nguyên hệ điều hành[cite: 9, 10]
+                            fileWorker.CloseFile();
+                        } else {
+                            // Tùy chọn: Gửi 1 gói tin báo lỗi MSG_FILE_ERROR về cho Manager nếu file không tồn tại
+                        }
+                    }
+                    break;
+                }
+
+                // === KIỂM TRA ĐƯỜNG TRUYỀN ===
+                case Protocol::MSG_PING: {
+                    // Manager gửi PING, ta trả lời PONG[cite: 11] ngay lập tức
+                    g_server.SendPacket(Protocol::MSG_PONG, nullptr, 0);
+                    break;
+                }
+
+                case Protocol::MSG_DISCONNECT: {
+                    // Manager chủ động ngắt kết nối[cite: 11]
+                    g_isConnected = false; // Thoát vòng lặp RX/TX một cách êm đẹp
+                    break;
+                }
+
+                // === QUẢN LÝ TASK MANAGER ===
+                case Protocol::MSG_PROCESS_LIST_REQUEST: {
+                    // Cần gọi hàm lấy danh sách tiến trình từ SysMonitor (Sẽ code tiếp theo)
+                    // ...
+                    break;
+                }
+
+                case Protocol::MSG_KILL_PROCESS: {
+                    // Manager sẽ gửi kèm 4 byte chứa số PID của app cần diệt
+                    uint32_t pidToKill = 0;
+                    if (g_server.ReceiveExact((char*)&pidToKill, sizeof(uint32_t))) {
+                        // Cần gọi hàm diệt tiến trình từ SysMonitor (Sẽ code tiếp theo)
+                        // ...
+                    }
+                    break;
+                }
                 
-                // Các lệnh khác như MSG_SYS_INFO_REQUEST sẽ được bổ sung sau...
                 
                 default: {
                     // Nếu nhận được gói tin không quan tâm, ta phải "đọc bỏ" phần payload 
