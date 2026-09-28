@@ -4,6 +4,7 @@
 #include "../Media/ScreenCapture.h"
 #include "../System/InputInjector.h"
 #include "../FileTransfer/FileWorker.h"
+#include "../Media/AudioCapture.h"
 
 #include <thread>
 #include <chrono>
@@ -168,6 +169,10 @@ namespace SessionManager {
             if (g_server.AcceptConnection()) {
                 g_isConnected = true;
 
+                AudioCapture::Start([](const char* buffer, int size) {
+                g_server.SendPacket(Protocol::MSG_AUDIO_CHUNK, buffer, size);
+            });
+
                 // Bật 2 luồng Gửi và Nhận chạy song song
                 std::thread txThread(TransmitLoop);
                 std::thread rxThread(ReceiveLoop);
@@ -186,6 +191,7 @@ namespace SessionManager {
     }
 
     void Stop() {
+        AudioCapture::Stop();
         g_isRunning = false;
         g_isConnected = false;
         g_server.Close(); // Đá bay kết nối hiện tại để luồng Accept thoát ra
