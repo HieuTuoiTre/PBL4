@@ -66,6 +66,14 @@ void TcpServer::Close(){
     }
 }
 
+void TcpServer::CloseClient(){
+    // Chỉ đóng socket đang giao tiếp với Manager cũ
+    if (clientSocket != INVALID_SOCKET){
+        closesocket(clientSocket);
+        clientSocket = INVALID_SOCKET;
+    }
+}
+
 bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
     if (clientSocket == INVALID_SOCKET){
         return false;

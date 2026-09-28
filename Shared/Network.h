@@ -27,6 +27,7 @@ class TcpServer{
         bool Start(int port);
         bool AcceptConnection();
         void Close();
+        void CloseClient();
         
         //a char = 1 byte, basically a stream of bytes
         //pointer is for memory efficency, not forcing the cpu to clone the data
