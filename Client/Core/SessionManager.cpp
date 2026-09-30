@@ -4,6 +4,8 @@
 #include "../Media/ScreenCapture.h"
 #include "../System/InputInjector.h"
 #include "../FileTransfer/FileWorker.h"
+#include "../Media/AudioCapture.h"
+#include "../System/SysMonitor.h"
 
 #include <thread>
 #include <chrono>
@@ -73,36 +75,44 @@ namespace {
                 }
 
                 case Protocol::MSG_FILE_DOWNLOAD_REQ: {
-                    // 1. Lấy đường dẫn file cần tải (Manager gửi chuỗi string, header.size chính là độ dài chuỗi)
                     std::string filePath(header.size, '\0');
                     if (g_server.ReceiveExact(&filePath[0], header.size)) {
                         
                         FileWorker fileWorker;
-                        
-                        // 2. Mở file để đọc
                         if (fileWorker.OpenFileForRead(filePath)) {
                             
-                            // (Tùy chọn) Gửi trước 1 gói tin chứa fileWorker.GetFileSize() để Manager hiện thanh tiến trình %
+                            // ==========================================
+                            // BƯỚC 1: BÁO CÁO THÔNG TIN FILE (MSG_FILE_INFO)
+                            // ==========================================
+                            Protocol::FileInfoPayload fileInfo = {0};
+                            fileInfo.fileSize = fileWorker.GetFileSize();
+                            
+                            // Trích xuất tên file (cắt phần đuôi sau dấu gạch chéo cuối cùng)
+                            std::string fileName = filePath.substr(filePath.find_last_of("\\/") + 1);
+                            strncpy_s(fileInfo.fileName, fileName.c_str(), sizeof(fileInfo.fileName) - 1);
+                            
+                            g_server.SendPacket(Protocol::MSG_FILE_INFO, (char*)&fileInfo, sizeof(Protocol::FileInfoPayload));
 
-                            const int CHUNK_SIZE = 4096; // Chia mỗi gói 4KB để mạng không bị nghẽn
+                            // ==========================================
+                            // BƯỚC 2: BĂM VÀ GỬI DỮ LIỆU (MSG_FILE_CHUNK)
+                            // ==========================================
+                            const int CHUNK_SIZE = 4096;
                             char buffer[CHUNK_SIZE];
                             
-                            // 3. Đọc và gửi cho đến khi hết file (EOF)[cite: 9, 10]
                             while (!fileWorker.IsEOF()) {
-                                int bytesRead = fileWorker.ReadNextChunk(buffer, CHUNK_SIZE); //[cite: 9, 10]
-                                
+                                int bytesRead = fileWorker.ReadNextChunk(buffer, CHUNK_SIZE);
                                 if (bytesRead > 0) {
-                                    // Gửi mảnh file này qua mạng
                                     if (!g_server.SendPacket(Protocol::MSG_FILE_CHUNK, buffer, bytesRead)) {
-                                        // Rớt mạng giữa chừng thì ngắt vòng lặp
                                         break;
                                     }
                                 }
                             }
-                            // 4. Đóng file để giải phóng tài nguyên hệ điều hành[cite: 9, 10]
                             fileWorker.CloseFile();
-                        } else {
-                            // Tùy chọn: Gửi 1 gói tin báo lỗi MSG_FILE_ERROR về cho Manager nếu file không tồn tại
+
+                            // ==========================================
+                            // BƯỚC 3: BÁO KẾT THÚC FILE (MSG_FILE_END)
+                            // ==========================================
+                            g_server.SendPacket(Protocol::MSG_FILE_END, nullptr, 0);
                         }
                     }
                     break;
@@ -121,10 +131,36 @@ namespace {
                     break;
                 }
 
+                // === THÔNG SỐ HỆ THỐNG (CPU/RAM/DISK) ===
+                case Protocol::MSG_SYS_INFO_REQUEST: {
+                    Protocol::SysInfoPayload sysInfo = SysMonitor::GetSystemInfo();
+                    g_server.SendPacket(Protocol::MSG_SYS_INFO_RESPONSE, (char*)&sysInfo, sizeof(Protocol::SysInfoPayload));
+                    break;
+                }
+
+                // === DUYỆT Ổ ĐĨA & THƯ MỤC ===
+                case Protocol::MSG_DRIVE_LIST_REQUEST: {
+                    std::vector<std::string> drives = FileWorker::GetDrives();
+                    std::string payload = "";
+                    for (const auto& d : drives) payload += d + "\n";
+                    g_server.SendPacket(Protocol::MSG_DRIVE_LIST_RESPONSE, payload.c_str(), payload.size());
+                    break;
+                }
+
+                case Protocol::MSG_DIR_REQUEST: {
+                    std::string path(header.size, '\0');
+                    if (g_server.ReceiveExact(&path[0], header.size)) {
+                        std::string dirContent = FileWorker::GetDirectoryContent(path);
+                        g_server.SendPacket(Protocol::MSG_DIR_RESPONSE, dirContent.c_str(), dirContent.size());
+                    }
+                    break;
+                }
+
                 // === QUẢN LÝ TASK MANAGER ===
                 case Protocol::MSG_PROCESS_LIST_REQUEST: {
-                    // Cần gọi hàm lấy danh sách tiến trình từ SysMonitor (Sẽ code tiếp theo)
-                    // ...
+                    std::vector<Protocol::ProcessInfoPayload> pList = SysMonitor::GetProcessList();
+                    uint32_t totalBytes = pList.size() * sizeof(Protocol::ProcessInfoPayload);
+                    g_server.SendPacket(Protocol::MSG_PROCESS_LIST_RESPONSE, (char*)pList.data(), totalBytes);
                     break;
                 }
 
@@ -132,8 +168,7 @@ namespace {
                     // Manager sẽ gửi kèm 4 byte chứa số PID của app cần diệt
                     uint32_t pidToKill = 0;
                     if (g_server.ReceiveExact((char*)&pidToKill, sizeof(uint32_t))) {
-                        // Cần gọi hàm diệt tiến trình từ SysMonitor (Sẽ code tiếp theo)
-                        // ...
+                        SysMonitor::KillProcess(pidToKill);
                     }
                     break;
                 }
@@ -168,6 +203,10 @@ namespace SessionManager {
             if (g_server.AcceptConnection()) {
                 g_isConnected = true;
 
+                AudioCapture::Start([](const char* buffer, int size) {
+                g_server.SendPacket(Protocol::MSG_AUDIO_CHUNK, buffer, size);
+            });
+
                 // Bật 2 luồng Gửi và Nhận chạy song song
                 std::thread txThread(TransmitLoop);
                 std::thread rxThread(ReceiveLoop);
@@ -186,6 +225,7 @@ namespace SessionManager {
     }
 
     void Stop() {
+        AudioCapture::Stop();
         g_isRunning = false;
         g_isConnected = false;
         g_server.Close(); // Đá bay kết nối hiện tại để luồng Accept thoát ra
