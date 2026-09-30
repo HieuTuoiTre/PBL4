@@ -75,6 +75,9 @@ void TcpServer::CloseClient(){
 }
 
 bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
+
+    std::lock_guard<std::mutex> lock(sendMutex);
+
     if (clientSocket == INVALID_SOCKET){
         return false;
     }
@@ -157,6 +160,9 @@ void TcpClient::Close(){
 }
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
+
+    std::lock_guard<std::mutex> lock(sendMutex);
+    
     if (connectSocket == INVALID_SOCKET){
         return false;
     }
