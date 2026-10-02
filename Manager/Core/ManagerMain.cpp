@@ -1,63 +1,79 @@
-#include "../../Shared/Network.h"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
 #include <windows.h>
+#include <commctrl.h>
+#include "../UI/MainWindow.h"
+#include "../UI/ViewerWindow.h"
+#include "../UI/Dialogs.h"
+#include "../UI/UITheme.h"
+#include "../../Shared/Network.h"
 
+namespace {
 
-// Biến toàn cục để duy trì kết nối mạng trong suốt vòng đời cửa sổ
-TcpClient client;
-
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-        case WM_CREATE: {
-            // Thử kết nối tới Client đang chạy ở máy hiện tại, port 8080
-            if (client.Connect("127.0.0.1", 8080)) {
-                // Gửi tin nhắn đi
-                client.SendPacket(Protocol::MSG_PING, "Ping! Manager ket noi.", 22);
-                
-                // Chờ nhận phản hồi
-                char buffer[256] = {0};
-                client.ReceiveExact(buffer, sizeof(buffer));
-                
-                // Hiển thị phản hồi từ Client
-                MessageBoxA(hwnd, buffer, "Manager - Nhan phan hoi", MB_OK | MB_ICONINFORMATION);
-            } else {
-                MessageBoxA(hwnd, "Khong the ket noi toi Client. Hay bat Client truoc!", "Loi", MB_OK | MB_ICONERROR);
-            }
-            return 0;
-        }
-        case WM_DESTROY:
-            client.Close();
-            Network::Cleanup();
-            PostQuitMessage(0);
-            return 0;
+void InitializeCommonControls() {
+    using InitCommonControlsExProc = BOOL(WINAPI*)(const INITCOMMONCONTROLSEX*);
+    HMODULE commonControls = LoadLibraryW(L"comctl32.dll");
+    if (!commonControls) {
+        return;
     }
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+
+    const auto initialize = reinterpret_cast<InitCommonControlsExProc>(
+        GetProcAddress(commonControls, "InitCommonControlsEx"));
+    if (!initialize) {
+        return;
+    }
+
+    INITCOMMONCONTROLSEX controls{};
+    controls.dwSize = sizeof(controls);
+    controls.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS;
+    initialize(&controls);
+}
+
+} // namespace
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int commandShow) {
+    SetProcessDPIAware();
+    InitializeCommonControls();
+
+    if (!Network::Initialize()) {
+        MessageBoxW(nullptr, L"Không thể khởi tạo Winsock2!", L"Lỗi hệ thống", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    UITheme::Initialize();
+
+    if (!MainWindow::Register(hInstance) || !ViewerWindow::Register(hInstance) || !Dialogs::Register(hInstance)) {
+        MessageBoxW(nullptr, L"Không thể đăng ký lớp cửa sổ!", L"Lỗi hệ thống", MB_OK | MB_ICONERROR);
+        UITheme::Cleanup();
+        Network::Cleanup();
+        return 1;
+    }
+
+    HWND mainWindow = MainWindow::Create(hInstance, commandShow);
+    if (!mainWindow) {
+        MessageBoxW(nullptr, L"Không thể tạo cửa sổ chính!", L"Lỗi hệ thống", MB_OK | MB_ICONERROR);
+        UITheme::Cleanup();
+        Network::Cleanup();
+        return 1;
+    }
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    UITheme::Cleanup();
+    Network::Cleanup();
+    return static_cast<int>(msg.wParam);
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    Network::Initialize();
+    return wWinMain(hInstance, hPrevInstance, nullptr, nCmdShow);
+}
 
-    const wchar_t CLASS_NAME[]  = L"ManagerWindowClass";
-    WNDCLASS wc = { };
-    wc.lpfnWndProc   = WindowProc;
-    wc.hInstance     = hInstance;
-    wc.lpszClassName = CLASS_NAME;
-
-    RegisterClass(&wc);
-
-    HWND hwnd = CreateWindowEx(
-        0, CLASS_NAME, L"LanRemote - Manager",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
-        NULL, NULL, hInstance, NULL
-    );
-
-    if (hwnd == NULL) { return 0; }
-
-    ShowWindow(hwnd, nCmdShow);
-
-    MSG msg = { };
-    while (GetMessage(&msg, NULL, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
-    return 0;
+int main() {
+    return wWinMain(GetModuleHandleW(nullptr), nullptr, GetCommandLineW(), SW_SHOWNORMAL);
 }
