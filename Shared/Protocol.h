@@ -89,6 +89,13 @@ namespace Protocol
         uint64_t fileSize;
         char fileName[256];
     };
+
+    struct VideoDeltaHeader {
+        int32_t x;
+        int32_t y;
+        int32_t width;
+        int32_t height;
+    };
     
     #pragma pack(pop)
 }   

@@ -26,6 +26,9 @@ class TcpServer{
         TcpServer();
         ~TcpServer();
 
+        TcpServer(const TcpServer&) = delete;
+        TcpServer& operator=(const TcpServer&) = delete;
+
         bool Start(int port);
         bool AcceptConnection();
         void Close();
@@ -46,6 +49,9 @@ class TcpClient{
     public:
         TcpClient();
         ~TcpClient();
+
+        TcpClient(const TcpClient&) = delete;
+        TcpClient& operator=(const TcpClient&) = delete;
 
         bool Connect(const std::string& ip, int port);
         void Close();

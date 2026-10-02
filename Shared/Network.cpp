@@ -55,6 +55,7 @@ bool TcpServer::AcceptConnection(){
 }
 
 void TcpServer::Close(){
+    std::lock_guard<std::mutex> lock(sendMutex);
     if (clientSocket != INVALID_SOCKET){
         closesocket(clientSocket);
         clientSocket = INVALID_SOCKET;
@@ -67,6 +68,7 @@ void TcpServer::Close(){
 }
 
 void TcpServer::CloseClient(){
+    std::lock_guard<std::mutex> lock(sendMutex);
     // Chỉ đóng socket đang giao tiếp với Manager cũ
     if (clientSocket != INVALID_SOCKET){
         closesocket(clientSocket);
@@ -76,11 +78,11 @@ void TcpServer::CloseClient(){
 
 bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
 
-    std::lock_guard<std::mutex> lock(sendMutex);
-
     if (clientSocket == INVALID_SOCKET){
         return false;
     }
+
+    std::lock_guard<std::mutex> lock(sendMutex);
 
     Protocol::PacketHeader header;
     header.type = type;
@@ -153,6 +155,7 @@ bool TcpClient::Connect(const std::string& ip, int port){
 }
 
 void TcpClient::Close(){
+    std::lock_guard<std::mutex> lock(sendMutex);
     if (connectSocket != INVALID_SOCKET){
         closesocket(connectSocket);
         connectSocket = INVALID_SOCKET;
@@ -160,12 +163,12 @@ void TcpClient::Close(){
 }
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
-
-    std::lock_guard<std::mutex> lock(sendMutex);
     
     if (connectSocket == INVALID_SOCKET){
         return false;
     }
+
+    std::lock_guard<std::mutex> lock(sendMutex);
 
     Protocol::PacketHeader header;
     header.type = type;
