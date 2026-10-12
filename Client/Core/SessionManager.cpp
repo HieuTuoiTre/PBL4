@@ -83,43 +83,31 @@ namespace {
                 case Protocol::MSG_FILE_DOWNLOAD_REQ: {
                     std::string filePath(header.size, '\0');
                     if (g_server.ReceiveExact(&filePath[0], header.size)) {
-                        
-                        FileWorker fileWorker;
-                        if (fileWorker.OpenFileForRead(filePath)) {
-                            
-                            // ==========================================
-                            // BƯỚC 1: BÁO CÁO THÔNG TIN FILE (MSG_FILE_INFO)
-                            // ==========================================
-                            Protocol::FileInfoPayload fileInfo = {0};
-                            fileInfo.fileSize = fileWorker.GetFileSize();
-                            
-                            // Trích xuất tên file (cắt phần đuôi sau dấu gạch chéo cuối cùng)
-                            std::string fileName = filePath.substr(filePath.find_last_of("\\/") + 1);
-                            strncpy_s(fileInfo.fileName, fileName.c_str(), sizeof(fileInfo.fileName) - 1);
-                            
-                            g_server.SendPacket(Protocol::MSG_FILE_INFO, (char*)&fileInfo, sizeof(Protocol::FileInfoPayload));
+                        // Tách sang luồng riêng để không chặn luồng điều khiển chuột/phím
+                        std::thread([filePath]() {
+                            FileWorker fileWorker;
+                            if (fileWorker.OpenFileForRead(filePath)) {
+                                Protocol::FileInfoPayload fileInfo = {0};
+                                fileInfo.fileSize = fileWorker.GetFileSize();
+                                std::string fileName = filePath.substr(filePath.find_last_of("\\/") + 1);
+                                strncpy_s(fileInfo.fileName, fileName.c_str(), sizeof(fileInfo.fileName) - 1);
+                                
+                                g_server.SendPacket(Protocol::MSG_FILE_INFO, (char*)&fileInfo, sizeof(fileInfo));
 
-                            // ==========================================
-                            // BƯỚC 2: BĂM VÀ GỬI DỮ LIỆU (MSG_FILE_CHUNK)
-                            // ==========================================
-                            const int CHUNK_SIZE = 4096;
-                            char buffer[CHUNK_SIZE];
-                            
-                            while (!fileWorker.IsEOF()) {
-                                int bytesRead = fileWorker.ReadNextChunk(buffer, CHUNK_SIZE);
-                                if (bytesRead > 0) {
-                                    if (!g_server.SendPacket(Protocol::MSG_FILE_CHUNK, buffer, bytesRead)) {
-                                        break;
+                                // Tăng kích thước chunk từ 4KB lên 64KB để truyền file LAN nhanh hơn
+                                const int CHUNK_SIZE = 65536; 
+                                std::vector<char> buffer(CHUNK_SIZE);
+                                
+                                while (!fileWorker.IsEOF() && g_isConnected) {
+                                    int bytesRead = fileWorker.ReadNextChunk(buffer.data(), CHUNK_SIZE);
+                                    if (bytesRead > 0) {
+                                        if (!g_server.SendPacket(Protocol::MSG_FILE_CHUNK, buffer.data(), bytesRead)) break;
                                     }
                                 }
+                                fileWorker.CloseFile();
+                                g_server.SendPacket(Protocol::MSG_FILE_END, nullptr, 0);
                             }
-                            fileWorker.CloseFile();
-
-                            // ==========================================
-                            // BƯỚC 3: BÁO KẾT THÚC FILE (MSG_FILE_END)
-                            // ==========================================
-                            g_server.SendPacket(Protocol::MSG_FILE_END, nullptr, 0);
-                        }
+                        }).detach();
                     }
                     break;
                 }
@@ -220,6 +208,9 @@ namespace SessionManager {
                 // Chờ cho đến khi 1 trong 2 luồng báo lỗi rớt mạng (g_isConnected = false)
                 txThread.join();
                 rxThread.join();
+
+                // PHẢI DỪNG THU ÂM TRƯỚC KHI ĐÓNG CLIENT
+                AudioCapture::Stop();
                 
                 // Đóng socket của Manager hiện tại để chờ Manager mới
                 g_server.CloseClient(); 
