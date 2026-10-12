@@ -15,3 +15,10 @@
 .DS_Store
 Thumbs.db
 .vscode/c_cpp_properties.json
+
+#Bỏ qua ảnh
+*.png
+*.jpg
+
+.vscode/
+Instruction.txt

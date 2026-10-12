@@ -1,33 +1,61 @@
 #pragma once
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string>
-#include <iostream>
+#include <mutex>
+#include "Protocol.h"
 
-class Network {
-public:
-    static bool Initialize();
-    static void Cleanup();
+class Network{
+    public:
+        Network() = delete; //prevent empty network object
+
+        static bool Initialize();
+        static void Cleanup();
+};  
+
+//the host (controlled machine)
+class TcpServer{
+    private:
+        //invalid socket so it doesnt set the value to be a random value
+        SOCKET listenSocket = INVALID_SOCKET;   //forward to clientSocket
+        SOCKET clientSocket = INVALID_SOCKET;   //actual socket used by the client
+        std::mutex sendMutex; // THÊM KHÓA CHO SERVER
+
+    public:
+        TcpServer();
+        ~TcpServer();
+
+        TcpServer(const TcpServer&) = delete;
+        TcpServer& operator=(const TcpServer&) = delete;
+
+        bool Start(int port);
+        bool AcceptConnection();
+        void Close();
+        void CloseClient();
+        
+        //a char = 1 byte, basically a stream of bytes
+        //pointer is for memory efficency, not forcing the cpu to clone the data
+        bool SendPacket(Protocol::MessageType type, const char* payload, int payloadSize);
+        bool ReceiveExact(char* buffer, int length);
 };
 
-class TcpServer {
-private:
-    SOCKET serverSocket = INVALID_SOCKET;
-    SOCKET clientSocket = INVALID_SOCKET;
-public:
-    bool Start(int port);
-    bool AcceptClient();
-    bool SendData(const char* data, int length);
-    int ReceiveData(char* buffer, int bufferSize);
-    void Close();
-};
+//the client (control the machine)
+class TcpClient{
+    private:
+        SOCKET connectSocket = INVALID_SOCKET;
+        std::mutex sendMutex; // THÊM KHÓA CHO CLIENT
 
-class TcpClient {
-private:
-    SOCKET sock = INVALID_SOCKET;
-public:
-    bool Connect(const std::string& ip, int port);
-    bool SendData(const char* data, int length);
-    int ReceiveData(char* buffer, int bufferSize);
-    void Close();
+    public:
+        TcpClient();
+        ~TcpClient();
+
+        TcpClient(const TcpClient&) = delete;
+        TcpClient& operator=(const TcpClient&) = delete;
+
+        bool Connect(const std::string& ip, int port);
+        void Close();
+        
+        bool SendPacket(Protocol::MessageType type, const char* payload, int payloadSize);
+        bool ReceiveExact(char* buffer, int length);
 };

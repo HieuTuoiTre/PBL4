@@ -1,70 +1,208 @@
 #include "Network.h"
+#include "Protocol.h"
+#include <iostream>
 
-// --- Khởi tạo và Dọn dẹp Winsock ---
-bool Network::Initialize() {
-    WSADATA wsaData;
-    return WSAStartup(MAKEWORD(2, 2), &wsaData) == 0;
+//Network
+bool Network::Initialize(){ 
+    WSADATA wsadata;
+    // Thêm "== 0" để so sánh. Nếu WSAStartup trả về 0 (thành công) thì hàm này sẽ return true.
+    return WSAStartup(MAKEWORD(2,2), &wsadata) == 0;
 }
 
-void Network::Cleanup() {
+void Network::Cleanup(){
     WSACleanup();
 }
 
-// --- TCP Server (Dành cho máy bị điều khiển) ---
-bool TcpServer::Start(int port) {
-    serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (serverSocket == INVALID_SOCKET) return false;
+//Tcp server
+TcpServer::TcpServer() {}
 
-    sockaddr_in serverAddr = {};
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = INADDR_ANY; // Lắng nghe mọi IP
-    serverAddr.sin_port = htons(port);
+TcpServer::~TcpServer() {
+    Close();
+}
 
-    if (bind(serverSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) return false;
-    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) return false;
-    
+bool TcpServer::Start(int port){
+    listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listenSocket == INVALID_SOCKET){
+        return false;
+    }
+
+    sockaddr_in serverAddress;
+    serverAddress.sin_family = AF_INET;             //use ipv4
+    serverAddress.sin_addr.s_addr = INADDR_ANY;     //allow connection to any kind of ip (ethernet/lan)
+    serverAddress.sin_port = htons(port);           //at port
+
+    //actually create the socket at the address and the port
+    //socket error is returned if the port is already in use
+    if (bind(listenSocket, (sockaddr*)&serverAddress, sizeof(serverAddress)) == SOCKET_ERROR){
+        Close();
+        return false;
+    }
+
+    //SOMAXCONN allow multiple connection at the same time (view/audio/control)    
+    int result = listen(listenSocket, SOMAXCONN);
+    if (result == SOCKET_ERROR) {
+        return false;
+    }
     return true;
 }
 
-bool TcpServer::AcceptClient() {
-    clientSocket = accept(serverSocket, NULL, NULL);
-    return clientSocket != INVALID_SOCKET;
+bool TcpServer::AcceptConnection(){
+    clientSocket = accept(listenSocket, NULL, NULL);
+    if (clientSocket == INVALID_SOCKET){
+        return false;
+    }
+    return true;
 }
 
-bool TcpServer::SendData(const char* data, int length) {
-    return send(clientSocket, data, length, 0) != SOCKET_ERROR;
+void TcpServer::Close(){
+    std::lock_guard<std::mutex> lock(sendMutex);
+    if (clientSocket != INVALID_SOCKET){
+        closesocket(clientSocket);
+        clientSocket = INVALID_SOCKET;
+    }
+
+    if (listenSocket != INVALID_SOCKET){
+        closesocket(listenSocket);
+        listenSocket = INVALID_SOCKET;
+    }
 }
 
-int TcpServer::ReceiveData(char* buffer, int bufferSize) {
-    return recv(clientSocket, buffer, bufferSize, 0);
+void TcpServer::CloseClient(){
+    std::lock_guard<std::mutex> lock(sendMutex);
+    // Chỉ đóng socket đang giao tiếp với Manager cũ
+    if (clientSocket != INVALID_SOCKET){
+        closesocket(clientSocket);
+        clientSocket = INVALID_SOCKET;
+    }
 }
 
-void TcpServer::Close() {
-    if (clientSocket != INVALID_SOCKET) closesocket(clientSocket);
-    if (serverSocket != INVALID_SOCKET) closesocket(serverSocket);
+bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
+
+    if (clientSocket == INVALID_SOCKET){
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(sendMutex);
+
+    Protocol::PacketHeader header;
+    header.type = type;
+    header.size = payloadSize;
+
+    if (send(clientSocket, (const char*)&header, sizeof(Protocol::PacketHeader), 0) == SOCKET_ERROR){
+        return false;
+    }
+
+    if (payloadSize > 0){
+        int byteSent = 0;
+        while (byteSent < payloadSize) {
+            int result = send(clientSocket, payload + byteSent, payloadSize - byteSent, 0);
+            if (result == SOCKET_ERROR){
+                return false;
+            }
+            byteSent += result;
+        }
+    }
+
+    return true;
 }
 
-// --- TCP Client (Dành cho máy điều khiển) ---
-bool TcpClient::Connect(const std::string& ip, int port) {
-    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) return false;
+bool TcpServer::ReceiveExact(char* buffer, int length){
+    if (clientSocket == INVALID_SOCKET){
+        return false;
+    }
 
-    sockaddr_in serverAddr = {};
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(port);
-    inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr);
+    int byteReceived = 0;
+    while (byteReceived < length){
+        int result = recv(clientSocket, buffer + byteReceived, length - byteReceived, 0);
+        if (result <= 0){
+            return false;
+        }
+        byteReceived += result;
+    }
 
-    return connect(sock, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) != SOCKET_ERROR;
+    return true;
 }
 
-bool TcpClient::SendData(const char* data, int length) {
-    return send(sock, data, length, 0) != SOCKET_ERROR;
+//Tcp client
+TcpClient::TcpClient(){}
+
+TcpClient::~TcpClient(){
+    Close();
 }
 
-int TcpClient::ReceiveData(char* buffer, int bufferSize) {
-    return recv(sock, buffer, bufferSize, 0);
+bool TcpClient::Connect(const std::string& ip, int port){
+    connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+    if (connectSocket == INVALID_SOCKET){
+        return false;
+    }
+
+    sockaddr_in serverAddress;
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, ip.c_str(), &serverAddress.sin_addr) <= 0){
+        Close();
+        return false;
+    }
+
+    if (connect(connectSocket, (sockaddr*)&serverAddress, sizeof(serverAddress)) == SOCKET_ERROR){
+        Close();
+        return false;
+    }
+
+    return true;
 }
 
-void TcpClient::Close() {
-    if (sock != INVALID_SOCKET) closesocket(sock);
+void TcpClient::Close(){
+    std::lock_guard<std::mutex> lock(sendMutex);
+    if (connectSocket != INVALID_SOCKET){
+        closesocket(connectSocket);
+        connectSocket = INVALID_SOCKET;
+    }
+}
+
+bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
+    
+    if (connectSocket == INVALID_SOCKET){
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(sendMutex);
+
+    Protocol::PacketHeader header;
+    header.type = type;
+    header.size = payloadSize;
+
+    if (send(connectSocket, (const char*)&header, sizeof(Protocol::PacketHeader), 0) == SOCKET_ERROR) {
+        return false;
+    }
+
+    int byteSent = 0;
+    while (byteSent < payloadSize){
+        int result = send(connectSocket, payload + byteSent, payloadSize - byteSent, 0);
+        if (result == SOCKET_ERROR){
+            return false;
+        }
+        byteSent += result;
+    }
+
+    return true;
+}
+
+bool TcpClient::ReceiveExact(char* buffer, int length){
+    if (connectSocket == INVALID_SOCKET){
+        return false;
+    }
+
+    int byteReceived = 0;
+    while (byteReceived < length){
+        int result = recv(connectSocket, buffer + byteReceived, length - byteReceived, 0);
+        if (result <= 0){
+            return false;
+        }
+        byteReceived += result;
+    }
+
+    return true;
 }
