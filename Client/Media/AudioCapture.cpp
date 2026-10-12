@@ -74,8 +74,12 @@ namespace AudioCapture {
         pCaptureClient->Release();
         pAudioClient->Release();
         pDevice->Release();
+        if (FAILED(pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice)) || !pDevice) {
+        // Không có thiết bị phát âm thanh, dọn dẹp và thoát luồng an toàn
         pEnumerator->Release();
         CoUninitialize();
+        return;
+        }
     }
 
     bool Start(std::function<void(const char*, int)> onAudioData) {
