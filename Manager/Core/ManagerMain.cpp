@@ -138,9 +138,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             if (g_currentFrame) {
                 Gdiplus::Graphics graphics(hdc);
                 
-                // Khử răng cưa, loại bỏ viền nhòe góc
-                graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBilinear);
-                graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+                // TỐI ƯU FPS: Dùng LowQuality / NearestNeighbor và CompositingModeSourceCopy
+                // để GDI+ không tốn CPU tính toán pha trộn kênh Alpha và nội suy phức tạp
+                graphics.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+                graphics.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+                graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
                 
                 RECT rect;
                 GetClientRect(hwnd, &rect);
