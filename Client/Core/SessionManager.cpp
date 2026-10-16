@@ -6,11 +6,11 @@
 #include "../FileTransfer/FileWorker.h"
 #include "../Media/AudioCapture.h"
 #include "../System/SysMonitor.h"
-
 #include <thread>
 #include <chrono>
 #include <vector>
 #include <atomic>
+#include <cstring>
 
 namespace {
     TcpServer g_server;
@@ -21,49 +21,47 @@ namespace {
     // LUỒNG GỬI (TX): LIÊN TỤC CHỤP & GỬI MÀN HÌNH
     // ==========================================
     void TransmitLoop() {
-    if (!ScreenCapture::Initialize()) return;
-    
-    std::vector<char> frameBuffer;
-    frameBuffer.reserve(512 * 1024); // Cấp phát sẵn 512KB tránh cấp phát lại
-    int x, y, w, h;
+        if (!ScreenCapture::Initialize()) return;
+        
+        std::vector<char> frameBuffer;
+        frameBuffer.reserve(512 * 1024); // Cấp phát sẵn 512KB tránh cấp phát lại
+        int x, y, w, h;
 
-    while (g_isConnected && g_isRunning) {
-        auto startTime = std::chrono::steady_clock::now();
+        while (g_isConnected && g_isRunning) {
+            auto startTime = std::chrono::steady_clock::now();
 
-        if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
-            // frameBuffer đã chứa sẵn [VideoDeltaHeader + JPEG Data], gửi thẳng luôn!
-            if (!g_server.SendPacket(Protocol::MSG_VIDEO_FRAME, frameBuffer.data(), (int)frameBuffer.size())) {
-                g_isConnected = false;
-                break;
+            if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
+                // frameBuffer đã chứa sẵn [VideoDeltaHeader + JPEG Data], gửi thẳng luôn!
+                if (!g_server.SendPacket(Protocol::MSG_VIDEO_FRAME, frameBuffer.data(), (int)frameBuffer.size())) {
+                    g_isConnected = false;
+                    break;
+                }
+            }
+
+            // Giữ nhịp ~60 FPS thông minh: Trừ đi thời gian đã tốn để chụp & nén
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - startTime
+            ).count();
+            
+            if (elapsed < 16) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed));
             }
         }
-
-        // Giữ nhịp ~60 FPS thông minh: Trừ đi thời gian đã tốn để chụp & nén
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - startTime
-        ).count();
-        
-        if (elapsed < 16) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed));
-        }
-    }
-    ScreenCapture::Cleanup();
-}
+        ScreenCapture::Cleanup();
+    } // <-- Đã bổ sung dấu đóng ngoặc bị thiếu tại đây
 
     // ==========================================
-    // LUỒNG NHẬN (RX): CHỜ LỆNH CHUỘT / BÀN PHÍM
+    // LUỒNG NHẬN (RX): CHỜ LỆNH CHUỘT / BÀN PHÍM / HỆ THỐNG
     // ==========================================
     void ReceiveLoop() {
         while (g_isConnected && g_isRunning) {
             Protocol::PacketHeader header;
             
-            // 1. Nhận 5 byte Header trước để biết đang nhận loại tin nhắn gì
             if (!g_server.ReceiveExact((char*)&header, sizeof(Protocol::PacketHeader))) {
                 g_isConnected = false;
                 break;
             }
 
-            // 2. Dựa vào loại tin nhắn để bóc tách gói Payload đi kèm
             switch (header.type) {
                 
                 case Protocol::MSG_MOUSE_EVENT: {
@@ -96,7 +94,6 @@ namespace {
                                 
                                 g_server.SendPacket(Protocol::MSG_FILE_INFO, (char*)&fileInfo, sizeof(fileInfo));
 
-                                // Tăng kích thước chunk từ 4KB lên 64KB để truyền file LAN nhanh hơn
                                 const int CHUNK_SIZE = 65536; 
                                 std::vector<char> buffer(CHUNK_SIZE);
                                 
@@ -114,32 +111,27 @@ namespace {
                     break;
                 }
 
-                // === KIỂM TRA ĐƯỜNG TRUYỀN ===
                 case Protocol::MSG_PING: {
-                    // Manager gửi PING, ta trả lời PONG[cite: 11] ngay lập tức
                     g_server.SendPacket(Protocol::MSG_PONG, nullptr, 0);
                     break;
                 }
 
                 case Protocol::MSG_DISCONNECT: {
-                    // Manager chủ động ngắt kết nối[cite: 11]
-                    g_isConnected = false; // Thoát vòng lặp RX/TX một cách êm đẹp
+                    g_isConnected = false;
                     break;
                 }
 
-                // === THÔNG SỐ HỆ THỐNG (CPU/RAM/DISK) ===
                 case Protocol::MSG_SYS_INFO_REQUEST: {
                     Protocol::SysInfoPayload sysInfo = SysMonitor::GetSystemInfo();
                     g_server.SendPacket(Protocol::MSG_SYS_INFO_RESPONSE, (char*)&sysInfo, sizeof(Protocol::SysInfoPayload));
                     break;
                 }
 
-                // === DUYỆT Ổ ĐĨA & THƯ MỤC ===
                 case Protocol::MSG_DRIVE_LIST_REQUEST: {
                     std::vector<std::string> drives = FileWorker::GetDrives();
                     std::string payload = "";
                     for (const auto& d : drives) payload += d + "\n";
-                    g_server.SendPacket(Protocol::MSG_DRIVE_LIST_RESPONSE, payload.c_str(), payload.size());
+                    g_server.SendPacket(Protocol::MSG_DRIVE_LIST_RESPONSE, payload.c_str(), (int)payload.size());
                     break;
                 }
 
@@ -147,21 +139,19 @@ namespace {
                     std::string path(header.size, '\0');
                     if (g_server.ReceiveExact(&path[0], header.size)) {
                         std::string dirContent = FileWorker::GetDirectoryContent(path);
-                        g_server.SendPacket(Protocol::MSG_DIR_RESPONSE, dirContent.c_str(), dirContent.size());
+                        g_server.SendPacket(Protocol::MSG_DIR_RESPONSE, dirContent.c_str(), (int)dirContent.size());
                     }
                     break;
                 }
 
-                // === QUẢN LÝ TASK MANAGER ===
                 case Protocol::MSG_PROCESS_LIST_REQUEST: {
                     std::vector<Protocol::ProcessInfoPayload> pList = SysMonitor::GetProcessList();
-                    uint32_t totalBytes = pList.size() * sizeof(Protocol::ProcessInfoPayload);
+                    uint32_t totalBytes = (uint32_t)(pList.size() * sizeof(Protocol::ProcessInfoPayload));
                     g_server.SendPacket(Protocol::MSG_PROCESS_LIST_RESPONSE, (char*)pList.data(), totalBytes);
                     break;
                 }
 
                 case Protocol::MSG_KILL_PROCESS: {
-                    // Manager sẽ gửi kèm 4 byte chứa số PID của app cần diệt
                     uint32_t pidToKill = 0;
                     if (g_server.ReceiveExact((char*)&pidToKill, sizeof(uint32_t))) {
                         SysMonitor::KillProcess(pidToKill);
@@ -169,10 +159,7 @@ namespace {
                     break;
                 }
                 
-                
                 default: {
-                    // Nếu nhận được gói tin không quan tâm, ta phải "đọc bỏ" phần payload 
-                    // để không làm kẹt luồng byte của TCP
                     if (header.size > 0) {
                         std::vector<char> dump(header.size);
                         g_server.ReceiveExact(dump.data(), header.size);
@@ -189,35 +176,29 @@ namespace SessionManager {
     void StartServer(int port) {
         g_isRunning = true;
         
-        // Mở cổng 8080 để chờ Manager
         if (!g_server.Start(port)) {
             return;
         }
 
-        // Vòng lặp chờ kết nối (Luôn mở để nếu Manager rớt mạng, họ có thể kết nối lại)
         while (g_isRunning) {
             if (g_server.AcceptConnection()) {
                 g_isConnected = true;
 
                 AudioCapture::Start([](const char* buffer, int size) {
-                g_server.SendPacket(Protocol::MSG_AUDIO_CHUNK, buffer, size);
-            });
+                    if (g_isConnected) {
+                        g_server.SendPacket(Protocol::MSG_AUDIO_CHUNK, buffer, size);
+                    }
+                });
 
-                // Bật 2 luồng Gửi và Nhận chạy song song
                 std::thread txThread(TransmitLoop);
                 std::thread rxThread(ReceiveLoop);
 
-                // Chờ cho đến khi 1 trong 2 luồng báo lỗi rớt mạng (g_isConnected = false)
                 txThread.join();
                 rxThread.join();
 
-                // PHẢI DỪNG THU ÂM TRƯỚC KHI ĐÓNG CLIENT
                 AudioCapture::Stop();
-                
-                // Đóng socket của Manager hiện tại để chờ Manager mới
                 g_server.CloseClient(); 
             } else {
-                // Nếu accept lỗi, ngủ 1 chút rồi thử lại
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         }
@@ -227,6 +208,6 @@ namespace SessionManager {
         AudioCapture::Stop();
         g_isRunning = false;
         g_isConnected = false;
-        g_server.Close(); // Đá bay kết nối hiện tại để luồng Accept thoát ra
+        g_server.Close();
     }
 }
