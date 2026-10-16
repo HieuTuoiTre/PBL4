@@ -21,32 +21,34 @@ namespace {
     // LUỒNG GỬI (TX): LIÊN TỤC CHỤP & GỬI MÀN HÌNH
     // ==========================================
     void TransmitLoop() {
-        if (!ScreenCapture::Initialize()) return;
-        
-        std::vector<char> frameBuffer;
-        int x, y, w, h; // Biến hứng tọa độ từ hàm Capture
+    if (!ScreenCapture::Initialize()) return;
+    
+    std::vector<char> frameBuffer;
+    frameBuffer.reserve(512 * 1024); // Cấp phát sẵn 512KB tránh cấp phát lại
+    int x, y, w, h;
 
-        while (g_isConnected && g_isRunning) {
-            // Hàm sẽ trả về False nếu màn hình đứng im (không tốn băng thông)
-            if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
-                
-                // Khởi tạo Header chứa tọa độ
-                Protocol::VideoDeltaHeader delta = {x, y, w, h};
-                
-                // Nối Header tọa độ và Mảng byte JPEG thành 1 cục Payload duy nhất
-                std::vector<char> packetData(sizeof(delta) + frameBuffer.size());
-                memcpy(packetData.data(), &delta, sizeof(delta));
-                memcpy(packetData.data() + sizeof(delta), frameBuffer.data(), frameBuffer.size());
-                
-                if (!g_server.SendPacket(Protocol::MSG_VIDEO_FRAME, packetData.data(), packetData.size())) {
-                    g_isConnected = false;
-                    break;
-                }
+    while (g_isConnected && g_isRunning) {
+        auto startTime = std::chrono::steady_clock::now();
+
+        if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
+            // frameBuffer đã chứa sẵn [VideoDeltaHeader + JPEG Data], gửi thẳng luôn!
+            if (!g_server.SendPacket(Protocol::MSG_VIDEO_FRAME, frameBuffer.data(), (int)frameBuffer.size())) {
+                g_isConnected = false;
+                break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(14));
         }
-        ScreenCapture::Cleanup();
+
+        // Giữ nhịp ~60 FPS thông minh: Trừ đi thời gian đã tốn để chụp & nén
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime
+        ).count();
+        
+        if (elapsed < 16) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed));
+        }
     }
+    ScreenCapture::Cleanup();
+}
 
     // ==========================================
     // LUỒNG NHẬN (RX): CHỜ LỆNH CHUỘT / BÀN PHÍM
@@ -83,43 +85,31 @@ namespace {
                 case Protocol::MSG_FILE_DOWNLOAD_REQ: {
                     std::string filePath(header.size, '\0');
                     if (g_server.ReceiveExact(&filePath[0], header.size)) {
-                        
-                        FileWorker fileWorker;
-                        if (fileWorker.OpenFileForRead(filePath)) {
-                            
-                            // ==========================================
-                            // BƯỚC 1: BÁO CÁO THÔNG TIN FILE (MSG_FILE_INFO)
-                            // ==========================================
-                            Protocol::FileInfoPayload fileInfo = {0};
-                            fileInfo.fileSize = fileWorker.GetFileSize();
-                            
-                            // Trích xuất tên file (cắt phần đuôi sau dấu gạch chéo cuối cùng)
-                            std::string fileName = filePath.substr(filePath.find_last_of("\\/") + 1);
-                            strncpy_s(fileInfo.fileName, fileName.c_str(), sizeof(fileInfo.fileName) - 1);
-                            
-                            g_server.SendPacket(Protocol::MSG_FILE_INFO, (char*)&fileInfo, sizeof(Protocol::FileInfoPayload));
+                        // Tách sang luồng riêng để không chặn luồng điều khiển chuột/phím
+                        std::thread([filePath]() {
+                            FileWorker fileWorker;
+                            if (fileWorker.OpenFileForRead(filePath)) {
+                                Protocol::FileInfoPayload fileInfo = {0};
+                                fileInfo.fileSize = fileWorker.GetFileSize();
+                                std::string fileName = filePath.substr(filePath.find_last_of("\\/") + 1);
+                                strncpy_s(fileInfo.fileName, fileName.c_str(), sizeof(fileInfo.fileName) - 1);
+                                
+                                g_server.SendPacket(Protocol::MSG_FILE_INFO, (char*)&fileInfo, sizeof(fileInfo));
 
-                            // ==========================================
-                            // BƯỚC 2: BĂM VÀ GỬI DỮ LIỆU (MSG_FILE_CHUNK)
-                            // ==========================================
-                            const int CHUNK_SIZE = 4096;
-                            char buffer[CHUNK_SIZE];
-                            
-                            while (!fileWorker.IsEOF()) {
-                                int bytesRead = fileWorker.ReadNextChunk(buffer, CHUNK_SIZE);
-                                if (bytesRead > 0) {
-                                    if (!g_server.SendPacket(Protocol::MSG_FILE_CHUNK, buffer, bytesRead)) {
-                                        break;
+                                // Tăng kích thước chunk từ 4KB lên 64KB để truyền file LAN nhanh hơn
+                                const int CHUNK_SIZE = 65536; 
+                                std::vector<char> buffer(CHUNK_SIZE);
+                                
+                                while (!fileWorker.IsEOF() && g_isConnected) {
+                                    int bytesRead = fileWorker.ReadNextChunk(buffer.data(), CHUNK_SIZE);
+                                    if (bytesRead > 0) {
+                                        if (!g_server.SendPacket(Protocol::MSG_FILE_CHUNK, buffer.data(), bytesRead)) break;
                                     }
                                 }
+                                fileWorker.CloseFile();
+                                g_server.SendPacket(Protocol::MSG_FILE_END, nullptr, 0);
                             }
-                            fileWorker.CloseFile();
-
-                            // ==========================================
-                            // BƯỚC 3: BÁO KẾT THÚC FILE (MSG_FILE_END)
-                            // ==========================================
-                            g_server.SendPacket(Protocol::MSG_FILE_END, nullptr, 0);
-                        }
+                        }).detach();
                     }
                     break;
                 }
@@ -220,6 +210,9 @@ namespace SessionManager {
                 // Chờ cho đến khi 1 trong 2 luồng báo lỗi rớt mạng (g_isConnected = false)
                 txThread.join();
                 rxThread.join();
+
+                // PHẢI DỪNG THU ÂM TRƯỚC KHI ĐÓNG CLIENT
+                AudioCapture::Stop();
                 
                 // Đóng socket của Manager hiện tại để chờ Manager mới
                 g_server.CloseClient(); 
