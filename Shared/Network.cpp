@@ -51,6 +51,8 @@ bool TcpServer::AcceptConnection(){
     if (clientSocket == INVALID_SOCKET){
         return false;
     }
+    BOOL nodelay = TRUE;
+    setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
     return true;
 }
 
@@ -150,6 +152,9 @@ bool TcpClient::Connect(const std::string& ip, int port){
         Close();
         return false;
     }
+
+    BOOL nodelay = TRUE;
+    setsockopt(connectSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
 
     return true;
 }

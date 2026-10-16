@@ -21,32 +21,34 @@ namespace {
     // LUỒNG GỬI (TX): LIÊN TỤC CHỤP & GỬI MÀN HÌNH
     // ==========================================
     void TransmitLoop() {
-        if (!ScreenCapture::Initialize()) return;
-        
-        std::vector<char> frameBuffer;
-        int x, y, w, h; // Biến hứng tọa độ từ hàm Capture
+    if (!ScreenCapture::Initialize()) return;
+    
+    std::vector<char> frameBuffer;
+    frameBuffer.reserve(512 * 1024); // Cấp phát sẵn 512KB tránh cấp phát lại
+    int x, y, w, h;
 
-        while (g_isConnected && g_isRunning) {
-            // Hàm sẽ trả về False nếu màn hình đứng im (không tốn băng thông)
-            if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
-                
-                // Khởi tạo Header chứa tọa độ
-                Protocol::VideoDeltaHeader delta = {x, y, w, h};
-                
-                // Nối Header tọa độ và Mảng byte JPEG thành 1 cục Payload duy nhất
-                std::vector<char> packetData(sizeof(delta) + frameBuffer.size());
-                memcpy(packetData.data(), &delta, sizeof(delta));
-                memcpy(packetData.data() + sizeof(delta), frameBuffer.data(), frameBuffer.size());
-                
-                if (!g_server.SendPacket(Protocol::MSG_VIDEO_FRAME, packetData.data(), packetData.size())) {
-                    g_isConnected = false;
-                    break;
-                }
+    while (g_isConnected && g_isRunning) {
+        auto startTime = std::chrono::steady_clock::now();
+
+        if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
+            // frameBuffer đã chứa sẵn [VideoDeltaHeader + JPEG Data], gửi thẳng luôn!
+            if (!g_server.SendPacket(Protocol::MSG_VIDEO_FRAME, frameBuffer.data(), (int)frameBuffer.size())) {
+                g_isConnected = false;
+                break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(14));
         }
-        ScreenCapture::Cleanup();
+
+        // Giữ nhịp ~60 FPS thông minh: Trừ đi thời gian đã tốn để chụp & nén
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime
+        ).count();
+        
+        if (elapsed < 16) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed));
+        }
     }
+    ScreenCapture::Cleanup();
+}
 
     // ==========================================
     // LUỒNG NHẬN (RX): CHỜ LỆNH CHUỘT / BÀN PHÍM
