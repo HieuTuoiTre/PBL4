@@ -1,207 +1,173 @@
 #include "../../Shared/Network.h"
 #include "../../Shared/Protocol.h"
 #include <windows.h>
+#include <windowsx.h>
 #include <gdiplus.h>
 #include <thread>
 #include <vector>
 
 #pragma comment(lib, "gdiplus.lib")
 
-// --- CÁC BIẾN TOÀN CỤC ---
-TcpClient client;
-Gdiplus::Image* g_currentFrame = nullptr;
+TcpClient g_client;
+Gdiplus::Image* g_frame = nullptr;
 CRITICAL_SECTION g_cs;
+HWND g_hwnd = NULL;
 
-// ==========================================
-// LUỒNG CHẠY NGẦM: NHẬN ẢNH TỪ CLIENT
-// ==========================================
-void ReceiveLoop(HWND hwnd) {
-    while (true) {
-        Protocol::PacketHeader header;
+// BIẾN TRẠNG THÁI: true = Đang điều khiển, false = Chỉ xem
+bool g_isControlling = true; 
+
+// LUỒNG NGẦM: NHẬN VÀ GIẢI MÃ ẢNH
+void ReceiveLoop() {
+    Protocol::PacketHeader hdr;
+    while (g_client.ReceiveExact((char*)&hdr, sizeof(hdr))) {
+        if (hdr.size <= 0) continue;
         
-        if (!client.ReceiveExact((char*)&header, sizeof(header))) break;
+        std::vector<char> buf(hdr.size);
+        if (!g_client.ReceiveExact(buf.data(), hdr.size)) break;
+        
+        if (hdr.type == Protocol::MSG_VIDEO_FRAME) {
+            Protocol::VideoDeltaHeader delta;
+            memcpy(&delta, buf.data(), sizeof(delta));
+            
+            int jpgSize = buf.size() - sizeof(delta);
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, jpgSize);
+            if (!hMem) continue;
+            memcpy(GlobalLock(hMem), buf.data() + sizeof(delta), jpgSize);
+            GlobalUnlock(hMem);
 
-        if (header.size > 0) {
-            std::vector<char> buffer(header.size);
-            if (!client.ReceiveExact(buffer.data(), header.size)) break;
-
-            if (header.type == Protocol::MSG_VIDEO_FRAME) {
-                // 1. Bóc tách Tọa độ Delta từ đầu mảng byte
-                Protocol::VideoDeltaHeader delta;
-                memcpy(&delta, buffer.data(), sizeof(delta));
-                
-                // 2. Tách phần ảnh JPEG ở phía sau
-                int jpegSize = buffer.size() - sizeof(delta);
-                HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, jpegSize);
-                
-                if (hMem) {
-                    void* pData = GlobalLock(hMem);
-                    memcpy(pData, buffer.data() + sizeof(delta), jpegSize);
-                    GlobalUnlock(hMem);
-
-                    IStream* pStream = nullptr;
-                    if (CreateStreamOnHGlobal(hMem, TRUE, &pStream) == S_OK) {
-                        Gdiplus::Image* deltaImage = Gdiplus::Image::FromStream(pStream);
-                        
-                        if (deltaImage && deltaImage->GetLastStatus() == Gdiplus::Ok) {
-                            
-                            EnterCriticalSection(&g_cs);
-                            // Nếu là lần đầu tiên, cấp phát 1 tờ giấy trắng bằng kích thước thật của máy Client
-                            if (!g_currentFrame) {
-                                g_currentFrame = new Gdiplus::Bitmap(delta.width, delta.height, PixelFormat32bppARGB);
-                            }
-                            
-                            // Dùng bút vẽ mảnh ảnh nhỏ đè lên tờ giấy lớn tại đúng tọa độ x, y
-                            Gdiplus::Graphics g(g_currentFrame);
-                            g.DrawImage(deltaImage, delta.x, delta.y, delta.width, delta.height);
-                            LeaveCriticalSection(&g_cs);
-
-                            InvalidateRect(hwnd, NULL, FALSE);
-                        }
-                        
-                        if (deltaImage) delete deltaImage;
-                        pStream->Release(); 
-                    } else {
-                        GlobalFree(hMem);
-                    }
+            IStream* pStream = nullptr;
+            if (CreateStreamOnHGlobal(hMem, TRUE, &pStream) == S_OK) {
+                Gdiplus::Image* img = Gdiplus::Image::FromStream(pStream);
+                if (img && img->GetLastStatus() == Gdiplus::Ok) {
+                    EnterCriticalSection(&g_cs);
+                    if (!g_frame) g_frame = new Gdiplus::Bitmap(delta.width, delta.height, PixelFormat32bppARGB);
+                    Gdiplus::Graphics g(g_frame);
+                    g.DrawImage(img, delta.x, delta.y, delta.width, delta.height);
+                    LeaveCriticalSection(&g_cs);
+                    
+                    InvalidateRect(g_hwnd, NULL, FALSE);
                 }
-            }
+                if (img) delete img;
+                pStream->Release();
+            } else GlobalFree(hMem);
         }
     }
 }
 
-// ==========================================
-// LUỒNG CHÍNH: XỬ LÝ GIAO DIỆN WINDOWS (UI)
-// ==========================================
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-        case WM_CREATE: {
-            if (client.Connect("127.0.0.1", 8080)) {
-                std::thread(ReceiveLoop, hwnd).detach();
-            } else {
-                MessageBoxW(hwnd, L"Khong the ket noi toi Client!", L"Loi", MB_OK | MB_ICONERROR);
-            }
-            return 0;
-        }
+// GỬI CHUỘT (CÓ KIỂM TRA TRẠNG THÁI)
+void SendMouse(uint8_t action, uint8_t btn, LPARAM lp, int16_t wheel = 0) {
+    if (!g_frame || !g_isControlling) return; // Chặn lại nếu đang "Chỉ xem"
+    RECT r; GetClientRect(g_hwnd, &r);
+    
+    Protocol::MousePayload mp;
+    mp.actionType = action;
+    mp.buttonType = btn;
+    mp.x = (int16_t)(GET_X_LPARAM(lp) * g_frame->GetWidth() / r.right);
+    mp.y = (int16_t)(GET_Y_LPARAM(lp) * g_frame->GetHeight() / r.bottom);
+    mp.wheelDelta = wheel;
+    
+    g_client.SendPacket(Protocol::MSG_MOUSE_EVENT, (char*)&mp, sizeof(mp));
+}
 
-        // ==========================================
-        // ÉP TỶ LỆ KHUNG HÌNH 16:9 KHI KÉO CỬA SỔ
-        // ==========================================
-        case WM_SIZING: {
-            RECT* pRect = (RECT*)lParam;
-            int dragEdge = wParam;
+// GỬI BÀN PHÍM (CÓ KIỂM TRA TRẠNG THÁI)
+void SendKey(WPARAM wp, uint8_t isDown) {
+    if (!g_isControlling) return; // Chặn lại nếu đang "Chỉ xem"
+    Protocol::KeyboardPayload kp;
+    kp.vkCode = (uint32_t)wp;
+    kp.isDown = isDown;
+    g_client.SendPacket(Protocol::MSG_KEY_EVENT, (char*)&kp, sizeof(kp));
+}
 
-            // Tính độ dày của viền cửa sổ và thanh Title bar
-            RECT winRect, clientRect;
-            GetWindowRect(hwnd, &winRect);
-            GetClientRect(hwnd, &clientRect);
-            int borderW = (winRect.right - winRect.left) - clientRect.right;
-            int borderH = (winRect.bottom - winRect.top) - clientRect.bottom;
-
-            // Tính kích thước phần hiển thị bên trong
-            int clientW = (pRect->right - pRect->left) - borderW;
-            int clientH = (pRect->bottom - pRect->top) - borderH;
-
-            // Cố định tỷ lệ 16:9
-            if (dragEdge == WMSZ_LEFT || dragEdge == WMSZ_RIGHT || dragEdge == WMSZ_BOTTOMLEFT || dragEdge == WMSZ_TOPLEFT) {
-                // Kéo chiều ngang -> Cập nhật chiều dọc
-                clientH = clientW * 9 / 16;
-            } else {
-                // Kéo chiều dọc -> Cập nhật chiều ngang
-                clientW = clientH * 16 / 9;
-            }
-
-            // Gán lại kích thước vào con trỏ của Windows
-            if (dragEdge == WMSZ_LEFT || dragEdge == WMSZ_TOPLEFT || dragEdge == WMSZ_BOTTOMLEFT) {
-                pRect->left = pRect->right - clientW - borderW;
-            } else {
-                pRect->right = pRect->left + clientW + borderW;
-            }
-
-            if (dragEdge == WMSZ_TOP || dragEdge == WMSZ_TOPLEFT || dragEdge == WMSZ_TOPRIGHT) {
-                pRect->top = pRect->bottom - clientH - borderH;
-            } else {
-                pRect->bottom = pRect->top + clientH + borderH;
-            }
-            return TRUE;
-        }
-
-        // Ngăn Windows xóa nền đen mỗi khi vẽ frame mới (Chống nhấp nháy màn hình)
-        case WM_ERASEBKGND:
-            return 1; 
-
+// LUỒNG CHÍNH: BẮT SỰ KIỆN VÀ VẼ
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
-
             EnterCriticalSection(&g_cs);
-            if (g_currentFrame) {
-                Gdiplus::Graphics graphics(hdc);
-                
-                // Khử răng cưa, loại bỏ viền nhòe góc
-                graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBilinear);
-                graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-                
-                RECT rect;
-                GetClientRect(hwnd, &rect);
-                
-                graphics.DrawImage(g_currentFrame, 0, 0, rect.right, rect.bottom);
+            if (g_frame) {
+                Gdiplus::Graphics g(hdc);
+                g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBilinear);
+                RECT r; GetClientRect(hwnd, &r);
+                g.DrawImage(g_frame, 0, 0, r.right, r.bottom);
             }
             LeaveCriticalSection(&g_cs);
-
             EndPaint(hwnd, &ps);
             return 0;
         }
+        case WM_ERASEBKGND: return 1;
 
-        case WM_DESTROY:
-            client.Close();
-            PostQuitMessage(0);
-            return 0;
+        // --- BẮT BÀN PHÍM VÀ KIỂM TRA CTRL + ALT ---
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: { // SYSKEYDOWN dùng để bắt phím Alt
+            // Kiểm tra xem cả Ctrl và Alt có đang bị đè không
+            if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000)) {
+                // Bit thứ 30 = 0 nghĩa là phím vừa được bấm xuống (không phải giữ đè auto-repeat)
+                if ((lp & (1 << 30)) == 0) {
+                    g_isControlling = !g_isControlling; // Đảo trạng thái
+                    
+                    // Cập nhật tiêu đề cửa sổ để người dùng biết
+                    SetWindowTextW(hwnd, g_isControlling ? 
+                        L"LanRemote - [ĐANG ĐIỀU KHIỂN] (Nhấn Ctrl+Alt để Thoát)" : 
+                        L"LanRemote - [CHỈ XEM] (Nhấn Ctrl+Alt để Điều khiển)");
+                }
+                return 0; // Chặn không gửi tổ hợp phím này đi
+            }
+            
+            if (g_isControlling) { SendKey(wp, 1); return 0; }
+            break; // Nếu đang "Chỉ xem", nhả ra để Windows tự xử lý (ví dụ Alt+F4 tắt app)
+        }
+        case WM_KEYUP:
+        case WM_SYSKEYUP: {
+            if (g_isControlling) { SendKey(wp, 0); return 0; }
+            break;
+        }
+
+        // --- BẮT SỰ KIỆN CHUỘT ---
+        case WM_MOUSEMOVE:   SendMouse(Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE, lp); return 0;
+        case WM_LBUTTONDOWN: SendMouse(Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_LEFT, lp); return 0;
+        case WM_LBUTTONUP:   SendMouse(Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_LEFT, lp); return 0;
+        case WM_RBUTTONDOWN: SendMouse(Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT, lp); return 0;
+        case WM_RBUTTONUP:   SendMouse(Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_RIGHT, lp); return 0;
+        case WM_MOUSEWHEEL:  SendMouse(Protocol::MOUSE_ACTION_WHEEL, Protocol::BUTTON_NONE, lp, GET_WHEEL_DELTA_WPARAM(wp)); return 0;
+
+        case WM_DESTROY: PostQuitMessage(0); return 0;
     }
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-// ==========================================
-// HÀM KHỞI CHẠY (ENTRY POINT)
-// ==========================================
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // 1. Cấp quyền chụp và vẽ theo chuẩn Pixel thật (Bỏ qua cấu hình Scale màn hình của Windows)
-    SetProcessDPIAware();
-
+// ENTRY POINT
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
+    SetProcessDPIAware(); 
     Network::Initialize();
     InitializeCriticalSection(&g_cs);
+    ULONG_PTR gdiToken; 
+    Gdiplus::GdiplusStartupInput gdiInput;
+    Gdiplus::GdiplusStartup(&gdiToken, &gdiInput, NULL);
 
-    ULONG_PTR gdiplusToken;
-    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
-
-    const wchar_t CLASS_NAME[] = L"ManagerWindowClass";
-    WNDCLASSW wc = { };
-    wc.lpfnWndProc = WindowProc;
-    wc.hInstance = hInstance;
-    wc.lpszClassName = CLASS_NAME;
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = WndProc;
+    wc.lpszClassName = L"MgrWindow";
     RegisterClassW(&wc);
+    
+    // Tiêu đề mặc định khi mới bật
+    g_hwnd = CreateWindowExW(0, L"MgrWindow", L"LanRemote - [ĐANG ĐIỀU KHIỂN] (Nhấn Ctrl+Alt để Thoát)", 
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720, 0, 0, hInst, 0);
 
-    // Kích thước khởi tạo mặc định theo chuẩn 16:9
-    HWND hwnd = CreateWindowExW(
-        0, CLASS_NAME, L"LanRemote - Manager (Dev 3)",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
-        NULL, NULL, hInstance, NULL
-    );
-
-    if (hwnd == NULL) return 0;
-    ShowWindow(hwnd, nCmdShow);
-
-    MSG msg = { };
-    while (GetMessage(&msg, NULL, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+    if (g_client.Connect("127.0.0.1", 8080)) {
+        std::thread(ReceiveLoop).detach();
     }
 
-    if (g_currentFrame) delete g_currentFrame;
-    Gdiplus::GdiplusShutdown(gdiplusToken);
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) { 
+        TranslateMessage(&msg); 
+        DispatchMessage(&msg); 
+    }
+
+    g_client.Close();
+    if (g_frame) delete g_frame;
+    Gdiplus::GdiplusShutdown(gdiToken);
     DeleteCriticalSection(&g_cs);
     Network::Cleanup();
-
     return 0;
 }
