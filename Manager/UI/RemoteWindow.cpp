@@ -11,7 +11,8 @@
 namespace {
     HWND g_hwnd = NULL;
     TcpClient* g_client = nullptr;
-    Gdiplus::Image* g_frame = nullptr;
+    Gdiplus::Bitmap* g_frame = nullptr;
+    IStream* g_decodeStream = nullptr; // Tái sử dụng 1 Stream duy nhất để tối ưu FPS
     CRITICAL_SECTION g_cs;
 
     int g_fps = 0;
@@ -24,40 +25,48 @@ namespace {
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
             case WM_PAINT: {
-                PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
-                RECT r; GetClientRect(hwnd, &r);
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                RECT r;
+                GetClientRect(hwnd, &r);
 
-                RECT toolbarRect = {0, 0, r.right, TOOLBAR_HEIGHT};
-                HBRUSH brush = CreateSolidBrush(RGB(45, 45, 48));
-                FillRect(hdc, &toolbarRect, brush);
-                DeleteObject(brush);
+                if (ps.rcPaint.top < TOOLBAR_HEIGHT) {
+                    RECT toolbarRect = {0, 0, r.right, TOOLBAR_HEIGHT};
+                    HBRUSH brush = CreateSolidBrush(RGB(45, 45, 48));
+                    FillRect(hdc, &toolbarRect, brush);
+                    DeleteObject(brush);
 
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(255, 255, 255));
-                HFONT hFont = CreateFontW(15, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
-                HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+                    SetBkMode(hdc, TRANSPARENT);
+                    SetTextColor(hdc, RGB(255, 255, 255));
+                    HFONT hFont = CreateFontW(15, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
+                    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
-                std::wstring statusStr = (InputHandler::IsControlling() ? L"🔴 ĐIỀU KHIỂN" : L"👁️ CHỈ XEM")
-                                       + std::wstring(AudioPlayer::IsMuted() ? L" | 🔇 MUTE" : L" | 🔊 LOA");
-                std::wstring shortcutStr = L"[Ctrl+Tab: TaskMgr] | [Ctrl+E: File] | [Ctrl+M: Loa] | [Ctrl+Alt: Chế độ]";
-                std::wstring fpsStr = L"FPS: " + std::to_wstring(g_fps);
+                    std::wstring statusStr = (InputHandler::IsControlling() ? L"🔴 ĐIỀU KHIỂN" : L"👁️ CHỈ XEM")
+                                           + std::wstring(AudioPlayer::IsMuted() ? L" | 🔇 MUTE" : L" | 🔊 LOA");
+                    std::wstring shortcutStr = L"[Ctrl+Tab: TaskMgr] | [Ctrl+E: File] | [Ctrl+M: Loa] | [Ctrl+Alt: Chế độ]";
+                    std::wstring fpsStr = L"FPS: " + std::to_wstring(g_fps);
 
-                RECT leftRect = toolbarRect; leftRect.left += 12;
-                DrawTextW(hdc, statusStr.c_str(), -1, &leftRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                DrawTextW(hdc, shortcutStr.c_str(), -1, &toolbarRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                RECT rightRect = toolbarRect; rightRect.right -= 12;
-                DrawTextW(hdc, fpsStr.c_str(), -1, &rightRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                    RECT leftRect = toolbarRect; leftRect.left += 12;
+                    DrawTextW(hdc, statusStr.c_str(), -1, &leftRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    DrawTextW(hdc, shortcutStr.c_str(), -1, &toolbarRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    RECT rightRect = toolbarRect; rightRect.right -= 12;
+                    DrawTextW(hdc, fpsStr.c_str(), -1, &rightRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-                SelectObject(hdc, hOldFont);
-                DeleteObject(hFont);
-
-                EnterCriticalSection(&g_cs);
-                if (g_frame) {
-                    Gdiplus::Graphics g(hdc);
-                    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBilinear);
-                    g.DrawImage(g_frame, 0, TOOLBAR_HEIGHT, r.right, r.bottom - TOOLBAR_HEIGHT);
+                    SelectObject(hdc, hOldFont);
+                    DeleteObject(hFont);
                 }
-                LeaveCriticalSection(&g_cs);
+
+                if (ps.rcPaint.bottom > TOOLBAR_HEIGHT) {
+                    EnterCriticalSection(&g_cs);
+                    if (g_frame) {
+                        Gdiplus::Graphics g(hdc);
+                        g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+                        g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+                        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+                        g.DrawImage(g_frame, 0, TOOLBAR_HEIGHT, r.right, r.bottom - TOOLBAR_HEIGHT);
+                    }
+                    LeaveCriticalSection(&g_cs);
+                }
 
                 EndPaint(hwnd, &ps);
                 return 0;
@@ -69,7 +78,7 @@ namespace {
                 if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000)) {
                     if ((lp & (1 << 30)) == 0) {
                         InputHandler::ToggleControlling();
-                        RECT toolbarRect = {0, 0, 2000, TOOLBAR_HEIGHT};
+                        RECT toolbarRect = {0, 0, 4000, TOOLBAR_HEIGHT};
                         InvalidateRect(hwnd, &toolbarRect, FALSE);
                     }
                     return 0;
@@ -88,7 +97,7 @@ namespace {
                 if (wp == 'M' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
                     if ((lp & (1 << 30)) == 0) {
                         AudioPlayer::ToggleMute();
-                        RECT toolbarRect = {0, 0, 2000, TOOLBAR_HEIGHT};
+                        RECT toolbarRect = {0, 0, 4000, TOOLBAR_HEIGHT};
                         InvalidateRect(hwnd, &toolbarRect, FALSE);
                     }
                     return 0;
@@ -126,6 +135,7 @@ namespace RemoteWindow {
     HWND Create(HINSTANCE hInst, TcpClient* client) {
         g_client = client;
         InitializeCriticalSection(&g_cs);
+        CreateStreamOnHGlobal(NULL, TRUE, &g_decodeStream);
         g_lastTime = GetTickCount();
 
         WNDCLASSW wc = {};
@@ -136,45 +146,82 @@ namespace RemoteWindow {
         RegisterClassW(&wc);
 
         g_hwnd = CreateWindowExW(0, L"MgrWindow", L"LanRemote",
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720, 0, 0, hInst, 0);
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE,
+            CW_USEDEFAULT, CW_USEDEFAULT, 1920, 1080, 0, 0, hInst, 0);
         return g_hwnd;
     }
 
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
-        if (jpegSize <= 0) return;
-        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, jpegSize);
-        if (!hMem) return;
-        memcpy(GlobalLock(hMem), jpegData, jpegSize);
-        GlobalUnlock(hMem);
+        if (jpegSize <= 0 || !jpegData || !g_decodeStream) return;
 
-        IStream* pStream = nullptr;
-        if (CreateStreamOnHGlobal(hMem, TRUE, &pStream) == S_OK) {
-            Gdiplus::Image* img = Gdiplus::Image::FromStream(pStream);
-            if (img && img->GetLastStatus() == Gdiplus::Ok) {
-                EnterCriticalSection(&g_cs);
-                if (!g_frame) g_frame = new Gdiplus::Bitmap(delta.width, delta.height, PixelFormat32bppARGB);
-                Gdiplus::Graphics g(g_frame);
-                g.DrawImage(img, delta.x, delta.y, delta.width, delta.height);
-                LeaveCriticalSection(&g_cs);
+        // Tái sử dụng g_decodeStream để không cấp phát/giải phóng HGLOBAL mỗi frame
+        LARGE_INTEGER liZero = {};
+        ULARGE_INTEGER uliSize = {};
+        uliSize.QuadPart = (ULONGLONG)jpegSize;
 
-                if (g_hwnd) InvalidateRect(g_hwnd, NULL, FALSE);
+        g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL);
+        g_decodeStream->SetSize(uliSize);
 
-                g_frameCount++;
-                DWORD currentTime = GetTickCount();
-                if (currentTime - g_lastTime >= 1000) {
-                    g_fps = g_frameCount;
-                    g_frameCount = 0;
-                    g_lastTime = currentTime;
+        ULONG written = 0;
+        if (FAILED(g_decodeStream->Write(jpegData, (ULONG)jpegSize, &written)) || (int)written != jpegSize) {
+            return;
+        }
+        g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL);
+
+        Gdiplus::Image* img = Gdiplus::Image::FromStream(g_decodeStream);
+        if (img && img->GetLastStatus() == Gdiplus::Ok) {
+            int reqW = delta.x + delta.width;
+            int reqH = delta.y + delta.height;
+
+            EnterCriticalSection(&g_cs);
+            if (!g_frame) {
+                g_frame = new Gdiplus::Bitmap(reqW, reqH, PixelFormat32bppPARGB);
+            } else if ((int)g_frame->GetWidth() < reqW || (int)g_frame->GetHeight() < reqH) {
+                // Tự động mở rộng khung nền nếu frame đầu tiên là Delta nhỏ
+                int newW = ((int)g_frame->GetWidth() > reqW) ? (int)g_frame->GetWidth() : reqW;
+                int newH = ((int)g_frame->GetHeight() > reqH) ? (int)g_frame->GetHeight() : reqH;
+                Gdiplus::Bitmap* expanded = new Gdiplus::Bitmap(newW, newH, PixelFormat32bppPARGB);
+                Gdiplus::Graphics gExp(expanded);
+                gExp.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+                gExp.DrawImage(g_frame, 0, 0);
+                delete g_frame;
+                g_frame = expanded;
+            }
+
+            Gdiplus::Graphics g(g_frame);
+            g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+            g.DrawImage(img, delta.x, delta.y, delta.width, delta.height);
+            LeaveCriticalSection(&g_cs);
+
+            g_frameCount++;
+            DWORD currentTime = GetTickCount();
+            bool fpsUpdated = false;
+            if (currentTime - g_lastTime >= 1000) {
+                g_fps = g_frameCount;
+                g_frameCount = 0;
+                g_lastTime = currentTime;
+                fpsUpdated = true;
+            }
+
+            if (g_hwnd) {
+                if (fpsUpdated) {
+                    InvalidateRect(g_hwnd, NULL, FALSE);
+                } else {
+                    RECT clientRect;
+                    GetClientRect(g_hwnd, &clientRect);
+                    clientRect.top = TOOLBAR_HEIGHT;
+                    InvalidateRect(g_hwnd, &clientRect, FALSE);
                 }
             }
-            if (img) delete img;
-            pStream->Release();
-        } else {
-            GlobalFree(hMem);
         }
+        if (img) delete img;
     }
 
     void Cleanup() {
+        if (g_decodeStream) {
+            g_decodeStream->Release();
+            g_decodeStream = nullptr;
+        }
         if (g_frame) {
             delete g_frame;
             g_frame = nullptr;
