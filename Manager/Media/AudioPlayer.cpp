@@ -3,9 +3,11 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 
-#define AUDIO_RING_SIZE 64
-#define MIN_BUFFER_SAMPLES 3840
+#define AUDIO_RING_SIZE 32
+#define SAMPLES_PER_CHUNK 1920 // 40ms ở 48.000 Hz, Stereo 16-bit (960 frames * 2 channels = 1920 samples = 3840 bytes)
+#define PREBUFFER_CHUNKS 2     // Đệm trước ~80ms để chống jitter mạng
 
 namespace {
     typedef MMRESULT (WINAPI *PFN_waveOutOpen)(LPHWAVEOUT, UINT, LPCWAVEFORMATEX, DWORD_PTR, DWORD_PTR, DWORD);
@@ -29,6 +31,7 @@ namespace {
     std::vector<int16_t> g_stagingBuffer;
     int g_audioIdx = 0;
     bool g_isMuted = false;
+    bool g_prebuffering = true;
 
     CRITICAL_SECTION g_audioCs;
     bool g_csInitialized = false;
@@ -43,8 +46,15 @@ namespace AudioPlayer {
 
         EnterCriticalSection(&g_audioCs);
         g_isMuted = defaultMuted;
+        g_prebuffering = true;
+        g_audioIdx = 0;
         g_stagingBuffer.clear();
-        g_stagingBuffer.reserve(MIN_BUFFER_SAMPLES * 2);
+        g_stagingBuffer.reserve(SAMPLES_PER_CHUNK * 4);
+
+        for (int i = 0; i < AUDIO_RING_SIZE; i++) {
+            memset(&g_waveHeaders[i], 0, sizeof(WAVEHDR));
+            g_audioBuffers[i].resize(SAMPLES_PER_CHUNK, 0);
+        }
 
         g_hWinMM = LoadLibraryA("winmm.dll");
         if (g_hWinMM) {
@@ -58,11 +68,11 @@ namespace AudioPlayer {
             if (pWaveOutOpen) {
                 WAVEFORMATEX wfx = {};
                 wfx.wFormatTag = WAVE_FORMAT_PCM;
-                wfx.nChannels = 2;
-                wfx.nSamplesPerSec = 48000;
-                wfx.wBitsPerSample = 16;
-                wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8;
-                wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+                wfx.nChannels = 2;              // Stereo
+                wfx.nSamplesPerSec = 48000;      // 48 kHz chuẩn
+                wfx.wBitsPerSample = 16;         // 16-bit
+                wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8; // 4 bytes/frame
+                wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign; // 192.000 B/s
 
                 pWaveOutOpen(&g_hWaveOut, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
             }
@@ -79,53 +89,57 @@ namespace AudioPlayer {
             return;
         }
 
-        int sampleCount = byteSize / (int)sizeof(float);
-        const float* floatSamples = (const float*)rawData;
+        // Dữ liệu nhận từ Client đã được chuẩn hóa về 16-bit PCM Stereo 48kHz
+        const int16_t* pcmSamples = (const int16_t*)rawData;
+        int sampleCount = byteSize / (int)sizeof(int16_t);
+        g_stagingBuffer.insert(g_stagingBuffer.end(), pcmSamples, pcmSamples + sampleCount);
 
-        for (int i = 0; i < sampleCount; i++) {
-            float s = floatSamples[i];
-            if (s > 1.0f) s = 1.0f;
-            if (s < -1.0f) s = -1.0f;
-            g_stagingBuffer.push_back((int16_t)(s * 32767.0f));
-        }
-
-        if (g_stagingBuffer.size() < MIN_BUFFER_SAMPLES) {
-            LeaveCriticalSection(&g_audioCs);
-            return;
-        }
-
-        int queuedBuffers = 0;
-        for (int i = 0; i < AUDIO_RING_SIZE; i++) {
-            if ((g_waveHeaders[i].dwFlags & WHDR_PREPARED) && !(g_waveHeaders[i].dwFlags & WHDR_DONE)) {
-                queuedBuffers++;
-            }
-        }
-        if (queuedBuffers > 12 && pWaveOutReset) {
-            pWaveOutReset(g_hWaveOut);
-        }
-
-        WAVEHDR& hdr = g_waveHeaders[g_audioIdx];
-        if (hdr.dwFlags & WHDR_PREPARED) {
-            if (!(hdr.dwFlags & WHDR_DONE)) {
-                g_stagingBuffer.clear();
+        // Pre-buffering: gom đủ ít nhất 2 chunks (~80ms) trước khi bắt đầu nạp vào card âm thanh
+        if (g_prebuffering) {
+            if (g_stagingBuffer.size() < (size_t)(SAMPLES_PER_CHUNK * PREBUFFER_CHUNKS)) {
                 LeaveCriticalSection(&g_audioCs);
                 return;
             }
-            pWaveOutUnprepareHeader(g_hWaveOut, &hdr, sizeof(WAVEHDR));
+            g_prebuffering = false;
         }
 
-        g_audioBuffers[g_audioIdx] = g_stagingBuffer;
-        g_stagingBuffer.clear();
+        // Đẩy từng chunk chuẩn vào ring buffer của waveOut
+        while (g_stagingBuffer.size() >= SAMPLES_PER_CHUNK) {
+            // Tìm slot rảnh trong ring buffer (ưu tiên slot tại g_audioIdx hoặc slot đã phát xong WHDR_DONE)
+            int targetSlot = -1;
+            for (int i = 0; i < AUDIO_RING_SIZE; i++) {
+                int idx = (g_audioIdx + i) % AUDIO_RING_SIZE;
+                WAVEHDR& h = g_waveHeaders[idx];
+                if (!(h.dwFlags & WHDR_PREPARED) || (h.dwFlags & WHDR_DONE)) {
+                    targetSlot = idx;
+                    break;
+                }
+            }
 
-        memset(&hdr, 0, sizeof(WAVEHDR));
-        hdr.lpData = (LPSTR)g_audioBuffers[g_audioIdx].data();
-        hdr.dwBufferLength = (DWORD)(g_audioBuffers[g_audioIdx].size() * sizeof(int16_t));
+            // Nếu toàn bộ 32 slot đều đang phát (đã đệm hơn 1,2 giây phía trước), ghi đè slot cũ nhất
+            if (targetSlot == -1) {
+                targetSlot = g_audioIdx;
+            }
 
-        if (pWaveOutPrepareHeader(g_hWaveOut, &hdr, sizeof(WAVEHDR)) == MMSYSERR_NOERROR) {
-            pWaveOutWrite(g_hWaveOut, &hdr, sizeof(WAVEHDR));
+            WAVEHDR& hdr = g_waveHeaders[targetSlot];
+            if (hdr.dwFlags & WHDR_PREPARED) {
+                pWaveOutUnprepareHeader(g_hWaveOut, &hdr, sizeof(WAVEHDR));
+            }
+
+            g_audioBuffers[targetSlot].assign(g_stagingBuffer.begin(), g_stagingBuffer.begin() + SAMPLES_PER_CHUNK);
+            g_stagingBuffer.erase(g_stagingBuffer.begin(), g_stagingBuffer.begin() + SAMPLES_PER_CHUNK);
+
+            memset(&hdr, 0, sizeof(WAVEHDR));
+            hdr.lpData = (LPSTR)g_audioBuffers[targetSlot].data();
+            hdr.dwBufferLength = (DWORD)(SAMPLES_PER_CHUNK * sizeof(int16_t));
+
+            if (pWaveOutPrepareHeader(g_hWaveOut, &hdr, sizeof(WAVEHDR)) == MMSYSERR_NOERROR) {
+                pWaveOutWrite(g_hWaveOut, &hdr, sizeof(WAVEHDR));
+            }
+
+            g_audioIdx = (targetSlot + 1) % AUDIO_RING_SIZE;
         }
 
-        g_audioIdx = (g_audioIdx + 1) % AUDIO_RING_SIZE;
         LeaveCriticalSection(&g_audioCs);
     }
 
@@ -136,6 +150,7 @@ namespace AudioPlayer {
         if (g_isMuted && g_hWaveOut && pWaveOutReset) {
             pWaveOutReset(g_hWaveOut);
             g_stagingBuffer.clear();
+            g_prebuffering = true;
         }
         LeaveCriticalSection(&g_audioCs);
     }
@@ -154,7 +169,7 @@ namespace AudioPlayer {
         if (g_hWaveOut) {
             if (pWaveOutReset) pWaveOutReset(g_hWaveOut);
             for (int i = 0; i < AUDIO_RING_SIZE; i++) {
-                if (g_waveHeaders[i].dwFlags & WHDR_PREPARED) {
+                if (g_waveHeaders[i].dwFlags & WHDR_PREPARED && pWaveOutUnprepareHeader) {
                     pWaveOutUnprepareHeader(g_hWaveOut, &g_waveHeaders[i], sizeof(WAVEHDR));
                 }
             }
@@ -165,6 +180,7 @@ namespace AudioPlayer {
             FreeLibrary(g_hWinMM);
             g_hWinMM = NULL;
         }
+        g_stagingBuffer.clear();
         LeaveCriticalSection(&g_audioCs);
         DeleteCriticalSection(&g_audioCs);
         g_csInitialized = false;
