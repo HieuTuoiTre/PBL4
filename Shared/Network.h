@@ -30,7 +30,7 @@ class TcpServer{
         TcpServer& operator=(const TcpServer&) = delete;
 
         bool Start(int port);
-        bool AcceptConnection();
+        bool AcceptConnection(int timeoutMs = -1);
         void Close();
         void CloseClient();
         

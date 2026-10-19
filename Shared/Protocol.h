@@ -6,6 +6,10 @@
 
 namespace Protocol
 {
+    constexpr int PORT_CONTROL = 8080;
+    constexpr int PORT_VIDEO   = 8081;
+    constexpr int PORT_AUDIO   = 8082;
+
     enum MessageType : uint8_t {
         //connection
         MSG_PING = 1,        //request
