@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 #define AUDIO_RING_SIZE 32
 #define SAMPLES_PER_CHUNK 1920 // 40ms ở 48.000 Hz, Stereo 16-bit (960 frames * 2 channels = 1920 samples = 3840 bytes)
@@ -32,6 +33,7 @@ namespace {
     int g_audioIdx = 0;
     bool g_isMuted = false;
     bool g_prebuffering = true;
+    float g_volume = 1.5f; // Mặc định khuếch đại 150% (1.5x) giúp âm thanh to rõ
 
     CRITICAL_SECTION g_audioCs;
     bool g_csInitialized = false;
@@ -92,7 +94,27 @@ namespace AudioPlayer {
         // Dữ liệu nhận từ Client đã được chuẩn hóa về 16-bit PCM Stereo 48kHz
         const int16_t* pcmSamples = (const int16_t*)rawData;
         int sampleCount = byteSize / (int)sizeof(int16_t);
-        g_stagingBuffer.insert(g_stagingBuffer.end(), pcmSamples, pcmSamples + sampleCount);
+
+        // Áp dụng hệ số khuếch đại kỹ thuật số (Pre-amp gain) và Soft-Limiter chống vỡ tiếng
+        float gain = g_volume;
+        if (gain != 1.0f) {
+            std::vector<int16_t> amplified(sampleCount);
+            const float THRESHOLD = 26000.0f;
+            for (int i = 0; i < sampleCount; i++) {
+                float x = pcmSamples[i] * gain;
+                if (x > THRESHOLD) {
+                    float excess = x - THRESHOLD;
+                    x = THRESHOLD + (32767.0f - THRESHOLD) * std::tanh(excess / (32767.0f - THRESHOLD));
+                } else if (x < -THRESHOLD) {
+                    float excess = -x - THRESHOLD;
+                    x = -THRESHOLD - (32767.0f - THRESHOLD) * std::tanh(excess / (32767.0f - THRESHOLD));
+                }
+                amplified[i] = (int16_t)std::clamp(x, -32768.0f, 32767.0f);
+            }
+            g_stagingBuffer.insert(g_stagingBuffer.end(), amplified.begin(), amplified.end());
+        } else {
+            g_stagingBuffer.insert(g_stagingBuffer.end(), pcmSamples, pcmSamples + sampleCount);
+        }
 
         // Pre-buffering: gom đủ ít nhất 2 chunks (~80ms) trước khi bắt đầu nạp vào card âm thanh
         if (g_prebuffering) {
@@ -161,6 +183,35 @@ namespace AudioPlayer {
         bool muted = g_isMuted;
         LeaveCriticalSection(&g_audioCs);
         return muted;
+    }
+
+    void SetVolume(float volume) {
+        if (!g_csInitialized) return;
+        EnterCriticalSection(&g_audioCs);
+        g_volume = std::clamp(volume, 0.0f, 3.0f);
+        LeaveCriticalSection(&g_audioCs);
+    }
+
+    float GetVolume() {
+        if (!g_csInitialized) return 1.5f;
+        EnterCriticalSection(&g_audioCs);
+        float vol = g_volume;
+        LeaveCriticalSection(&g_audioCs);
+        return vol;
+    }
+
+    void IncreaseVolume() {
+        if (!g_csInitialized) return;
+        EnterCriticalSection(&g_audioCs);
+        g_volume = (std::min)(3.0f, g_volume + 0.1f);
+        LeaveCriticalSection(&g_audioCs);
+    }
+
+    void DecreaseVolume() {
+        if (!g_csInitialized) return;
+        EnterCriticalSection(&g_audioCs);
+        g_volume = (std::max)(0.0f, g_volume - 0.1f);
+        LeaveCriticalSection(&g_audioCs);
     }
 
     void Cleanup() {
