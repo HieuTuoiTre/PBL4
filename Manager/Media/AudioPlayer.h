@@ -9,5 +9,9 @@ namespace AudioPlayer {
     void PlayChunk(const char* rawData, int byteSize);
     void ToggleMute();
     bool IsMuted();
+    void SetVolume(float volume);
+    float GetVolume();
+    void IncreaseVolume();
+    void DecreaseVolume();
     void Cleanup();
 }

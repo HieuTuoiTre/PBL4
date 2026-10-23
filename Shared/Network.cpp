@@ -46,7 +46,24 @@ bool TcpServer::Start(int port){
     return true;
 }
 
-bool TcpServer::AcceptConnection(){
+bool TcpServer::AcceptConnection(int timeoutMs){
+    if (listenSocket == INVALID_SOCKET){
+        return false;
+    }
+
+    if (timeoutMs >= 0) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(listenSocket, &fds);
+        timeval tv;
+        tv.tv_sec = timeoutMs / 1000;
+        tv.tv_usec = (timeoutMs % 1000) * 1000;
+        int result = select(0, &fds, NULL, NULL, &tv);
+        if (result <= 0) {
+            return false;
+        }
+    }
+
     clientSocket = accept(listenSocket, NULL, NULL);
     if (clientSocket == INVALID_SOCKET){
         return false;

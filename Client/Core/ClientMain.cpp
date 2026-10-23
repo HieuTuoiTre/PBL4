@@ -40,8 +40,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // 3. Đẩy vòng lặp mạng sang một luồng (Thread) chạy ngầm riêng biệt
     std::thread networkThread([]() {
-        // Cổng 8080. Hàm này chứa vòng lặp vô hạn while(true) chờ kết nối.
-        SessionManager::StartServer(8080); 
+        // Cổng cơ sở 8080 (mở 8080 cho Control, 8081 cho Video, 8082 cho Audio)
+        SessionManager::StartServer(Protocol::PORT_CONTROL); 
     });
     
     // Tách rời luồng này khỏi luồng chính (Main Thread)

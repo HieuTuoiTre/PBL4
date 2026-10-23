@@ -11,8 +11,14 @@
 
 namespace {
     std::atomic<bool> g_isRunning(false);
+    std::thread g_controlThread;
+    std::thread g_videoThread;
+    std::thread g_audioThread;
 
-    void ReceiveLoop(TcpClient* client) {
+    // ========================================================
+    // LUỒNG NHẬN CONTROL (8080): TASK MANAGER, FILE EXPLORER, SYSTEM INFO
+    // ========================================================
+    void ReceiveControlLoop(TcpClient* client) {
         Protocol::PacketHeader hdr;
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
             if (hdr.type == Protocol::MSG_FILE_END) {
@@ -20,23 +26,11 @@ namespace {
                 continue;
             }
 
-            if (hdr.size == 0 || hdr.size > 32 * 1024 * 1024) continue; // Bảo vệ giới hạn gói tối đa 32MB
+            if (hdr.size == 0 || hdr.size > 32 * 1024 * 1024) continue;
             std::vector<char> buf(hdr.size);
             if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
 
             switch (hdr.type) {
-                case Protocol::MSG_VIDEO_FRAME: {
-                    if (hdr.size <= sizeof(Protocol::VideoDeltaHeader)) break;
-                    Protocol::VideoDeltaHeader delta;
-                    memcpy(&delta, buf.data(), sizeof(delta));
-                    int jpgSize = (int)hdr.size - (int)sizeof(delta);
-                    RemoteWindow::UpdateFrame(delta, buf.data() + sizeof(delta), jpgSize);
-                    break;
-                }
-                case Protocol::MSG_AUDIO_CHUNK: {
-                    AudioPlayer::PlayChunk(buf.data(), (int)hdr.size);
-                    break;
-                }
                 case Protocol::MSG_SYS_INFO_RESPONSE: {
                     if (hdr.size < sizeof(Protocol::SysInfoPayload)) break;
                     Protocol::SysInfoPayload sys;
@@ -65,7 +59,7 @@ namespace {
                     if (hdr.size < sizeof(Protocol::FileInfoPayload)) break;
                     Protocol::FileInfoPayload info;
                     memcpy(&info, buf.data(), sizeof(info));
-                    info.fileName[sizeof(info.fileName) - 1] = '\0'; // Đảm bảo chuỗi kết thúc an toàn
+                    info.fileName[sizeof(info.fileName) - 1] = '\0';
                     FileExplorerWindow::OnFileInfo(info);
                     break;
                 }
@@ -77,18 +71,60 @@ namespace {
                     break;
             }
         }
-        g_isRunning = false;
+    }
+
+    // ========================================================
+    // LUỒNG NHẬN VIDEO (8081): KHUNG HÌNH MÀN HÌNH (JPEG)
+    // ========================================================
+    void ReceiveVideoLoop(TcpClient* client) {
+        Protocol::PacketHeader hdr;
+        while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
+            if (hdr.size == 0 || hdr.size > 32 * 1024 * 1024) continue;
+            std::vector<char> buf(hdr.size);
+            if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
+
+            if (hdr.type == Protocol::MSG_VIDEO_FRAME) {
+                if (hdr.size > sizeof(Protocol::VideoDeltaHeader)) {
+                    Protocol::VideoDeltaHeader delta;
+                    memcpy(&delta, buf.data(), sizeof(delta));
+                    int jpgSize = (int)hdr.size - (int)sizeof(delta);
+                    RemoteWindow::UpdateFrame(delta, buf.data() + sizeof(delta), jpgSize);
+                }
+            }
+        }
+    }
+
+    // ========================================================
+    // LUỒNG NHẬN AUDIO (8082): ÂM THANH TRỰC TIẾP (PCM16 48KHZ STEREO)
+    // ========================================================
+    void ReceiveAudioLoop(TcpClient* client) {
+        Protocol::PacketHeader hdr;
+        while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
+            if (hdr.size == 0 || hdr.size > 1024 * 1024) continue;
+            std::vector<char> buf(hdr.size);
+            if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
+
+            if (hdr.type == Protocol::MSG_AUDIO_CHUNK) {
+                AudioPlayer::PlayChunk(buf.data(), (int)hdr.size);
+            }
+        }
     }
 }
 
 namespace DataReceiver {
-    void Start(TcpClient* client) {
+    void Start(TcpClient* controlClient, TcpClient* videoClient, TcpClient* audioClient) {
         if (g_isRunning) return;
         g_isRunning = true;
-        std::thread(ReceiveLoop, client).detach();
+        g_controlThread = std::thread(ReceiveControlLoop, controlClient);
+        g_videoThread = std::thread(ReceiveVideoLoop, videoClient);
+        g_audioThread = std::thread(ReceiveAudioLoop, audioClient);
     }
 
     void Stop() {
+        if (!g_isRunning) return;
         g_isRunning = false;
+        if (g_controlThread.joinable()) g_controlThread.join();
+        if (g_videoThread.joinable()) g_videoThread.join();
+        if (g_audioThread.joinable()) g_audioThread.join();
     }
 }

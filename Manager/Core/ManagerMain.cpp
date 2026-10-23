@@ -11,7 +11,31 @@
 
 #pragma comment(lib, "gdiplus.lib")
 
-TcpClient g_client;
+TcpClient g_controlClient;
+TcpClient g_videoClient;
+TcpClient g_audioClient;
+
+bool ConnectAll(const std::string& ip) {
+    if (!g_controlClient.Connect(ip, Protocol::PORT_CONTROL)) {
+        return false;
+    }
+    if (!g_videoClient.Connect(ip, Protocol::PORT_VIDEO)) {
+        g_controlClient.Close();
+        return false;
+    }
+    if (!g_audioClient.Connect(ip, Protocol::PORT_AUDIO)) {
+        g_controlClient.Close();
+        g_videoClient.Close();
+        return false;
+    }
+    return true;
+}
+
+void CloseAll() {
+    g_controlClient.Close();
+    g_videoClient.Close();
+    g_audioClient.Close();
+}
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     SetProcessDPIAware();
@@ -52,11 +76,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     Gdiplus::GdiplusStartupInput gdiInput;
     Gdiplus::GdiplusStartup(&gdiToken, &gdiInput, NULL);
 
-    if (g_client.Connect(targetIP, 8080)) {
+    if (ConnectAll(targetIP)) {
         connected = true;
     } else {
         if (MessageBoxA(NULL, "Khong the ket noi toi IP da nhap!\nBan co muon thu dieu khien localhost (127.0.0.1) khong?", "Ket noi that bai", MB_YESNO | MB_ICONWARNING) == IDYES) {
-            if (g_client.Connect("127.0.0.1", 8080)) {
+            if (ConnectAll("127.0.0.1")) {
                 targetIP = "127.0.0.1";
                 connected = true;
             } else {
@@ -66,10 +90,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     }
 
     if (connected) {
-        InputHandler::Initialize(&g_client);
+        InputHandler::Initialize(&g_controlClient);
         AudioPlayer::Initialize(targetIP == "127.0.0.1");
-        RemoteWindow::Create(hInst, &g_client);
-        DataReceiver::Start(&g_client);
+        RemoteWindow::Create(hInst, &g_controlClient);
+        DataReceiver::Start(&g_controlClient, &g_videoClient, &g_audioClient);
 
         MSG msg;
         while (GetMessageW(&msg, NULL, 0, 0)) {
@@ -77,8 +101,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
             DispatchMessageW(&msg);
         }
 
+        CloseAll();
         DataReceiver::Stop();
-        g_client.Close();
         AudioPlayer::Cleanup();
         RemoteWindow::Cleanup();
     }

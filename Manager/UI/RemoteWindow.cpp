@@ -5,6 +5,7 @@
 #include "../Media/AudioPlayer.h"
 #include <gdiplus.h>
 #include <string>
+#include <cmath>
 
 #define TOOLBAR_HEIGHT 35
 
@@ -41,9 +42,10 @@ namespace {
                     HFONT hFont = CreateFontW(15, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
                     HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
+                    int volPercent = (int)std::round(AudioPlayer::GetVolume() * 100.0f);
                     std::wstring statusStr = (InputHandler::IsControlling() ? L"🔴 ĐIỀU KHIỂN" : L"👁️ CHỈ XEM")
-                                           + std::wstring(AudioPlayer::IsMuted() ? L" | 🔇 MUTE" : L" | 🔊 LOA");
-                    std::wstring shortcutStr = L"[Ctrl+Tab: TaskMgr] | [Ctrl+E: File] | [Ctrl+M: Loa] | [Ctrl+Alt: Chế độ]";
+                                           + std::wstring(AudioPlayer::IsMuted() ? L" | 🔇 MUTE" : (L" | 🔊 " + std::to_wstring(volPercent) + L"%"));
+                    std::wstring shortcutStr = L"[Ctrl+Tab: TaskMgr] | [Ctrl+E: File] | [Ctrl+M: Loa] | [Ctrl+↑/↓: Âm lượng]";
                     std::wstring fpsStr = L"FPS: " + std::to_wstring(g_fps);
 
                     RECT leftRect = toolbarRect; leftRect.left += 12;
@@ -100,6 +102,20 @@ namespace {
                         RECT toolbarRect = {0, 0, 4000, TOOLBAR_HEIGHT};
                         InvalidateRect(hwnd, &toolbarRect, FALSE);
                     }
+                    return 0;
+                }
+
+                if (wp == VK_UP && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                    AudioPlayer::IncreaseVolume();
+                    RECT toolbarRect = {0, 0, 4000, TOOLBAR_HEIGHT};
+                    InvalidateRect(hwnd, &toolbarRect, FALSE);
+                    return 0;
+                }
+
+                if (wp == VK_DOWN && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                    AudioPlayer::DecreaseVolume();
+                    RECT toolbarRect = {0, 0, 4000, TOOLBAR_HEIGHT};
+                    InvalidateRect(hwnd, &toolbarRect, FALSE);
                     return 0;
                 }
 
