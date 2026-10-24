@@ -6,6 +6,7 @@
 #include "../FileTransfer/FileWorker.h"
 #include "../Media/AudioCapture.h"
 #include "../System/SysMonitor.h"
+#include "DiscoveryResponder.h"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -209,6 +210,7 @@ namespace SessionManager {
 
             // Cả 3 kết nối đã sẵn sàng!
             g_isConnected = true;
+            DiscoveryResponder::SetBusy(true);
 
             // Bắt đầu thu âm và gửi trực tiếp qua cổng Audio (8082)
             AudioCapture::Start([](const char* buffer, int size) {
@@ -228,6 +230,7 @@ namespace SessionManager {
 
             // Mất kết nối hoặc app dừng: Dọn dẹp phiên hiện tại
             g_isConnected = false;
+            DiscoveryResponder::SetBusy(false);
             AudioCapture::Stop();
             g_controlServer.CloseClient();
             g_videoServer.CloseClient();
@@ -245,6 +248,7 @@ namespace SessionManager {
     void Stop() {
         g_isRunning = false;
         g_isConnected = false;
+        DiscoveryResponder::SetBusy(false);
         AudioCapture::Stop();
         g_controlServer.Close();
         g_videoServer.Close();
