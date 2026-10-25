@@ -49,6 +49,8 @@ namespace {
     HWND g_hBtnScan = NULL;
     HWND g_hBtnExit = NULL;
 
+    HWND g_hHeader = NULL;         // Handle thanh Header của ListView
+    WNDPROC g_oldHeaderProc = NULL;// Con trỏ lưu hàm WndProc gốc của Header
     HWND g_hHoveredBtn = NULL;     // Handle nút bấm đang được chuột rê qua (Hover)
     bool g_editHasFocus = false;   // Trạng thái focus của ô nhập IP để vẽ viền xanh sáng
     HIMAGELIST g_hImageList = NULL;// ImageList giả lập để tăng chiều cao dòng ListView
@@ -130,6 +132,96 @@ namespace {
             RECT rc = { 460, 60, 740, 86 };
             InvalidateRect(g_hConnectWnd, &rc, TRUE);
         }
+    }
+
+    // ========================================================================
+    // SUBCLASS TÙY BIẾN THANH TIÊU ĐỀ CỘT LISTVIEW (HEADER CONTROL)
+    // Loại bỏ viền 3D màu xám cổ điển, vẽ nền trắng phẳng và font Segoe UI hiện đại
+    // ========================================================================
+    LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        if (uMsg == WM_ERASEBKGND) {
+            HDC hdc = (HDC)wParam;
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            FillRect(hdc, &rc, g_hWhiteBrush);
+            return 1;
+        }
+
+        if (uMsg == WM_PAINT) {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+            HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
+
+            {
+                Gdiplus::Graphics g(memDC);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+                // Nền trắng tinh khiết ăn khớp với Card 1
+                Gdiplus::SolidBrush whiteBrush(Gdiplus::Color(255, 255, 255, 255));
+                g.FillRectangle(&whiteBrush, 0, 0, w, h);
+
+                // Đường viền dưới tinh tế #E2E8F0 ngăn cách header với hàng nội dung
+                Gdiplus::Pen botPen(Gdiplus::Color(255, 226, 232, 240), 1.0f);
+                g.DrawLine(&botPen, 0.0f, (float)h - 1.0f, (float)w, (float)h - 1.0f);
+
+                // Đường phân cách mờ giữa các cột
+                Gdiplus::Pen sepPen(Gdiplus::Color(255, 241, 245, 249), 1.0f);
+
+                // Font Segoe UI cho Header: thanh mảnh, hiện đại, màu Slate 700 (#334155)
+                Gdiplus::FontFamily ff(L"Segoe UI");
+                Gdiplus::Font fontHeader(&ff, 12.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 51, 65, 85));
+
+                Gdiplus::StringFormat sf;
+                sf.SetAlignment(Gdiplus::StringAlignmentNear);
+                sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+                sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap | Gdiplus::StringFormatFlagsNoClip);
+
+                int count = Header_GetItemCount(hWnd);
+                for (int i = 0; i < count; i++) {
+                    RECT itemRc;
+                    Header_GetItemRect(hWnd, i, &itemRc);
+
+                    wchar_t text[128] = {0};
+                    HDITEMW hdi = {};
+                    hdi.mask = HDI_TEXT;
+                    hdi.pszText = text;
+                    hdi.cchTextMax = 127;
+                    Header_GetItem(hWnd, i, &hdi);
+
+                    // Vẽ tiêu đề cột canh lề trái với khoảng đệm 8px
+                    Gdiplus::RectF textRc((float)itemRc.left + 8.0f, (float)itemRc.top,
+                                         (float)(itemRc.right - itemRc.left - 12), (float)(itemRc.bottom - itemRc.top));
+                    g.DrawString(text, -1, &fontHeader, textRc, &sf, &textBrush);
+
+                    // Vẽ đường phân cách dọc mỏng giữa các cột
+                    if (i < count - 1) {
+                        g.DrawLine(&sepPen, (float)itemRc.right - 1.0f, (float)itemRc.top + 4.0f,
+                                            (float)itemRc.right - 1.0f, (float)itemRc.bottom - 5.0f);
+                    }
+                }
+            }
+
+            BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+
+        return CallWindowProcW(g_oldHeaderProc, hWnd, uMsg, wParam, lParam);
     }
 
     // ========================================================================
@@ -509,16 +601,33 @@ namespace {
         sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
         sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
-        // Nếu là nút "Quét mạng", vẽ thêm icon radar/làm mới ở bên trái chữ
+        // Nếu là nút "Quét mạng", vẽ icon làm mới / radar hai chiều xoay vòng đối xứng
         if (dis->CtlID == IDC_BTN_SCAN) {
-            float icR = 6.0f;
-            float icX = rf.X + 20.0f;
+            float icX = rf.X + 18.0f;
             float icY = rf.Y + rf.Height / 2.0f;
-            Gdiplus::Pen iconPen(textColor, 1.6f);
-            g.DrawArc(&iconPen, icX - icR, icY - icR, icR * 2.0f, icR * 2.0f, 40.0f, 260.0f);
-            g.DrawLine(&iconPen, icX - icR + 1.0f, icY + icR - 2.0f, icX - icR + 4.0f, icY + icR + 3.0f);
+            float r = 5.5f;
 
-            Gdiplus::RectF textRect(rf.X + 18.0f, rf.Y, rf.Width - 18.0f, rf.Height);
+            Gdiplus::Pen arcPen(textColor, 1.6f);
+            arcPen.SetStartCap(Gdiplus::LineCapRound);
+            arcPen.SetEndCap(Gdiplus::LineCapRound);
+
+            // Cung tròn phía trên (quay theo chiều kim đồng hồ)
+            g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 215.0f, 170.0f);
+            // Đầu mũi tên của cung trên
+            float ax1 = icX + r * 0.82f;
+            float ay1 = icY - r * 0.57f;
+            g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.2f, ay1 - 2.5f);
+            g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.2f, ay1 + 2.5f);
+
+            // Cung tròn phía dưới (quay theo chiều kim đồng hồ)
+            g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 35.0f, 170.0f);
+            // Đầu mũi tên của cung dưới
+            float ax2 = icX - r * 0.82f;
+            float ay2 = icY + r * 0.57f;
+            g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.2f, ay2 + 2.5f);
+            g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.2f, ay2 - 2.5f);
+
+            Gdiplus::RectF textRect(rf.X + 22.0f, rf.Y, rf.Width - 22.0f, rf.Height);
             g.DrawString(text, -1, &font, textRect, &sf, &textBrush);
         } else {
             g.DrawString(text, -1, &font, rf, &sf, &textBrush);
@@ -549,7 +658,7 @@ namespace {
                 g_hFontCardTitle = CreateFontW(17, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
-                g_hFontEdit = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                g_hFontEdit = CreateFontW(17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
                 // Tạo các cọ vẽ GDI
@@ -575,10 +684,10 @@ namespace {
                 g_hImageList = ImageList_Create(1, 34, ILC_COLOR32, 1, 1);
                 ListView_SetImageList(g_hListClients, g_hImageList, LVSIL_SMALL);
 
-                // Gán font Segoe UI cho phần Header bảng
-                HWND hHeader = ListView_GetHeader(g_hListClients);
-                if (hHeader) {
-                    SendMessageW(hHeader, WM_SETFONT, (WPARAM)g_hFontHeader, TRUE);
+                // Gán Subclass cho thanh Header của ListView để vẽ giao diện phẳng hiện đại, xóa viền xám 3D
+                g_hHeader = ListView_GetHeader(g_hListClients);
+                if (g_hHeader) {
+                    g_oldHeaderProc = (WNDPROC)SetWindowLongPtrW(g_hHeader, GWLP_WNDPROC, (LONG_PTR)HeaderSubclassProc);
                 }
 
                 // Cấu hình 4 cột
@@ -597,10 +706,10 @@ namespace {
                 lvc.iSubItem = 3; lvc.cx = 170; lvc.pszText = (LPWSTR)L"Trạng thái";
                 ListView_InsertColumn(g_hListClients, 3, &lvc);
 
-                // 4. Ô nhập IP không viền nằm trong khung bo tròn ở Card 2
+                // 4. Ô nhập IP không viền nằm chính xác giữa tâm khung Card 2 (Canh giữa quang học hoàn hảo)
                 g_hEditIp = CreateWindowExW(0, L"EDIT", L"127.0.0.1",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                    78, 402, 168, 20, hwnd, (HMENU)IDC_EDIT_IP, GetModuleHandle(NULL), NULL);
+                    76, 405, 168, 20, hwnd, (HMENU)IDC_EDIT_IP, GetModuleHandle(NULL), NULL);
                 SendMessageW(g_hEditIp, WM_SETFONT, (WPARAM)g_hFontEdit, TRUE);
 
                 g_oldEditProc = (WNDPROC)SetWindowLongPtrW(g_hEditIp, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
@@ -730,8 +839,8 @@ namespace {
                                             g_editHasFocus ? 1.6f : 1.0f);
                     g.DrawPath(&ipBorderPen, &ipBoxPath);
 
-                    // Icon máy tính thu nhỏ có chữ IP bên trong
-                    Gdiplus::RectF miniScr(46.0f, 403.0f, 22.0f, 16.0f);
+                    // Icon máy tính thu nhỏ có chữ IP bên trong canh giữa thẳng hàng
+                    Gdiplus::RectF miniScr(46.0f, 404.0f, 22.0f, 15.0f);
                     Gdiplus::GraphicsPath miniScrPath;
                     AddRoundRectPath(miniScrPath, miniScr, 1.5f);
                     Gdiplus::Pen miniPen(Gdiplus::Color(255, 71, 85, 105), 1.2f);
@@ -1102,6 +1211,12 @@ namespace {
                 if (g_hBgBrush) { DeleteObject(g_hBgBrush); g_hBgBrush = NULL; }
                 if (g_hWhiteBrush) { DeleteObject(g_hWhiteBrush); g_hWhiteBrush = NULL; }
                 if (g_hImageList) { ImageList_Destroy(g_hImageList); g_hImageList = NULL; }
+
+                if (g_hHeader && g_oldHeaderProc) {
+                    SetWindowLongPtrW(g_hHeader, GWLP_WNDPROC, (LONG_PTR)g_oldHeaderProc);
+                    g_oldHeaderProc = NULL;
+                }
+                g_hHeader = NULL;
 
                 g_hConnectWnd = NULL;
                 g_hListClients = NULL;
