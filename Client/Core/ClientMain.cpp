@@ -4,6 +4,7 @@
 
 #include "SessionManager.h"
 #include "TrayIcon.h"
+#include "DiscoveryResponder.h"
 
 #include "../System/InputInjector.h"
 
@@ -30,15 +31,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
-    // 2. Khởi tạo Cửa sổ tàng hình & Icon khay hệ thống
+    // 2. Khởi tạo UDP Discovery Responder để Manager có thể tự động quét thấy máy này
+    DiscoveryResponder::Start();
+
+    // 3. Khởi tạo Cửa sổ tàng hình & Icon khay hệ thống
     if (!TrayIcon::Initialize(hInstance)) {
         MessageBoxW(NULL, L"Không thể khởi tạo System Tray Icon!", L"Lỗi nghiêm trọng", MB_OK | MB_ICONERROR);
+        DiscoveryResponder::Stop();
         Network::Cleanup();
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); } // Dọn dẹp Mutex
         return 1;
     }
 
-    // 3. Đẩy vòng lặp mạng sang một luồng (Thread) chạy ngầm riêng biệt
+    // 4. Đẩy vòng lặp mạng sang một luồng (Thread) chạy ngầm riêng biệt
     std::thread networkThread([]() {
         // Cổng cơ sở 8080 (mở 8080 cho Control, 8081 cho Video, 8082 cho Audio)
         SessionManager::StartServer(Protocol::PORT_CONTROL); 
@@ -47,7 +52,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Tách rời luồng này khỏi luồng chính (Main Thread)
     networkThread.detach();
 
-    // 4. Vòng lặp sự kiện (Message Loop) của luồng chính
+    // 5. Vòng lặp sự kiện (Message Loop) của luồng chính
     MSG msg = {0};
 
     // GetMessage sẽ chặn luồng chính lại, chỉ chạy tiếp khi có sự kiện (ví dụ click chuột)
@@ -58,10 +63,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         DispatchMessage(&msg);  // Đẩy sự kiện về cho hàm WindowProc của TrayIcon xử lý
     }
 
-    // 5. Dọn dẹp tài nguyên trước khi tắt hẳn ứng dụng
-    TrayIcon::Cleanup();      // Xóa icon khỏi màn hình
-    SessionManager::Stop();   // Đóng socket, tắt luồng mạng
-    Network::Cleanup();       // Tắt Winsock
+    // 6. Dọn dẹp tài nguyên trước khi tắt hẳn ứng dụng
+    TrayIcon::Cleanup();              // Xóa icon khỏi màn hình
+    SessionManager::Stop();           // Đóng socket, tắt luồng mạng
+    DiscoveryResponder::Stop();       // Dừng lắng nghe UDP và gửi thông báo DISCOVERY_BYE
+    Network::Cleanup();               // Tắt Winsock
 
     // Giải phóng Mutex trước khi app tắt hoàn toàn
     if (hMutex) {

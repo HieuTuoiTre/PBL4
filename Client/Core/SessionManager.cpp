@@ -255,6 +255,7 @@ namespace SessionManager {
 
             // Mất kết nối hoặc app dừng: Dọn dẹp phiên hiện tại
             g_isConnected = false;
+            DiscoveryResponder::SetBusy(false);
             AudioCapture::Stop();
             g_controlServer.CloseClient();
             g_videoServer.CloseClient();
@@ -277,6 +278,7 @@ namespace SessionManager {
     void Stop() {
         g_isRunning = false;
         g_isConnected = false;
+        DiscoveryResponder::SetBusy(false);
         AudioCapture::Stop();
         g_controlServer.Close();
         g_videoServer.Close();
