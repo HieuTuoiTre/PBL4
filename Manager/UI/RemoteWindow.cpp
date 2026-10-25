@@ -3,25 +3,34 @@
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
 #include "../Media/AudioPlayer.h"
-#include <gdiplus.h>
+#include <turbojpeg.h>
 #include <string>
 #include <cmath>
+#include <vector>
+#include <algorithm>
+#include <cstring>
 
 #define TOOLBAR_HEIGHT 35
 
 namespace {
     HWND g_hwnd = NULL;
     TcpClient* g_client = nullptr;
-    Gdiplus::Bitmap* g_frame = nullptr;
-    IStream* g_decodeStream = nullptr; // Tái sử dụng 1 Stream duy nhất để tối ưu FPS
+    
+    // Bộ đệm màn hình 32bpp BGRA (Direct Framebuffer)
+    std::vector<uint32_t> g_framePixels;
+    int g_frameWidth = 0;
+    int g_frameHeight = 0;
+    BITMAPINFO g_bmi = {};
+
+    tjhandle g_tjDecompressor = nullptr;
     CRITICAL_SECTION g_cs;
 
     int g_fps = 0;
     int g_frameCount = 0;
     DWORD g_lastTime = 0;
 
-    int GetFrameWidth() { return g_frame ? (int)g_frame->GetWidth() : 0; }
-    int GetFrameHeight() { return g_frame ? (int)g_frame->GetHeight() : 0; }
+    int GetFrameWidth() { return g_frameWidth; }
+    int GetFrameHeight() { return g_frameHeight; }
 
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
@@ -31,6 +40,7 @@ namespace {
                 RECT r;
                 GetClientRect(hwnd, &r);
 
+                // 1. Vẽ thanh Toolbar ở phía trên
                 if (ps.rcPaint.top < TOOLBAR_HEIGHT) {
                     RECT toolbarRect = {0, 0, r.right, TOOLBAR_HEIGHT};
                     HBRUSH brush = CreateSolidBrush(RGB(45, 45, 48));
@@ -58,14 +68,17 @@ namespace {
                     DeleteObject(hFont);
                 }
 
+                // 2. Vẽ màn hình máy Client bằng StretchDIBits (Tăng tốc phần cứng GDI, <1ms)
                 if (ps.rcPaint.bottom > TOOLBAR_HEIGHT) {
                     EnterCriticalSection(&g_cs);
-                    if (g_frame) {
-                        Gdiplus::Graphics g(hdc);
-                        g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-                        g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
-                        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
-                        g.DrawImage(g_frame, 0, TOOLBAR_HEIGHT, r.right, r.bottom - TOOLBAR_HEIGHT);
+                    if (!g_framePixels.empty() && g_frameWidth > 0 && g_frameHeight > 0) {
+                        SetStretchBltMode(hdc, COLORONCOLOR);
+                        StretchDIBits(
+                            hdc,
+                            0, TOOLBAR_HEIGHT, r.right, r.bottom - TOOLBAR_HEIGHT,
+                            0, 0, g_frameWidth, g_frameHeight,
+                            g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
+                        );
                     }
                     LeaveCriticalSection(&g_cs);
                 }
@@ -151,7 +164,7 @@ namespace RemoteWindow {
     HWND Create(HINSTANCE hInst, TcpClient* client) {
         g_client = client;
         InitializeCriticalSection(&g_cs);
-        CreateStreamOnHGlobal(NULL, TRUE, &g_decodeStream);
+        g_tjDecompressor = tjInitDecompress();
         g_lastTime = GetTickCount();
 
         WNDCLASSW wc = {};
@@ -168,47 +181,56 @@ namespace RemoteWindow {
     }
 
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
-        if (jpegSize <= 0 || !jpegData || !g_decodeStream) return;
+        if (jpegSize <= 0 || !jpegData || !g_tjDecompressor) return;
 
-        // Tái sử dụng g_decodeStream để không cấp phát/giải phóng HGLOBAL mỗi frame
-        LARGE_INTEGER liZero = {};
-        ULARGE_INTEGER uliSize = {};
-        uliSize.QuadPart = (ULONGLONG)jpegSize;
+        int reqW = delta.x + delta.width;
+        int reqH = delta.y + delta.height;
+        if (reqW <= 0 || reqH <= 0 || delta.width <= 0 || delta.height <= 0) return;
 
-        g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-        g_decodeStream->SetSize(uliSize);
+        EnterCriticalSection(&g_cs);
 
-        ULONG written = 0;
-        if (FAILED(g_decodeStream->Write(jpegData, (ULONG)jpegSize, &written)) || (int)written != jpegSize) {
-            return;
-        }
-        g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-
-        Gdiplus::Image* img = Gdiplus::Image::FromStream(g_decodeStream);
-        if (img && img->GetLastStatus() == Gdiplus::Ok) {
-            int reqW = delta.x + delta.width;
-            int reqH = delta.y + delta.height;
-
-            EnterCriticalSection(&g_cs);
-            if (!g_frame) {
-                g_frame = new Gdiplus::Bitmap(reqW, reqH, PixelFormat32bppPARGB);
-            } else if ((int)g_frame->GetWidth() < reqW || (int)g_frame->GetHeight() < reqH) {
-                // Tự động mở rộng khung nền nếu frame đầu tiên là Delta nhỏ
-                int newW = ((int)g_frame->GetWidth() > reqW) ? (int)g_frame->GetWidth() : reqW;
-                int newH = ((int)g_frame->GetHeight() > reqH) ? (int)g_frame->GetHeight() : reqH;
-                Gdiplus::Bitmap* expanded = new Gdiplus::Bitmap(newW, newH, PixelFormat32bppPARGB);
-                Gdiplus::Graphics gExp(expanded);
-                gExp.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-                gExp.DrawImage(g_frame, 0, 0);
-                delete g_frame;
-                g_frame = expanded;
+        // Mở rộng bộ đệm nếu khung hình mới lớn hơn
+        if (g_frameWidth < reqW || g_frameHeight < reqH) {
+            int newW = (std::max)(g_frameWidth, reqW);
+            int newH = (std::max)(g_frameHeight, reqH);
+            std::vector<uint32_t> newPixels(newW * newH, 0);
+            if (g_frameWidth > 0 && g_frameHeight > 0) {
+                for (int y = 0; y < g_frameHeight; ++y) {
+                    std::memcpy(&newPixels[y * newW], &g_framePixels[y * g_frameWidth], g_frameWidth * sizeof(uint32_t));
+                }
             }
+            g_framePixels = std::move(newPixels);
+            g_frameWidth = newW;
+            g_frameHeight = newH;
 
-            Gdiplus::Graphics g(g_frame);
-            g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-            g.DrawImage(img, delta.x, delta.y, delta.width, delta.height);
-            LeaveCriticalSection(&g_cs);
+            std::memset(&g_bmi, 0, sizeof(g_bmi));
+            g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            g_bmi.bmiHeader.biWidth = g_frameWidth;
+            g_bmi.bmiHeader.biHeight = -g_frameHeight; // Top-down
+            g_bmi.bmiHeader.biPlanes = 1;
+            g_bmi.bmiHeader.biBitCount = 32;
+            g_bmi.bmiHeader.biCompression = BI_RGB;
+        }
 
+        // Giải nén trực tiếp vào đúng vị trí delta trên bộ đệm màn hình (Zero intermediate allocation, ~1-2ms)
+        unsigned char* targetPtr = (unsigned char*)(g_framePixels.data() + (delta.y * g_frameWidth) + delta.x);
+        int pitch = g_frameWidth * 4;
+
+        int decompRes = tjDecompress2(
+            g_tjDecompressor,
+            (const unsigned char*)jpegData,
+            (unsigned long)jpegSize,
+            targetPtr,
+            delta.width,
+            pitch,
+            delta.height,
+            TJPF_BGRX,
+            TJFLAG_FASTDCT
+        );
+
+        LeaveCriticalSection(&g_cs);
+
+        if (decompRes == 0) {
             g_frameCount++;
             DWORD currentTime = GetTickCount();
             bool fpsUpdated = false;
@@ -230,18 +252,18 @@ namespace RemoteWindow {
                 }
             }
         }
-        if (img) delete img;
     }
 
     void Cleanup() {
-        if (g_decodeStream) {
-            g_decodeStream->Release();
-            g_decodeStream = nullptr;
+        EnterCriticalSection(&g_cs);
+        g_framePixels.clear();
+        g_frameWidth = 0;
+        g_frameHeight = 0;
+        if (g_tjDecompressor) {
+            tjDestroy(g_tjDecompressor);
+            g_tjDecompressor = nullptr;
         }
-        if (g_frame) {
-            delete g_frame;
-            g_frame = nullptr;
-        }
+        LeaveCriticalSection(&g_cs);
         DeleteCriticalSection(&g_cs);
     }
 }
