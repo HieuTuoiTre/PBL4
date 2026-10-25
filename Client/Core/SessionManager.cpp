@@ -1,11 +1,13 @@
-#include "SessionManager.h"
 #include "../../Shared/Network.h"
+#include "SessionManager.h"
 #include "../../Shared/Protocol.h"
 #include "../Media/ScreenCapture.h"
 #include "../System/InputInjector.h"
 #include "../FileTransfer/FileWorker.h"
 #include "../Media/AudioCapture.h"
 #include "../System/SysMonitor.h"
+#include "StatusOverlay.h"
+#include "ConnectionAlert.h"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -16,6 +18,9 @@ namespace {
     TcpServer g_controlServer;
     TcpServer g_videoServer;
     TcpServer g_audioServer;
+
+    StatusOverlay g_overlay;
+    std::atomic<uint64_t> g_lastInputTimeMs(0);
 
     std::atomic<bool> g_isRunning(false);
     std::atomic<bool> g_isConnected(false);
@@ -71,6 +76,8 @@ namespace {
                     Protocol::MousePayload mouse;
                     if (g_controlServer.ReceiveExact((char*)&mouse, sizeof(Protocol::MousePayload))) {
                         InputInjector::InjectMouse(mouse);
+                        g_overlay.SetState(OverlayState::ConnectedControlling);
+                        g_lastInputTimeMs = GetTickCount64();
                     }
                     break;
                 }
@@ -79,6 +86,8 @@ namespace {
                     Protocol::KeyboardPayload key;
                     if (g_controlServer.ReceiveExact((char*)&key, sizeof(Protocol::KeyboardPayload))) {
                         InputInjector::InjectKeyboard(key);
+                        g_overlay.SetState(OverlayState::ConnectedControlling);
+                        g_lastInputTimeMs = GetTickCount64();
                     }
                     break;
                 }
@@ -180,6 +189,11 @@ namespace SessionManager {
     void StartServer(int basePort) {
         g_isRunning = true;
         
+        // Khởi tạo trạng thái Overlay (chạy ngầm trên luồng UI riêng)
+        g_overlay.Initialize();
+        g_overlay.SetVisible(false);
+        g_overlay.SetState(OverlayState::Disconnected);
+
         int portControl = basePort;
         int portVideo   = basePort + 1;
         int portAudio   = basePort + 2;
@@ -209,6 +223,14 @@ namespace SessionManager {
 
             // Cả 3 kết nối đã sẵn sàng!
             g_isConnected = true;
+            g_lastInputTimeMs = 0;
+
+            // 1. Hiển thị Pop-up thông báo (tự tắt sau 5s hoặc khi click)
+            ConnectionAlert::Show(nullptr, L"Manager is connecting to your device.");
+
+            // 2. Kích hoạt và hiện Overlay trạng thái ở góc phải trên màn hình
+            g_overlay.SetVisible(true);
+            g_overlay.SetState(OverlayState::ConnectedViewing);
 
             // Bắt đầu thu âm và gửi trực tiếp qua cổng Audio (8082)
             AudioCapture::Start([](const char* buffer, int size) {
@@ -223,6 +245,11 @@ namespace SessionManager {
 
             // Giám sát trạng thái kết nối
             while (g_isConnected && g_isRunning) {
+                // Tự động chuyển từ "Controlling" về "Monitoring" nếu quản lý ngưng thao tác > 1.5 giây
+                if (g_lastInputTimeMs > 0 && (GetTickCount64() - g_lastInputTimeMs > 1500)) {
+                    g_overlay.SetState(OverlayState::ConnectedViewing);
+                    g_lastInputTimeMs = 0;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
 
@@ -233,6 +260,10 @@ namespace SessionManager {
             g_videoServer.CloseClient();
             g_audioServer.CloseClient();
 
+            // Cập nhật trạng thái và ẩn overlay khi Manager ngắt kết nối
+            g_overlay.SetState(OverlayState::Disconnected);
+            g_overlay.SetVisible(false);
+
             if (txThread.joinable()) txThread.join();
             if (rxThread.joinable()) rxThread.join();
         }
@@ -240,6 +271,7 @@ namespace SessionManager {
         g_controlServer.Close();
         g_videoServer.Close();
         g_audioServer.Close();
+        g_overlay.Destroy();
     }
 
     void Stop() {
@@ -249,5 +281,10 @@ namespace SessionManager {
         g_controlServer.Close();
         g_videoServer.Close();
         g_audioServer.Close();
+        g_overlay.Destroy();
+    }
+
+    StatusOverlay& GetOverlay() {
+        return g_overlay;
     }
 }
