@@ -1,5 +1,6 @@
 #include "../../Shared/Network.h"
 #include <windows.h>
+#include <mmsystem.h>
 #include <thread>
 
 #include "SessionManager.h"
@@ -25,8 +26,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // --------------------------------------------------
 
     // 1. Khởi tạo Winsock (Gọi hàm do Dev 1 viết)
+    timeBeginPeriod(1);
     if (!Network::Initialize()) {
         MessageBoxW(NULL, L"Không thể khởi tạo Winsock2!", L"Lỗi nghiêm trọng", MB_OK | MB_ICONERROR);
+        timeEndPeriod(1);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); } // Dọn dẹp Mutex
         return 1;
     }
@@ -68,6 +71,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     SessionManager::Stop();           // Đóng socket, tắt luồng mạng
     DiscoveryResponder::Stop();       // Dừng lắng nghe UDP và gửi thông báo DISCOVERY_BYE
     Network::Cleanup();               // Tắt Winsock
+    timeEndPeriod(1);
 
     // Giải phóng Mutex trước khi app tắt hoàn toàn
     if (hMutex) {
