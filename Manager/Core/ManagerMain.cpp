@@ -28,6 +28,7 @@
 
 // Nạp thư viện Windows API chuẩn
 #include <windows.h>
+#include <timeapi.h>
 
 // Nạp thư viện đồ họa GDI+ (dùng để giải nén ảnh JPEG và vẽ giao diện)
 #include <gdiplus.h>
@@ -99,6 +100,9 @@ void CloseAll() {
 //   - (nCmdShow): Trạng thái hiển thị cửa sổ ban đầu (phóng to, thu nhỏ, bình thường).
 // ============================================================================
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
+    // Đặt độ phân giải bộ định thời Windows về 1ms (chuẩn 60-120 FPS mượt mà)
+    timeBeginPeriod(1);
+
     // Bật chế độ nhận diện DPI màn hình (High-DPI Aware) để giao diện không bị mờ nhòe trên màn hình 2K/4K
     SetProcessDPIAware();
 
@@ -188,6 +192,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     // Giải phóng thư viện comctl32.dll nếu đã nạp
     if (hComCtl) FreeLibrary(hComCtl);
+
+    // Khôi phục bộ định thời Windows
+    timeEndPeriod(1);
 
     // Trả về mã thoát 0 (kết thúc chương trình thành công)
     return 0;

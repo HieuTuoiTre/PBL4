@@ -248,10 +248,10 @@ namespace {
         if (width <= 0 || headerH <= 0) return;
 
         // Double-buffering toàn bộ Header bằng Bitmap trong bộ nhớ tránh chớp giật
-        Gdiplus::Bitmap memBmp(width, headerH, PixelFormat32bppPARGB);
+        Gdiplus::Bitmap memBmp(width, headerH, PixelFormat32bppRGB);
         Gdiplus::Graphics g(&memBmp);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+        g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
         // Nền Header Dashboard: Slate Graphite tối RGB(24, 25, 30)
         Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 24, 25, 30));
@@ -277,8 +277,8 @@ namespace {
 
         // Sử dụng UnitPixel thay vì UnitPoint để không bao giờ bị nhân đôi DPI dẫn tới cắt chữ
         Gdiplus::FontFamily fontFamily(L"Segoe UI");
-        Gdiplus::Font fontTitle(&fontFamily, 11.5f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-        Gdiplus::Font fontVal(&fontFamily, 19.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font fontTitle(&fontFamily, 11.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font fontVal(&fontFamily, 20.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
 
         struct StatCard {
             std::wstring title;
@@ -313,7 +313,7 @@ namespace {
         Gdiplus::StringFormat sf;
         sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
         sf.SetLineAlignment(Gdiplus::StringAlignmentNear);
-        sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+        sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap | Gdiplus::StringFormatFlagsNoClip);
 
         for (int i = 0; i < 4; i++) {
             float cx = padX + i * (cardW + cardGap);
@@ -325,20 +325,20 @@ namespace {
             Gdiplus::Pen cardBorder(Gdiplus::Color(255, 52, 55, 68), 1.0f);
             g.DrawPath(&cardBorder, &path);
 
-            // 1. Tiêu đề thẻ (rõ ràng, không bị xén cạnh)
-            Gdiplus::RectF titleRect(cx + 10.0f * scale, cardY + 7.0f * scale, cardW - 20.0f * scale, 16.0f * scale);
+            // 1. Tiêu đề thẻ (rõ ràng, không bị xén cạnh, hỗ trợ dấu tiếng Việt đầy đủ)
+            Gdiplus::RectF titleRect(cx + 10.0f * scale, cardY + 8.0f * scale, cardW - 20.0f * scale, 18.0f * scale);
             Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 156, 163, 175));
             g.DrawString(cards[i].title.c_str(), -1, &fontTitle, titleRect, &sf, &titleBrush);
 
-            // 2. Giá trị số đo lớn nổi bật với màu cảnh báo tương ứng
-            Gdiplus::RectF valRect(cx + 10.0f * scale, cardY + 25.0f * scale, cardW - 20.0f * scale, 24.0f * scale);
+            // 2. Giá trị số đo lớn nổi bật với màu cảnh báo tương ứng (không bị cấn lề trên)
+            Gdiplus::RectF valRect(cx + 10.0f * scale, cardY + 28.0f * scale, cardW - 20.0f * scale, 28.0f * scale);
             Gdiplus::SolidBrush valBrush(cards[i].accentColor);
             g.DrawString(cards[i].value.c_str(), -1, &fontVal, valRect, &sf, &valBrush);
 
             // 3. Mini progress bar nằm ở đáy thẻ
             if (cards[i].percent >= 0) {
                 float barH = 4.0f * scale;
-                float barY = cardY + cardH - barH - 6.0f * scale;
+                float barY = cardY + cardH - barH - 8.0f * scale;
                 float barW = cardW - 20.0f * scale;
                 Gdiplus::SolidBrush barBg(Gdiplus::Color(255, 48, 51, 62));
                 g.FillRectangle(&barBg, cx + 10.0f * scale, barY, barW, barH);
@@ -350,9 +350,9 @@ namespace {
             }
         }
 
-        // Sao chép từ bộ nhớ ra màn hình
+        // Sao chép từ bộ nhớ ra màn hình theo đúng kích thước 1:1 pixel
         Gdiplus::Graphics gScreen(hdc);
-        gScreen.DrawImage(&memBmp, 0, 0);
+        gScreen.DrawImage(&memBmp, 0, 0, width, headerH);
     }
 
     // ========================================================================
@@ -360,7 +360,7 @@ namespace {
     // ========================================================================
     LRESULT CALLBACK TaskWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         float scale = GetDpiScale(hwnd);
-        int headerH = (int)std::round(80.0f * scale);
+        int headerH = (int)std::round(90.0f * scale);
 
         switch (msg) {
             // Khởi tạo các control con khi cửa sổ vừa tạo
@@ -423,8 +423,8 @@ namespace {
             // Giới hạn kích thước tối thiểu của cửa sổ (không cho co nhỏ quá mức làm mất bố cục)
             case WM_GETMINMAXINFO: {
                 MINMAXINFO* pMMI = (MINMAXINFO*)lp;
-                pMMI->ptMinTrackSize.x = (LONG)std::round(660.0f * scale);
-                pMMI->ptMinTrackSize.y = (LONG)std::round(480.0f * scale);
+                pMMI->ptMinTrackSize.x = (LONG)std::round(720.0f * scale);
+                pMMI->ptMinTrackSize.y = (LONG)std::round(500.0f * scale);
                 return 0;
             }
 
@@ -614,7 +614,7 @@ namespace TaskManagerWindow {
                 scale = (float)GetDeviceCaps(screenDc, LOGPIXELSY) / 96.0f;
                 ReleaseDC(NULL, screenDc);
             }
-            int winW = (int)std::round(780.0f * scale);
+            int winW = (int)std::round(820.0f * scale);
             int winH = (int)std::round(620.0f * scale);
 
             int scrW = GetSystemMetrics(SM_CXSCREEN);

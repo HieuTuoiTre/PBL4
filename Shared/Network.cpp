@@ -70,6 +70,9 @@ bool TcpServer::AcceptConnection(int timeoutMs){
     }
     BOOL nodelay = TRUE;
     setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+    int bufSize = 512 * 1024; // 512KB socket buffer giúp đẩy FPS tối đa
+    setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
+    setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
     return true;
 }
 
@@ -172,6 +175,9 @@ bool TcpClient::Connect(const std::string& ip, int port){
 
     BOOL nodelay = TRUE;
     setsockopt(connectSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+    int bufSize = 512 * 1024; // 512KB socket buffer giúp nhận gói video tức thì
+    setsockopt(connectSocket, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
+    setsockopt(connectSocket, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
 
     return true;
 }

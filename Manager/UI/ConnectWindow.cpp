@@ -503,19 +503,19 @@ namespace {
                                 ListView_GetItemText(g_hListClients, itemIdx, 3, textBuf, 64);
                                 bool isBusy = (wcsstr(textBuf, L"bận") != nullptr || wcsstr(textBuf, L"Bận") != nullptr);
 
-                                // Vẽ icon chấm tròn vector rõ nét (Xanh lá cây chuẩn cho Sẵn sàng, Vàng hổ phách cho Đang bận)
+                                // Vẽ icon chấm tròn vector rõ nét (Xanh lá cây chuẩn #22C55E cho Sẵn sàng, Vàng hổ phách cho Đang bận)
                                 int rowH = subRect.bottom - subRect.top;
                                 int dotSize = (rowH > 22) ? 10 : 8;
-                                int dotX = subRect.left + 8;
+                                int dotX = subRect.left + 10;
                                 int dotY = subRect.top + (rowH - dotSize) / 2;
 
-                                COLORREF dotFill = isBusy ? RGB(245, 158, 11) : RGB(34, 197, 94);     // Màu ruột chấm
-                                COLORREF dotBorder = isBusy ? RGB(217, 119, 6) : RGB(22, 163, 74);   // Viền chấm
+                                COLORREF dotFill = isBusy ? RGB(245, 158, 11) : RGB(34, 197, 94);     // #22C55E Emerald green / Amber
+                                COLORREF dotBorder = isBusy ? RGB(217, 119, 6) : RGB(22, 163, 74);   // #16A34A Darker border
                                 HBRUSH dotBrush = CreateSolidBrush(dotFill);
                                 HPEN dotPen = CreatePen(PS_SOLID, 1, dotBorder);
                                 HGDIOBJ oldBrush = SelectObject(hdc, dotBrush);
                                 HGDIOBJ oldPen = SelectObject(hdc, dotPen);
-                                Ellipse(hdc, dotX, dotY, dotX + dotSize, dotY + dotSize); // Vẽ hình tròn vector
+                                Ellipse(hdc, dotX, dotY, dotX + dotSize, dotY + dotSize);
                                 SelectObject(hdc, oldBrush);
                                 SelectObject(hdc, oldPen);
                                 DeleteObject(dotBrush);
@@ -523,12 +523,13 @@ namespace {
 
                                 // Vẽ chuỗi văn bản trạng thái ngay cạnh chấm tròn
                                 RECT textRect = subRect;
-                                textRect.left = dotX + dotSize + 6;
+                                textRect.left = dotX + dotSize + 8;
                                 SetBkMode(hdc, TRANSPARENT);
                                 COLORREF textColor = isSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : (isBusy ? RGB(180, 83, 9) : RGB(21, 128, 61));
                                 SetTextColor(hdc, textColor);
-                                SelectObject(hdc, g_hFontEdit);
+                                HGDIOBJ oldF = SelectObject(hdc, g_hFontEdit);
                                 DrawTextW(hdc, isBusy ? L"Đang bận" : L"Sẵn sàng", -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                                SelectObject(hdc, oldF);
 
                                 return CDRF_SKIPDEFAULT; // Báo cho Windows biết ta đã tự vẽ xong ô này
                             }

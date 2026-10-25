@@ -31,6 +31,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <cstring>
 
 namespace {
     // ========================================================================
@@ -38,17 +39,21 @@ namespace {
     // ========================================================================
     HWND g_hwnd = NULL;                 // Handle cửa sổ điều khiển RemoteWindow
     TcpClient* g_client = nullptr;      // Kênh mạng TCP Điều khiển (Control Channel 8080)
-    Gdiplus::Bitmap* g_frame = nullptr; // Khung đệm ảnh Bitmap tổng thể lưu trữ toàn bộ màn hình Client
+    HDC g_hFrameDC = NULL;              // Device Context bộ nhớ chứa khung hình máy Client
+    HBITMAP g_hFrameBmp = NULL;         // Bitmap DIBSection khung hình
+    HBITMAP g_hOldFrameBmp = NULL;      // Bitmap cũ của DC
+    int g_frameW = 0;                   // Chiều rộng khung hình
+    int g_frameH = 0;                   // Chiều cao khung hình
     IStream* g_decodeStream = nullptr;  // Đối tượng luồng IStream COM tái sử dụng để nạp và giải nén JPEG
-    CRITICAL_SECTION g_cs;              // Khóa đồng bộ bảo vệ khung hình g_frame giữa luồng nhận mạng và luồng vẽ giao diện
+    CRITICAL_SECTION g_cs;              // Khóa đồng bộ bảo vệ khung hình giữa luồng nhận mạng và luồng vẽ giao diện
 
     int g_fps = 0;                      // Chỉ số khung hình trên giây tính toán được
     int g_frameCount = 0;               // Biến đếm số lượng frame nhận được trong khoảng thời gian 1 giây
     DWORD g_lastTime = 0;               // Thời điểm (TickCount) bắt đầu chu kỳ đo FPS 1000ms
 
     // Lấy kích thước chiều rộng và chiều cao ảnh màn hình máy Client từ xa hiện tại
-    int GetFrameWidth() { return g_frame ? (int)g_frame->GetWidth() : 0; }
-    int GetFrameHeight() { return g_frame ? (int)g_frame->GetHeight() : 0; }
+    int GetFrameWidth() { return g_frameW; }
+    int GetFrameHeight() { return g_frameH; }
 
     // ========================================================================
     // HỖ TRỢ DYNAMIC DPI SCALING
@@ -135,7 +140,7 @@ namespace {
         bool isCtrl = InputHandler::IsControlling();
         std::wstring modeText = isCtrl ? L"Đang điều khiển" : L"Chỉ xem";
         std::wstring modeHint = L"Ctrl+Alt";
-        float btnModeW = (float)std::round((isCtrl ? 140.0f : 96.0f) * scale);
+        float btnModeW = (float)std::round((isCtrl ? 144.0f : 100.0f) * scale);
         buttons.push_back({ BTN_MODE, Gdiplus::RectF(curX, btnY, btnModeW, btnHeight), modeText, modeHint, true });
         curX += btnModeW + gap;
 
@@ -143,7 +148,7 @@ namespace {
         bool isMuted = AudioPlayer::IsMuted();
         std::wstring muteText = isMuted ? L"Đã tắt tiếng" : L"Âm thanh";
         std::wstring muteHint = L"Ctrl+M";
-        float btnMuteW = (float)std::round((isMuted ? 112.0f : 92.0f) * scale);
+        float btnMuteW = (float)std::round((isMuted ? 122.0f : 106.0f) * scale);
         buttons.push_back({ BTN_MUTE, Gdiplus::RectF(curX, btnY, btnMuteW, btnHeight), muteText, muteHint, isMuted });
         curX += btnMuteW + gap;
 
@@ -153,7 +158,7 @@ namespace {
         curX += btnVolMiniW + 2.0f * scale;
 
         int volPercent = (int)std::round(AudioPlayer::GetVolume() * 100.0f);
-        float lblVolW = (float)std::round(52.0f * scale);
+        float lblVolW = (float)std::round(64.0f * scale);
         buttons.push_back({ BTN_NONE, Gdiplus::RectF(curX, btnY, lblVolW, btnHeight), std::to_wstring(volPercent) + L"%", L"", false });
         curX += lblVolW + 2.0f * scale;
 
@@ -161,12 +166,12 @@ namespace {
         curX += btnVolMiniW + gap * 2.0f;
 
         // 4. Nút mở bảng quản lý tác vụ Task Manager
-        float btnTaskW = (float)std::round(120.0f * scale);
+        float btnTaskW = (float)std::round(132.0f * scale);
         buttons.push_back({ BTN_TASK_MGR, Gdiplus::RectF(curX, btnY, btnTaskW, btnHeight), L"Task Manager", L"Ctrl+Tab", false });
         curX += btnTaskW + gap;
 
         // 5. Nút mở bảng quản lý tập tin File Explorer
-        float btnFileW = (float)std::round(115.0f * scale);
+        float btnFileW = (float)std::round(124.0f * scale);
         buttons.push_back({ BTN_FILE_EXP, Gdiplus::RectF(curX, btnY, btnFileW, btnHeight), L"File Explorer", L"Ctrl+E", false });
         curX += btnFileW + gap;
 
@@ -223,7 +228,7 @@ namespace {
         Gdiplus::StringFormat sfCenter;
         sfCenter.SetAlignment(Gdiplus::StringAlignmentCenter);
         sfCenter.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-        sfCenter.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+        sfCenter.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap | Gdiplus::StringFormatFlagsNoClip);
 
         Gdiplus::GraphicsPath path;
         float radius = 5.0f * scale; // Bán kính bo góc của nút bấm
@@ -297,6 +302,58 @@ namespace {
                 textRect.X += (dotSize + 4.0f * scale);
                 textRect.Width -= (dotSize + 4.0f * scale);
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
+            } else if (btn.id == BTN_MUTE) {
+                // Icon loa vector sắc nét (không dùng emoji)
+                bool isMuted = AudioPlayer::IsMuted();
+                float iconW = 12.0f * scale;
+                float iconX = btn.rect.X + 10.0f * scale;
+                float iconY = btn.rect.Y + (btn.rect.Height - 10.0f * scale) / 2.0f;
+                Gdiplus::SolidBrush iconBrush(textColor);
+                // Thân loa
+                g.FillRectangle(&iconBrush, iconX, iconY + 3.0f * scale, 3.0f * scale, 4.0f * scale);
+                // Phễu loa
+                Gdiplus::PointF conePts[3] = {
+                    Gdiplus::PointF(iconX + 3.0f * scale, iconY + 3.0f * scale),
+                    Gdiplus::PointF(iconX + 7.0f * scale, iconY),
+                    Gdiplus::PointF(iconX + 7.0f * scale, iconY + 10.0f * scale)
+                };
+                g.FillPolygon(&iconBrush, conePts, 3);
+                if (isMuted) {
+                    Gdiplus::Pen slashPen(Gdiplus::Color(255, 239, 68, 68), 1.5f * scale);
+                    g.DrawLine(&slashPen, iconX, iconY, iconX + 11.0f * scale, iconY + 10.0f * scale);
+                } else {
+                    Gdiplus::Pen arcPen(textColor, 1.2f * scale);
+                    g.DrawArc(&arcPen, iconX + 5.0f * scale, iconY + 2.0f * scale, 6.0f * scale, 6.0f * scale, -45.0f, 90.0f);
+                }
+                Gdiplus::RectF textRect = btn.rect;
+                textRect.X += (iconW + 4.0f * scale);
+                textRect.Width -= (iconW + 4.0f * scale);
+                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
+            } else if (btn.id == BTN_TASK_MGR) {
+                // Icon biểu đồ cột 3 thanh sắc nét
+                float iconW = 12.0f * scale;
+                float iconX = btn.rect.X + 10.0f * scale;
+                float iconY = btn.rect.Y + (btn.rect.Height - 11.0f * scale) / 2.0f;
+                Gdiplus::SolidBrush barBrush(textColor);
+                g.FillRectangle(&barBrush, iconX, iconY + 5.0f * scale, 2.5f * scale, 6.0f * scale);
+                g.FillRectangle(&barBrush, iconX + 4.0f * scale, iconY, 2.5f * scale, 11.0f * scale);
+                g.FillRectangle(&barBrush, iconX + 8.0f * scale, iconY + 3.0f * scale, 2.5f * scale, 8.0f * scale);
+                Gdiplus::RectF textRect = btn.rect;
+                textRect.X += (iconW + 4.0f * scale);
+                textRect.Width -= (iconW + 4.0f * scale);
+                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
+            } else if (btn.id == BTN_FILE_EXP) {
+                // Icon thư mục vector sắc nét
+                float iconW = 13.0f * scale;
+                float iconX = btn.rect.X + 10.0f * scale;
+                float iconY = btn.rect.Y + (btn.rect.Height - 10.0f * scale) / 2.0f;
+                Gdiplus::SolidBrush folderBrush(textColor);
+                g.FillRectangle(&folderBrush, iconX, iconY, 5.0f * scale, 3.0f * scale);
+                g.FillRectangle(&folderBrush, iconX, iconY + 2.0f * scale, 12.0f * scale, 8.0f * scale);
+                Gdiplus::RectF textRect = btn.rect;
+                textRect.X += (iconW + 4.0f * scale);
+                textRect.Width -= (iconW + 4.0f * scale);
+                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
             } else {
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, btn.rect, &sfCenter, &textBrush);
             }
@@ -334,9 +391,9 @@ namespace {
         Gdiplus::SolidBrush fpsTextBrush(Gdiplus::Color(255, 215, 220, 230));
         g.DrawString(fpsStr.c_str(), -1, &fontBtn, fpsTextRect, &sfLeft, &fpsTextBrush);
 
-        // Sao chép nhanh (BitBlt) từ khung đệm Bitmap trong RAM ra thiết bị hiển thị HDC
+        // Sao chép nhanh từ khung đệm Bitmap trong RAM ra thiết bị hiển thị HDC đúng tỷ lệ 1:1 pixel
         Gdiplus::Graphics targetG(hdc);
-        targetG.DrawImage(&memBmp, 0, 0);
+        targetG.DrawImage(&memBmp, 0, 0, width, tbHeight);
     }
 
     // ========================================================================
@@ -358,17 +415,18 @@ namespace {
                     RenderToolbar(hwnd, hdc, r, tbHeight);
                 }
 
-                // Nếu vùng cần vẽ nằm dưới Toolbar -> Vẽ khung hình máy tính Client
+                // Nếu vùng cần vẽ nằm dưới Toolbar -> Vẽ khung hình máy tính Client bằng StretchBlt phần cứng siêu tốc
                 if (ps.rcPaint.bottom > tbHeight) {
                     EnterCriticalSection(&g_cs);
-                    if (g_frame) {
-                        Gdiplus::Graphics g(hdc);
-                        // Cấu hình chế độ vẽ siêu tốc không nội suy để đạt tốc độ FPS tối đa
-                        g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-                        g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
-                        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
-                        // Kéo giãn khung hình sao cho vừa vặn vùng hiển thị còn lại
-                        g.DrawImage(g_frame, 0, tbHeight, r.right, r.bottom - tbHeight);
+                    if (g_hFrameDC && g_frameW > 0 && g_frameH > 0) {
+                        int dstW = r.right;
+                        int dstH = r.bottom - tbHeight;
+                        if (dstW == g_frameW && dstH == g_frameH) {
+                            BitBlt(hdc, 0, tbHeight, dstW, dstH, g_hFrameDC, 0, 0, SRCCOPY);
+                        } else {
+                            SetStretchBltMode(hdc, COLORONCOLOR);
+                            StretchBlt(hdc, 0, tbHeight, dstW, dstH, g_hFrameDC, 0, 0, g_frameW, g_frameH, SRCCOPY);
+                        }
                     }
                     LeaveCriticalSection(&g_cs);
                 }
@@ -627,7 +685,10 @@ namespace RemoteWindow {
     HWND Create(HINSTANCE hInst, TcpClient* client) {
         g_client = client;
         InitializeCriticalSection(&g_cs); // Khởi tạo Critical Section bảo vệ khung hình
-        CreateStreamOnHGlobal(NULL, TRUE, &g_decodeStream); // Cấp phát 1 IStream COM duy nhất dùng chung cho giải nén
+
+        // Cấp phát sẵn 2MB HGLOBAL cho luồng giải mã JPEG để không bị cấp phát lại
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, 2 * 1024 * 1024);
+        CreateStreamOnHGlobal(hMem, TRUE, &g_decodeStream);
         g_lastTime = GetTickCount();
 
         // Đăng ký lớp cửa sổ MgrWindow
@@ -652,20 +713,19 @@ namespace RemoteWindow {
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
         if (jpegSize <= 0 || !jpegData || !g_decodeStream) return;
 
-        // Đưa con trỏ đọc/ghi của IStream về vị trí ban đầu mà không giải phóng bộ nhớ
         LARGE_INTEGER liZero = {};
-        ULARGE_INTEGER uliSize = {};
-        uliSize.QuadPart = (ULONGLONG)jpegSize;
-
         g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-        g_decodeStream->SetSize(uliSize); // Đặt lại kích thước luồng theo đúng dung lượng gói JPEG
 
-        // Ghi dữ liệu JPEG nhị phân vào luồng IStream
-        ULONG written = 0;
-        if (FAILED(g_decodeStream->Write(jpegData, (ULONG)jpegSize, &written)) || (int)written != jpegSize) {
-            return;
+        // Sao chép trực tiếp vào bộ nhớ 2MB đệm của IStream siêu tốc
+        HGLOBAL hMem = NULL;
+        if (GetHGlobalFromStream(g_decodeStream, &hMem) == S_OK && hMem) {
+            void* pData = GlobalLock(hMem);
+            if (pData) {
+                std::memcpy(pData, jpegData, jpegSize);
+                GlobalUnlock(hMem);
+            }
         }
-        g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL); // Đưa lại về đầu luồng để chuẩn bị nạp vào GDI+
+        g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL);
 
         // Nạp và giải mã ảnh JPEG thông qua GDI+ Image Stream
         Gdiplus::Image* img = Gdiplus::Image::FromStream(g_decodeStream);
@@ -675,27 +735,51 @@ namespace RemoteWindow {
 
             EnterCriticalSection(&g_cs); // Bắt đầu vùng khóa đồng bộ an toàn dữ liệu ảnh
 
-            // Nếu khung hình tổng chưa tồn tại thì tạo mới theo kích thước khối ảnh
-            if (!g_frame) {
-                g_frame = new Gdiplus::Bitmap(reqW, reqH, PixelFormat32bppPARGB);
-            } else if ((int)g_frame->GetWidth() < reqW || (int)g_frame->GetHeight() < reqH) {
-                // Tự động mở rộng khung nền nếu ban đầu Client gửi khối Delta nhỏ hơn kích thước đầy đủ
-                int newW = ((int)g_frame->GetWidth() > reqW) ? (int)g_frame->GetWidth() : reqW;
-                int newH = ((int)g_frame->GetHeight() > reqH) ? (int)g_frame->GetHeight() : reqH;
-                Gdiplus::Bitmap* expanded = new Gdiplus::Bitmap(newW, newH, PixelFormat32bppPARGB);
-                Gdiplus::Graphics gExp(expanded);
-                gExp.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-                gExp.DrawImage(g_frame, 0, 0);
-                delete g_frame;
-                g_frame = expanded;
+            // Nếu khung hình tổng chưa tồn tại hoặc nhỏ hơn kích thước yêu cầu -> Tạo / Mở rộng DIBSection
+            if (!g_hFrameDC || g_frameW < reqW || g_frameH < reqH) {
+                int newW = (g_frameW > reqW) ? g_frameW : reqW;
+                int newH = (g_frameH > reqH) ? g_frameH : reqH;
+
+                HDC screenDC = GetDC(NULL);
+                HDC newDC = CreateCompatibleDC(screenDC);
+
+                BITMAPINFO bmi = {0};
+                bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                bmi.bmiHeader.biWidth = newW;
+                bmi.bmiHeader.biHeight = -newH; // Top-down
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 32;
+                bmi.bmiHeader.biCompression = BI_RGB;
+
+                void* pPixels = nullptr;
+                HBITMAP newBmp = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &pPixels, NULL, 0);
+                HBITMAP oldBmp = (HBITMAP)SelectObject(newDC, newBmp);
+
+                if (g_hFrameDC) {
+                    BitBlt(newDC, 0, 0, g_frameW, g_frameH, g_hFrameDC, 0, 0, SRCCOPY);
+                    if (g_hOldFrameBmp) SelectObject(g_hFrameDC, g_hOldFrameBmp);
+                    DeleteDC(g_hFrameDC);
+                    if (g_hFrameBmp) DeleteObject(g_hFrameBmp);
+                }
+                ReleaseDC(NULL, screenDC);
+
+                g_hFrameDC = newDC;
+                g_hFrameBmp = newBmp;
+                g_hOldFrameBmp = oldBmp;
+                g_frameW = newW;
+                g_frameH = newH;
             }
 
-            // Vẽ đè vùng ảnh JPEG vừa giải mã lên đúng tọa độ x, y, width, height của màn hình
-            Gdiplus::Graphics g(g_frame);
-            g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-            g.DrawImage(img, delta.x, delta.y, delta.width, delta.height);
+            // Vẽ đè vùng ảnh JPEG vừa giải mã lên memory DC
+            {
+                Gdiplus::Graphics g(g_hFrameDC);
+                g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+                g.DrawImage(img, delta.x, delta.y, delta.width, delta.height);
+            }
 
             LeaveCriticalSection(&g_cs); // Rời khỏi vùng khóa đồng bộ
+
+            delete img; // Giải phóng đối tượng ảnh tạm ngay lập tức
 
             // Tính toán chỉ số khung hình FPS
             g_frameCount++;
@@ -722,8 +806,9 @@ namespace RemoteWindow {
                 clientRect.top = tbHeight;
                 InvalidateRect(g_hwnd, &clientRect, FALSE); // Cập nhật lại vùng hiển thị màn hình từ xa
             }
+        } else {
+            if (img) delete img;
         }
-        if (img) delete img; // Giải phóng đối tượng ảnh tạm
     }
 
     // ========================================================================
@@ -734,10 +819,19 @@ namespace RemoteWindow {
             g_decodeStream->Release(); // Giải phóng đối tượng COM IStream
             g_decodeStream = nullptr;
         }
-        if (g_frame) {
-            delete g_frame;           // Giải phóng khung đệm Bitmap GDI+
-            g_frame = nullptr;
+        EnterCriticalSection(&g_cs);
+        if (g_hFrameDC) {
+            if (g_hOldFrameBmp) SelectObject(g_hFrameDC, g_hOldFrameBmp);
+            DeleteDC(g_hFrameDC);
+            g_hFrameDC = NULL;
         }
+        if (g_hFrameBmp) {
+            DeleteObject(g_hFrameBmp);
+            g_hFrameBmp = NULL;
+        }
+        g_frameW = 0;
+        g_frameH = 0;
+        LeaveCriticalSection(&g_cs);
         DeleteCriticalSection(&g_cs); // Hủy khóa Critical Section
     }
 }

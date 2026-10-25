@@ -66,7 +66,9 @@ namespace ScreenCapture {
         g_hDibBitmap = CreateDIBSection(g_hDesktopDC, &bmi, DIB_RGB_COLORS, (void**)&g_dibPixels, NULL, 0);
         if (!g_hDibBitmap || !g_dibPixels) return false;
 
-        if (CreateStreamOnHGlobal(NULL, TRUE, &g_pStream) != S_OK) return false;
+        // Cấp phát sẵn bộ đệm 2MB HGLOBAL để nén ảnh không bị phân mảnh bộ nhớ
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, 2 * 1024 * 1024);
+        if (!hMem || CreateStreamOnHGlobal(hMem, TRUE, &g_pStream) != S_OK) return false;
 
         g_hOldBitmap = (HBITMAP)SelectObject(g_hCaptureDC, g_hDibBitmap);
         g_prevPixels.clear();
@@ -99,15 +101,16 @@ namespace ScreenCapture {
                 if (y < minY) minY = y;
                 if (y > maxY) maxY = y;
 
-                for (int x = 0; x < g_screenWidth; ++x) {
+                // Tối ưu quét biên: chỉ quét trong phạm vi có thể mở rộng biên minX/maxX
+                for (int x = 0; x < minX; ++x) {
                     if (g_dibPixels[rowOffset + x] != g_prevPixels[rowOffset + x]) {
-                        if (x < minX) minX = x;
+                        minX = x;
                         break;
                     }
                 }
-                for (int x = g_screenWidth - 1; x >= minX; --x) {
+                for (int x = g_screenWidth - 1; x > maxX; --x) {
                     if (g_dibPixels[rowOffset + x] != g_prevPixels[rowOffset + x]) {
-                        if (x > maxX) maxX = x;
+                        maxX = x;
                         break;
                     }
                 }
@@ -117,17 +120,30 @@ namespace ScreenCapture {
 
         if (minX > maxX) return false;
 
-        outX = minX;
-        outY = minY;
-        outWidth = maxX - minX + 1;
-        outHeight = maxY - minY + 1;
+        // Căn chỉnh tọa độ theo block 16px (MCU JPEG) để tăng tốc nén tối đa
+        int alignX = (minX / 16) * 16;
+        int alignY = (minY / 16) * 16;
+        int alignR = ((maxX + 16) / 16) * 16;
+        int alignB = ((maxY + 16) / 16) * 16;
+        if (alignR > g_screenWidth) alignR = g_screenWidth;
+        if (alignB > g_screenHeight) alignB = g_screenHeight;
+
+        outX = alignX;
+        outY = alignY;
+        outWidth = alignR - alignX;
+        outHeight = alignB - alignY;
 
         BYTE* cropStartPtr = (BYTE*)(g_dibPixels + (outY * g_screenWidth) + outX);
         int stride = g_screenWidth * 4;
         Bitmap croppedBmp(outWidth, outHeight, stride, PixelFormat32bppRGB, cropStartPtr);
 
         int changedArea = outWidth * outHeight;
-        ULONG quality = (changedArea > (pixelsCount / 2)) ? 35 : 55;
+        ULONG quality = 50;
+        if (changedArea > (pixelsCount / 2)) {
+            quality = 35; // Khi toàn màn hình thay đổi -> nén nhanh hơn để giữ 60 FPS
+        } else if (changedArea > (pixelsCount / 4)) {
+            quality = 40;
+        }
 
         EncoderParameters encoderParameters;
         encoderParameters.Count = 1;
@@ -136,29 +152,31 @@ namespace ScreenCapture {
         encoderParameters.Parameter[0].NumberOfValues = 1;
         encoderParameters.Parameter[0].Value = &quality;
 
-        // Reset vị trí và kích thước Stream về 0 trước khi ghi ảnh mới
+        // Reset vị trí ghi về đầu stream (tái sử dụng buffer 2MB HGLOBAL)
         LARGE_INTEGER liZero = {};
-        ULARGE_INTEGER uliZero = {};
         g_pStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-        g_pStream->SetSize(uliZero);
 
         if (croppedBmp.Save(g_pStream, &g_jpegClsid, &encoderParameters) != Ok) {
             return false;
         }
 
-        STATSTG statstg;
-        g_pStream->Stat(&statstg, STATFLAG_NONAME);
-        ULONG streamSize = statstg.cbSize.LowPart;
+        ULARGE_INTEGER streamPos = {};
+        g_pStream->Seek(liZero, STREAM_SEEK_CUR, &streamPos);
+        ULONG streamSize = (ULONG)streamPos.QuadPart;
 
         if (streamSize > 0) {
-            g_pStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-
             Protocol::VideoDeltaHeader delta = { outX, outY, outWidth, outHeight };
             outBuffer.resize(sizeof(delta) + streamSize);
             std::memcpy(outBuffer.data(), &delta, sizeof(delta));
 
-            ULONG bytesRead = 0;
-            g_pStream->Read(outBuffer.data() + sizeof(delta), streamSize, &bytesRead);
+            HGLOBAL hMem = NULL;
+            if (GetHGlobalFromStream(g_pStream, &hMem) == S_OK && hMem) {
+                void* pData = GlobalLock(hMem);
+                if (pData) {
+                    std::memcpy(outBuffer.data() + sizeof(delta), pData, streamSize);
+                    GlobalUnlock(hMem);
+                }
+            }
         } else {
             outBuffer.clear();
         }

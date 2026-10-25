@@ -1,5 +1,6 @@
 #include "../../Shared/Network.h"
 #include <windows.h>
+#include <timeapi.h>
 #include <thread>
 
 #include "SessionManager.h"
@@ -9,6 +10,9 @@
 #include "../System/InputInjector.h"
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow){
+
+    // Đặt độ phân giải bộ định thời Windows về 1ms (chuẩn 60-120 FPS mượt mà)
+    timeBeginPeriod(1);
 
     SetProcessDPIAware();
     // --- BẬT CƠ CHẾ CHỈ CHO PHÉP 1 TIẾN TRÌNH DUY NHẤT ---
@@ -74,6 +78,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ReleaseMutex(hMutex);
         CloseHandle(hMutex);
     }
+
+    // Khôi phục bộ định thời Windows
+    timeEndPeriod(1);
 
     return 0;
 }

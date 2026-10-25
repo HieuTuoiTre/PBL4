@@ -536,7 +536,7 @@ namespace {
                 LeaveCriticalSection(&g_fileCs);
 
                 SendMessageW(g_hProgressBar, PBM_SETPOS, 100, 0);
-                std::wstring statusStr = L"✅ Đã tải xong: " + Utils::Utf8ToWide(dlName) + L" (" + FormatBytes(total) + L") - Đã lưu tại thư mục Manager.exe";
+                std::wstring statusStr = L"Đã tải xong: " + Utils::Utf8ToWide(dlName) + L" (" + FormatBytes(total) + L") - Đã lưu tại thư mục Manager.exe";
                 if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 return 0;
             }
