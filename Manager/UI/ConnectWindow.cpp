@@ -118,7 +118,7 @@ namespace {
 
             ListView_SetItemText(g_hListClients, i, 2, (LPWSTR)client.userName.c_str());
 
-            std::wstring statusStr = client.isBusy ? L"🟡 Đang bận" : L"🟢 Sẵn sàng";
+            std::wstring statusStr = client.isBusy ? L"Đang bận" : L"Sẵn sàng";
             ListView_SetItemText(g_hListClients, i, 3, (LPWSTR)statusStr.c_str());
 
             if (!selectedComputer.empty() && _wcsicmp(client.computerName.c_str(), selectedComputer.c_str()) == 0) {
@@ -395,7 +395,62 @@ namespace {
             case WM_NOTIFY: {
                 LPNMHDR pnm = (LPNMHDR)lp;
                 if (pnm->idFrom == IDC_LIST_CLIENTS) {
-                    if (pnm->code == NM_DBLCLK) {
+                    if (pnm->code == NM_CUSTOMDRAW) {
+                        LPNMLVCUSTOMDRAW pLvcd = (LPNMLVCUSTOMDRAW)lp;
+                        if (pLvcd->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                            return CDRF_NOTIFYITEMDRAW;
+                        }
+                        if (pLvcd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                            return CDRF_NOTIFYSUBITEMDRAW;
+                        }
+                        if (pLvcd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
+                            if (pLvcd->iSubItem == 3) {
+                                int itemIdx = (int)pLvcd->nmcd.dwItemSpec;
+                                bool isSelected = (ListView_GetItemState(g_hListClients, itemIdx, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+                                HDC hdc = pLvcd->nmcd.hdc;
+                                RECT subRect;
+                                ListView_GetSubItemRect(g_hListClients, itemIdx, 3, LVIR_BOUNDS, &subRect);
+
+                                // Tô màu nền ô
+                                HBRUSH bgBrush = isSelected ? GetSysColorBrush(COLOR_HIGHLIGHT) : GetSysColorBrush(COLOR_WINDOW);
+                                FillRect(hdc, &subRect, bgBrush);
+
+                                wchar_t textBuf[64] = {0};
+                                ListView_GetItemText(g_hListClients, itemIdx, 3, textBuf, 64);
+                                bool isBusy = (wcsstr(textBuf, L"bận") != nullptr || wcsstr(textBuf, L"Bận") != nullptr);
+
+                                // Vẽ icon chấm tròn vector rõ nét (Xanh lá cây chuẩn cho Sẵn sàng, Vàng cho Đang bận)
+                                int rowH = subRect.bottom - subRect.top;
+                                int dotSize = (rowH > 22) ? 10 : 8;
+                                int dotX = subRect.left + 8;
+                                int dotY = subRect.top + (rowH - dotSize) / 2;
+
+                                COLORREF dotFill = isBusy ? RGB(245, 158, 11) : RGB(34, 197, 94);
+                                COLORREF dotBorder = isBusy ? RGB(217, 119, 6) : RGB(22, 163, 74);
+                                HBRUSH dotBrush = CreateSolidBrush(dotFill);
+                                HPEN dotPen = CreatePen(PS_SOLID, 1, dotBorder);
+                                HGDIOBJ oldBrush = SelectObject(hdc, dotBrush);
+                                HGDIOBJ oldPen = SelectObject(hdc, dotPen);
+                                Ellipse(hdc, dotX, dotY, dotX + dotSize, dotY + dotSize);
+                                SelectObject(hdc, oldBrush);
+                                SelectObject(hdc, oldPen);
+                                DeleteObject(dotBrush);
+                                DeleteObject(dotPen);
+
+                                // Vẽ chữ trạng thái
+                                RECT textRect = subRect;
+                                textRect.left = dotX + dotSize + 6;
+                                SetBkMode(hdc, TRANSPARENT);
+                                COLORREF textColor = isSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : (isBusy ? RGB(180, 83, 9) : RGB(21, 128, 61));
+                                SetTextColor(hdc, textColor);
+                                SelectObject(hdc, g_hFontEdit);
+                                DrawTextW(hdc, isBusy ? L"Đang bận" : L"Sẵn sàng", -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+                                return CDRF_SKIPDEFAULT;
+                            }
+                            return CDRF_DODEFAULT;
+                        }
+                    } else if (pnm->code == NM_DBLCLK) {
                         // Click đúp vào một dòng -> Kết nối ngay!
                         int curSel = ListView_GetNextItem(g_hListClients, -1, LVNI_SELECTED);
                         if (curSel != -1) {

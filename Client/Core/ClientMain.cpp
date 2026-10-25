@@ -17,9 +17,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Kiểm tra nếu thẻ bài (Mutex) này đã tồn tại trên hệ thống
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (hMutex) {
-            ReleaseMutex(hMutex);
             CloseHandle(hMutex);
         }
+        MessageBoxW(NULL, L"Ứng dụng Client đang chạy ngầm trong khay hệ thống (System Tray)!\nHãy kiểm tra biểu tượng ở góc phải thanh Taskbar.", L"Thông báo", MB_OK | MB_ICONINFORMATION);
         return 0; // Lập tức tắt tiến trình mới này, giữ nguyên tiến trình cũ đang chạy
     }
     // --------------------------------------------------

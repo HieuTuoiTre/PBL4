@@ -96,12 +96,12 @@ void TcpServer::CloseClient(){
 }
 
 bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
+    // Khóa mutex trước để đảm bảo tính an toàn đa luồng, sau đó mới kiểm tra trạng thái socket
+    std::lock_guard<std::mutex> lock(sendMutex);
 
     if (clientSocket == INVALID_SOCKET){
         return false;
     }
-
-    std::lock_guard<std::mutex> lock(sendMutex);
 
     Protocol::PacketHeader header;
     header.type = type;
@@ -185,12 +185,12 @@ void TcpClient::Close(){
 }
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
-    
+    // Khóa mutex trước để đảm bảo tính an toàn đa luồng, sau đó mới kiểm tra trạng thái socket
+    std::lock_guard<std::mutex> lock(sendMutex);
+
     if (connectSocket == INVALID_SOCKET){
         return false;
     }
-
-    std::lock_guard<std::mutex> lock(sendMutex);
 
     Protocol::PacketHeader header;
     header.type = type;

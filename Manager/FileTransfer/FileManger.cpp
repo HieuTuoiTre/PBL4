@@ -2,14 +2,14 @@
 #include "../../Shared/Utils.h"
 
 bool FileManager::OpenFileForWrite(const std::string& savePath){
+    if (fileStream.is_open()) {
+        fileStream.close();
+    }
     std::wstring widePath = Utils::Utf8ToWide(savePath);
 
-    fileStream.open(widePath.c_str(), std::ios::binary | std::ios::ate | std::ios::trunc);
+    fileStream.open(widePath.c_str(), std::ios::binary | std::ios::trunc);
 
-    if (fileStream.is_open() == false){
-        return false;
-    }
-    return true;
+    return fileStream.is_open();
 }
 
 bool FileManager::WriteChunk(const char* data, int length){

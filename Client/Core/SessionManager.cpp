@@ -8,6 +8,7 @@
 #include "../System/SysMonitor.h"
 #include "StatusOverlay.h"
 #include "ConnectionAlert.h"
+#include "DiscoveryResponder.h"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -223,6 +224,7 @@ namespace SessionManager {
 
             // Cả 3 kết nối đã sẵn sàng!
             g_isConnected = true;
+            DiscoveryResponder::SetBusy(true);
             g_lastInputTimeMs = 0;
 
             // 1. Hiển thị Pop-up thông báo (tự tắt sau 5s hoặc khi click)
