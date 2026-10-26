@@ -1,4 +1,5 @@
 #include "InputHandler.h"
+
 #include <windowsx.h>
 
 namespace InputHandler {
@@ -15,12 +16,15 @@ namespace InputHandler {
 
         int mouseX = GET_X_LPARAM(lp);
         int mouseY = GET_Y_LPARAM(lp);
+
         if (mouseY < toolbarH) return;
+
         mouseY -= toolbarH;
 
         RECT r;
         GetClientRect(hWnd, &r);
         int drawHeight = r.bottom - toolbarH;
+
         if (drawHeight <= 0 || r.right <= 0) return;
 
         Protocol::MousePayload mp = {
@@ -60,3 +64,4 @@ namespace InputHandler {
         return s_isControlling;
     }
 }
+

@@ -1,11 +1,16 @@
 #include "DiscoveryScanner.h"
+
 #include "../../Shared/Protocol.h"
+
 #include "../../Shared/Utils.h"
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <thread>
+
 #include <atomic>
+
 #include <cstring>
 #include <vector>
 
@@ -14,22 +19,31 @@
 #endif
 
 namespace {
+
     SOCKET g_udpSock = INVALID_SOCKET;
+
     std::atomic<bool> g_isRunning(false);
+
     std::thread g_listenThread;
+
     DiscoveryScanner::ClientUpdateCallback g_callback = nullptr;
 
     void ListenLoop() {
         while (g_isRunning) {
+
             sockaddr_in senderAddr = {};
             int senderLen = sizeof(senderAddr);
+
             Protocol::DiscoveryPacket pkt = {};
 
             int bytes = recvfrom(g_udpSock, (char*)&pkt, sizeof(pkt), 0, (sockaddr*)&senderAddr, &senderLen);
+
             if (bytes <= 0) {
+
                 if (!g_isRunning) break;
+
                 int err = WSAGetLastError();
-                // Bỏ qua lỗi WSAECONNRESET (10054) hoặc WSAEINTR để luồng không bị ngắt
+
                 if (err == WSAECONNRESET || err == WSAEINTR) {
                     continue;
                 }
@@ -37,7 +51,7 @@ namespace {
             }
 
             if (bytes == sizeof(Protocol::DiscoveryPacket) && memcmp(pkt.magic, "LAND", 4) == 0) {
-                // Bỏ qua gói tin Query do chính Manager phát đi
+
                 if (pkt.type == Protocol::DISCOVERY_QUERY) {
                     continue;
                 }
@@ -52,10 +66,12 @@ namespace {
                 client.isBusy = (pkt.isBusy != 0);
 
                 if (pkt.type == Protocol::DISCOVERY_BYE) {
+
                     if (g_callback) {
                         g_callback(client, false);
                     }
                 } else if (pkt.type == Protocol::DISCOVERY_RESPONSE || pkt.type == Protocol::DISCOVERY_HELLO) {
+
                     if (g_callback) {
                         g_callback(client, true);
                     }
@@ -71,12 +87,12 @@ namespace DiscoveryScanner {
         if (g_isRunning) return true;
 
         g_callback = onUpdate;
+
         g_udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (g_udpSock == INVALID_SOCKET) {
             return false;
         }
 
-        // Vô hiệu hóa lỗi WSAECONNRESET do gói tin ICMP Port Unreachable trả về
         BOOL bNewBehavior = FALSE;
         DWORD dwBytesReturned = 0;
         WSAIoctl(g_udpSock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
@@ -101,7 +117,6 @@ namespace DiscoveryScanner {
         g_isRunning = true;
         g_listenThread = std::thread(ListenLoop);
 
-        // Quét ngay lần đầu tiên khi vừa khởi động
         TriggerScan();
         return true;
     }
@@ -149,12 +164,27 @@ namespace DiscoveryScanner {
         loopbackAddr.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
         inet_pton(AF_INET, "127.0.0.1", &loopbackAddr.sin_addr);
         sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&loopbackAddr, sizeof(loopbackAddr));
+
+        INTERFACE_INFO ifList[24] = {};
+        DWORD bytesRet = 0;
+        if (WSAIoctl(g_udpSock, SIO_GET_INTERFACE_LIST, NULL, 0, &ifList, sizeof(ifList), &bytesRet, NULL, NULL) == 0) {
+            int count = bytesRet / sizeof(INTERFACE_INFO);
+            for (int i = 0; i < count; i++) {
+                u_long flags = ifList[i].iiFlags;
+                if ((flags & IFF_UP) && (flags & IFF_BROADCAST) && !(flags & IFF_LOOPBACK)) {
+                    sockaddr_in subBcast = ifList[i].iiBroadcastAddress.AddressIn;
+                    subBcast.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
+                    sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&subBcast, sizeof(subBcast));
+                }
+            }
+        }
     }
 
     void Stop() {
         if (!g_isRunning) return;
 
         g_isRunning = false;
+
         if (g_udpSock != INVALID_SOCKET) {
             closesocket(g_udpSock);
             g_udpSock = INVALID_SOCKET;

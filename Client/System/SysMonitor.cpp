@@ -71,8 +71,13 @@ namespace SysMonitor {
 
                 if (sysTimeDelta > 0) {
                     // Thời gian CPU thực sự làm việc = Tổng thời gian - Thời gian nghỉ
-                    uint64_t activeTime = sysTimeDelta - idleTimeDelta;
-                    payload.cpuUsage = (uint8_t)((activeTime * 100) / sysTimeDelta);
+                    // Kiểm tra an toàn idleTimeDelta < sysTimeDelta để chống lỗi underflow số nguyên không dấu
+                    if (idleTimeDelta < sysTimeDelta) {
+                        uint64_t activeTime = sysTimeDelta - idleTimeDelta;
+                        payload.cpuUsage = (uint8_t)((activeTime * 100) / sysTimeDelta);
+                    } else {
+                        payload.cpuUsage = 0;
+                    }
                 }
 
                 // Cập nhật lại mốc thời gian cho lần đo tiếp theo
@@ -127,6 +132,9 @@ namespace SysMonitor {
     // 5. BUỘC DỪNG TIẾN TRÌNH THEO PID
     // ==========================================
     bool KillProcess(uint32_t pid) {
+        // Chặn không cho phép tắt các tiến trình cốt lõi của hệ thống (PID 0: Idle, PID 4: System) để chống BSOD
+        if (pid <= 4) return false;
+
         HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
         if (hProcess == NULL) return false;
         
