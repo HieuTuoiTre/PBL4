@@ -512,23 +512,23 @@ namespace {
                     Gdiplus::Color iconColor = Gdiplus::Color(255, 51, 65, 85);
                     float icX = btnRect.X + 20.0f * scale;
                     float icY = btnRect.Y + btnRect.Height / 2.0f;
-                    float r = 5.0f * scale;
+                    float r = 5.6f * scale;
+                    float strokeW = 1.6f * scale;
 
-                    Gdiplus::Pen arcPen(iconColor, 1.5f * scale);
+                    Gdiplus::Pen arcPen(iconColor, strokeW);
                     arcPen.SetStartCap(Gdiplus::LineCapRound);
-                    arcPen.SetEndCap(Gdiplus::LineCapRound);
+                    arcPen.SetEndCap(Gdiplus::LineCapFlat);
 
-                    g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 215.0f, 170.0f);
-                    float ax1 = icX + r * 0.82f;
-                    float ay1 = icY - r * 0.57f;
-                    g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.0f * scale, ay1 - 2.5f * scale);
-                    g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.0f * scale, ay1 + 2.5f * scale);
+                    float r_mid = r * 0.87f;
+                    g.DrawArc(&arcPen, icX - r_mid, icY - r_mid, r_mid * 2.0f, r_mid * 2.0f, 20.0f, 275.0f);
 
-                    g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 35.0f, 170.0f);
-                    float ax2 = icX - r * 0.82f;
-                    float ay2 = icY + r * 0.57f;
-                    g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.0f * scale, ay2 + 2.5f * scale);
-                    g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.0f * scale, ay2 - 2.5f * scale);
+                    Gdiplus::PointF arrowPts[3] = {
+                        Gdiplus::PointF(icX + 1.0f * r, icY - 0.95f * r),
+                        Gdiplus::PointF(icX + 1.0f * r, icY - 0.28f * r),
+                        Gdiplus::PointF(icX + 0.30f * r, icY - 0.28f * r)
+                    };
+                    Gdiplus::SolidBrush arrowBrush(iconColor);
+                    g.FillPolygon(&arrowBrush, arrowPts, 3);
 
                     Gdiplus::FontFamily ff(L"Segoe UI");
                     Gdiplus::Font font(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);

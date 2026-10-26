@@ -532,29 +532,27 @@ namespace {
         sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
         if (dis->CtlID == IDC_BTN_SCAN) {
-            float icX = rf.X + 18.0f;
+            float icX = rf.X + 20.0f;
             float icY = rf.Y + rf.Height / 2.0f;
-            float r = 5.5f;
+            float r = 5.6f;
+            float strokeW = 1.6f;
 
-            Gdiplus::Pen arcPen(textColor, 1.6f);
+            Gdiplus::Pen arcPen(textColor, strokeW);
             arcPen.SetStartCap(Gdiplus::LineCapRound);
-            arcPen.SetEndCap(Gdiplus::LineCapRound);
+            arcPen.SetEndCap(Gdiplus::LineCapFlat);
 
-            g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 215.0f, 170.0f);
+            float r_mid = r * 0.87f;
+            g.DrawArc(&arcPen, icX - r_mid, icY - r_mid, r_mid * 2.0f, r_mid * 2.0f, 20.0f, 275.0f);
 
-            float ax1 = icX + r * 0.82f;
-            float ay1 = icY - r * 0.57f;
-            g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.2f, ay1 - 2.5f);
-            g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.2f, ay1 + 2.5f);
+            Gdiplus::PointF arrowPts[3] = {
+                Gdiplus::PointF(icX + 1.0f * r, icY - 0.95f * r),
+                Gdiplus::PointF(icX + 1.0f * r, icY - 0.28f * r),
+                Gdiplus::PointF(icX + 0.30f * r, icY - 0.28f * r)
+            };
+            Gdiplus::SolidBrush arrowBrush(textColor);
+            g.FillPolygon(&arrowBrush, arrowPts, 3);
 
-            g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 35.0f, 170.0f);
-
-            float ax2 = icX - r * 0.82f;
-            float ay2 = icY + r * 0.57f;
-            g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.2f, ay2 + 2.5f);
-            g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.2f, ay2 - 2.5f);
-
-            Gdiplus::RectF textRect(rf.X + 22.0f, rf.Y, rf.Width - 22.0f, rf.Height);
+            Gdiplus::RectF textRect(rf.X + 24.0f, rf.Y, rf.Width - 24.0f, rf.Height);
             g.DrawString(text, -1, &font, textRect, &sf, &textBrush);
         } else {
             g.DrawString(text, -1, &font, rf, &sf, &textBrush);
