@@ -64,4 +64,3 @@ namespace InputHandler {
         return s_isControlling;
     }
 }
-

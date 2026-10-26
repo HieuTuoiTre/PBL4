@@ -18,4 +18,3 @@ namespace InputHandler {
 
     bool IsControlling();
 }
-

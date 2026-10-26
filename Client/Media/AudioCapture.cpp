@@ -313,4 +313,3 @@ namespace AudioCapture {
         }
     }
 }
-
