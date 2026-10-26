@@ -1,63 +1,94 @@
 #include "../../Shared/Network.h"
+#include "DataReceiver.h"
+#include "../UI/RemoteWindow.h"
+#include "../UI/InputHandler.h"
+#include "../Media/AudioPlayer.h"
+#include "../UI/ConnectWindow.h"
 #include <windows.h>
+#include <gdiplus.h>
+#include <cstring>
+#include <string>
 
+#pragma comment(lib, "gdiplus.lib")
 
-// Biến toàn cục để duy trì kết nối mạng trong suốt vòng đời cửa sổ
-Network::TcpClient client;
+TcpClient g_controlClient;
+TcpClient g_videoClient;
+TcpClient g_audioClient;
 
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-        case WM_CREATE: {
-            // Thử kết nối tới Client đang chạy ở máy hiện tại, port 8080
-            if (client.Connect("127.0.0.1", 8080)) {
-                // Gửi tin nhắn đi
-                client.SendPacket(Protocol::MSG_PING, "Ping! Manager ket noi.", 22);
-                
-                // Chờ nhận phản hồi
-                char buffer[256] = {0};
-                client.ReceiveExact(buffer, sizeof(buffer));
-                
-                // Hiển thị phản hồi từ Client
-                MessageBoxA(hwnd, buffer, "Manager - Nhan phan hoi", MB_OK | MB_ICONINFORMATION);
-            } else {
-                MessageBoxA(hwnd, "Khong the ket noi toi Client. Hay bat Client truoc!", "Loi", MB_OK | MB_ICONERROR);
-            }
-            return 0;
-        }
-        case WM_DESTROY:
-            client.Close();
-            Network::Cleanup();
-            PostQuitMessage(0);
-            return 0;
+bool ConnectAll(const std::string& ip) {
+    if (!g_controlClient.Connect(ip, Protocol::PORT_CONTROL)) {
+        return false;
     }
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    if (!g_videoClient.Connect(ip, Protocol::PORT_VIDEO)) {
+        g_controlClient.Close();
+        return false;
+    }
+    if (!g_audioClient.Connect(ip, Protocol::PORT_AUDIO)) {
+        g_controlClient.Close();
+        g_videoClient.Close();
+        return false;
+    }
+    return true;
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    Network::Initialize();
+void CloseAll() {
+    g_controlClient.Close();
+    g_videoClient.Close();
+    g_audioClient.Close();
+}
 
-    const wchar_t CLASS_NAME[]  = L"ManagerWindowClass";
-    WNDCLASS wc = { };
-    wc.lpfnWndProc   = WindowProc;
-    wc.hInstance     = hInstance;
-    wc.lpszClassName = CLASS_NAME;
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
+    SetProcessDPIAware();
 
-    RegisterClass(&wc);
-
-    HWND hwnd = CreateWindowEx(
-        0, CLASS_NAME, L"LanRemote - Manager",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
-        NULL, NULL, hInstance, NULL
-    );
-
-    if (hwnd == NULL) { return 0; }
-
-    ShowWindow(hwnd, nCmdShow);
-
-    MSG msg = { };
-    while (GetMessage(&msg, NULL, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+    HMODULE hComCtl = LoadLibraryA("comctl32.dll");
+    if (hComCtl) {
+        typedef void (WINAPI *INITPROC)(void);
+        INITPROC pInit = (INITPROC)GetProcAddress(hComCtl, "InitCommonControls");
+        if (pInit) pInit();
     }
+
+    Network::Initialize();
+    ULONG_PTR gdiToken;
+    Gdiplus::GdiplusStartupInput gdiInput;
+    Gdiplus::GdiplusStartup(&gdiToken, &gdiInput, NULL);
+
+    while (true) {
+        std::string targetIP = "";
+        bool ok = ConnectWindow::Show(hInst, targetIP, [](const std::string& ip, std::string& outError) {
+            if (ConnectAll(ip)) {
+                return true;
+            } else {
+                outError = "Không thể kết nối tới " + ip + "!\nHãy kiểm tra lại địa chỉ IP và đảm bảo Client đang chạy.";
+                return false;
+            }
+        });
+
+        // Người dùng đóng cửa sổ kết nối hoặc bấm "Thoát"
+        if (!ok || targetIP.empty()) {
+            break;
+        }
+
+        // Bắt đầu phiên điều khiển từ xa
+        InputHandler::Initialize(&g_controlClient);
+        AudioPlayer::Initialize(targetIP == "127.0.0.1");
+        RemoteWindow::Create(hInst, &g_controlClient);
+        DataReceiver::Start(&g_controlClient, &g_videoClient, &g_audioClient);
+
+        MSG msg;
+        while (GetMessageW(&msg, NULL, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        // Dọn dẹp phiên kết nối hiện tại
+        CloseAll();
+        DataReceiver::Stop();
+        AudioPlayer::Cleanup();
+        RemoteWindow::Cleanup();
+    }
+
+    Gdiplus::GdiplusShutdown(gdiToken);
+    Network::Cleanup();
+    if (hComCtl) FreeLibrary(hComCtl);
     return 0;
 }

@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string>
+#include <mutex>
 #include "Protocol.h"
 
 class Network{
@@ -19,14 +20,19 @@ class TcpServer{
         //invalid socket so it doesnt set the value to be a random value
         SOCKET listenSocket = INVALID_SOCKET;   //forward to clientSocket
         SOCKET clientSocket = INVALID_SOCKET;   //actual socket used by the client
+        std::mutex sendMutex; // THÊM KHÓA CHO SERVER
 
     public:
         TcpServer();
         ~TcpServer();
 
+        TcpServer(const TcpServer&) = delete;
+        TcpServer& operator=(const TcpServer&) = delete;
+
         bool Start(int port);
-        bool AcceptConnection();
+        bool AcceptConnection(int timeoutMs = -1);
         void Close();
+        void CloseClient();
         
         //a char = 1 byte, basically a stream of bytes
         //pointer is for memory efficency, not forcing the cpu to clone the data
@@ -38,10 +44,14 @@ class TcpServer{
 class TcpClient{
     private:
         SOCKET connectSocket = INVALID_SOCKET;
+        std::mutex sendMutex; // THÊM KHÓA CHO CLIENT
 
     public:
         TcpClient();
         ~TcpClient();
+
+        TcpClient(const TcpClient&) = delete;
+        TcpClient& operator=(const TcpClient&) = delete;
 
         bool Connect(const std::string& ip, int port);
         void Close();

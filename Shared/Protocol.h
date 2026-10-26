@@ -6,6 +6,19 @@
 
 namespace Protocol
 {
+    constexpr int PORT_CONTROL          = 8080;
+    constexpr int PORT_VIDEO            = 8081;
+    constexpr int PORT_AUDIO            = 8082;
+    constexpr int PORT_DISCOVERY_MGR    = 8088; // Manager lắng nghe phản hồi (HELLO, BYE, RESPONSE)
+    constexpr int PORT_DISCOVERY_CLIENT = 8089; // Client lắng nghe yêu cầu quét (QUERY)
+
+    enum DiscoveryType : uint8_t {
+        DISCOVERY_QUERY = 1,    // Manager -> Broadcast: Hỏi máy nào đang online
+        DISCOVERY_RESPONSE = 2, // Client -> Manager: Phản hồi thông tin máy
+        DISCOVERY_HELLO = 3,    // Client -> Broadcast: Thông báo vừa khởi động
+        DISCOVERY_BYE = 4       // Client -> Broadcast: Thông báo chuẩn bị tắt app
+    };
+
     enum MessageType : uint8_t {
         //connection
         MSG_PING = 1,        //request
@@ -32,6 +45,7 @@ namespace Protocol
         MSG_DRIVE_LIST_RESPONSE,
         MSG_DIR_REQUEST,      //request to see path content  
         MSG_DIR_RESPONSE,     //response of path conten
+        MSG_FILE_DOWNLOAD_REQ,
         MSG_FILE_INFO,        //name, size of file
         MSG_FILE_CHUNK,
         MSG_FILE_END
@@ -52,6 +66,14 @@ namespace Protocol
     };
 
     #pragma pack(push, 1)
+
+    struct DiscoveryPacket {
+        char magic[4];         // "LAND"
+        uint8_t type;          // DiscoveryType
+        uint8_t isBusy;        // 0: Sẵn sàng, 1: Đang có người điều khiển
+        char computerName[64]; // Tên máy tính (UTF-8)
+        char userName[64];     // Tên tài khoản đang đăng nhập (UTF-8)
+    };
 
     struct PacketHeader{ //total size = type (1 byte) + content (4 byte) = 5 byte
         MessageType type;
@@ -87,6 +109,13 @@ namespace Protocol
     struct FileInfoPayload{
         uint64_t fileSize;
         char fileName[256];
+    };
+
+    struct VideoDeltaHeader {
+        int32_t x;
+        int32_t y;
+        int32_t width;
+        int32_t height;
     };
     
     #pragma pack(pop)

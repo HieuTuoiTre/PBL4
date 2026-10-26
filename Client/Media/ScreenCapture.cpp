@@ -1,43 +1,25 @@
 #include "ScreenCapture.h"
-#include <gdiplus.h> // Thư viện đồ họa nâng cao của Windows (dùng để nén ảnh JPEG)
-
-// Yêu cầu Linker tự động liên kết với thư viện gdiplus.lib
-#pragma comment(lib, "gdiplus.lib") 
-
-using namespace Gdiplus;
+#include <turbojpeg.h>
+#include <cstring>
+#include <vector>
+#include <algorithm>
 
 namespace {
-    // Biến lưu token quản lý vòng đời của GDI+
-    ULONG_PTR g_gdiplusToken = 0;
     bool g_isInitialized = false;
-
-    // Kích thước màn hình
     int g_screenWidth = 0;
     int g_screenHeight = 0;
 
-    // Hàm tra cứu mã CLSID của thuật toán nén ảnh (JPEG, PNG, v.v.)
-    int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
-        UINT num = 0;          // Số lượng bộ mã hóa
-        UINT size = 0;         // Kích thước mảng byte của bộ mã hóa
+    HDC g_hDesktopDC = NULL;
+    HDC g_hCaptureDC = NULL;
+    HBITMAP g_hDibBitmap = NULL;
+    HBITMAP g_hOldBitmap = NULL;
+    uint32_t* g_dibPixels = nullptr;
 
-        GetImageEncodersSize(&num, &size);
-        if (size == 0) return -1;
+    tjhandle g_tjCompressor = nullptr;
+    unsigned char* g_jpegBuf = nullptr;
+    unsigned long g_jpegBufSize = 0;
 
-        ImageCodecInfo* pImageCodecInfo = (ImageCodecInfo*)(malloc(size));
-        if (pImageCodecInfo == NULL) return -1;
-
-        GetImageEncoders(num, size, pImageCodecInfo);
-        for (UINT j = 0; j < num; ++j) {
-            // So sánh xem có phải định dạng đang cần tìm không (ví dụ "image/jpeg")
-            if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
-                *pClsid = pImageCodecInfo[j].Clsid;
-                free(pImageCodecInfo);
-                return j;
-            }
-        }
-        free(pImageCodecInfo);
-        return -1;
-    }
+    std::vector<uint32_t> g_prevPixels;
 }
 
 namespace ScreenCapture {
@@ -45,119 +27,160 @@ namespace ScreenCapture {
     bool Initialize() {
         if (g_isInitialized) return true;
 
-        // 1. Khởi động GDI+
-        GdiplusStartupInput gdiplusStartupInput;
-        Status status = GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL);
-        if (status != Ok) {
-            return false;
-        }
+        g_tjCompressor = tjInitCompress();
+        if (!g_tjCompressor) return false;
 
-        // 2. Lấy kích thước màn hình chính hiện tại
         g_screenWidth = GetSystemMetrics(SM_CXSCREEN);
         g_screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
+        g_hDesktopDC = GetDC(NULL);
+        if (!g_hDesktopDC) {
+            tjDestroy(g_tjCompressor);
+            g_tjCompressor = nullptr;
+            return false;
+        }
+
+        g_hCaptureDC = CreateCompatibleDC(g_hDesktopDC);
+        if (!g_hCaptureDC) {
+            ReleaseDC(NULL, g_hDesktopDC);
+            g_hDesktopDC = NULL;
+            tjDestroy(g_tjCompressor);
+            g_tjCompressor = nullptr;
+            return false;
+        }
+
+        BITMAPINFO bmi = {0};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = g_screenWidth;
+        bmi.bmiHeader.biHeight = -g_screenHeight; // Top-down DIB bitmap
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        g_hDibBitmap = CreateDIBSection(g_hDesktopDC, &bmi, DIB_RGB_COLORS, (void**)&g_dibPixels, NULL, 0);
+        if (!g_hDibBitmap || !g_dibPixels) {
+            DeleteDC(g_hCaptureDC); g_hCaptureDC = NULL;
+            ReleaseDC(NULL, g_hDesktopDC); g_hDesktopDC = NULL;
+            tjDestroy(g_tjCompressor); g_tjCompressor = nullptr;
+            return false;
+        }
+
+        g_hOldBitmap = (HBITMAP)SelectObject(g_hCaptureDC, g_hDibBitmap);
+        g_prevPixels.clear();
         g_isInitialized = true;
         return true;
     }
 
-    bool CaptureFrame(std::vector<char>& outBuffer) {
-        if (!g_isInitialized) return false;
+    bool CaptureFrame(std::vector<char>& outBuffer, int& outX, int& outY, int& outWidth, int& outHeight) {
+        if (!g_isInitialized || !g_tjCompressor) return false;
 
-        // 1. Lấy "khung vẽ" (Device Context - DC) của toàn bộ màn hình
-        HWND hDesktopWnd = GetDesktopWindow();
-        HDC hDesktopDC = GetDC(hDesktopWnd);
-
-        // 2. Tạo một khung vẽ ảo (Memory DC) trên RAM máy tính
-        HDC hCaptureDC = CreateCompatibleDC(hDesktopDC);
-
-        // 3. Tạo một "tờ giấy trắng" (Bitmap) có kích thước bằng với độ phân giải màn hình
-        HBITMAP hCaptureBitmap = CreateCompatibleBitmap(hDesktopDC, g_screenWidth, g_screenHeight);
-
-        // 4. Đặt tờ giấy trắng đó lên khung vẽ ảo
-        HBITMAP hOldBitmap = (HBITMAP)SelectObject(hCaptureDC, hCaptureBitmap);
-
-        // 5. CHỤP ẢNH: Copy điểm ảnh từ màn hình thật sang khung vẽ ảo
-        bool isCaptured = BitBlt(
-            hCaptureDC, 0, 0, g_screenWidth, g_screenHeight, // Đích: Khung vẽ ảo
-            hDesktopDC, 0, 0,                                // Nguồn: Bắt đầu từ tọa độ (0,0) của màn hình
-            SRCCOPY | CAPTUREBLT                             // Cờ: Copy nguyên bản, bao gồm cả các cửa sổ trong suốt
-        );
-
-        if (!isCaptured) {
-            // Nếu copy lỗi, phải dọn dẹp RAM rồi mới thoát để chống rò rỉ bộ nhớ
-            SelectObject(hCaptureDC, hOldBitmap);
-            DeleteObject(hCaptureBitmap);
-            DeleteDC(hCaptureDC);
-            ReleaseDC(hDesktopWnd, hDesktopDC);
+        // Chụp nội dung màn hình hiện tại vào bộ đệm DIB Section
+        if (!BitBlt(g_hCaptureDC, 0, 0, g_screenWidth, g_screenHeight, g_hDesktopDC, 0, 0, SRCCOPY)) {
             return false;
         }
 
-        // ==========================================================
-        // CÔNG ĐOẠN 3: NÉN ẢNH VÀ XUẤT RA outBuffer
-        // ==========================================================
+        int pixelsCount = g_screenWidth * g_screenHeight;
+        int minX = g_screenWidth, minY = g_screenHeight, maxX = -1, maxY = -1;
 
-        // 1. Gói tờ giấy thô hCaptureBitmap vào đối tượng quản lý của GDI+
-        Bitmap bitmap(hCaptureBitmap, NULL);
+        if (g_prevPixels.empty()) {
+            g_prevPixels.assign(g_dibPixels, g_dibPixels + pixelsCount);
+            minX = 0; minY = 0;
+            maxX = g_screenWidth - 1; maxY = g_screenHeight - 1;
+        } else {
+            const size_t rowBytes = g_screenWidth * sizeof(uint32_t);
+            for (int y = 0; y < g_screenHeight; ++y) {
+                int rowOffset = y * g_screenWidth;
+                if (std::memcmp(&g_dibPixels[rowOffset], &g_prevPixels[rowOffset], rowBytes) == 0) {
+                    continue;
+                }
 
-        // 2. Lấy mã nhận diện của bộ nén JPEG
-        CLSID jpegClsid;
-        GetEncoderClsid(L"image/jpeg", &jpegClsid);
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
 
-        // 3. Ép chất lượng JPEG giảm xuống để tiết kiệm băng thông mạng (Ví dụ: 60%)
-        // Nếu để mặc định 100%, ảnh sẽ rất nặng và gây giật lag
-        EncoderParameters encoderParameters;
-        encoderParameters.Count = 1;
-        encoderParameters.Parameter[0].Guid = EncoderQuality;
-        encoderParameters.Parameter[0].Type = EncoderParameterValueTypeLong;
-        encoderParameters.Parameter[0].NumberOfValues = 1;
-        ULONG quality = 60; // Bạn có thể tăng giảm từ 1 đến 100 tùy chất lượng mạng
-        encoderParameters.Parameter[0].Value = &quality;
-
-        // 4. Tạo một "file ảo" trên RAM (IStream) để chứa dữ liệu sau khi nén
-        IStream* pStream = NULL;
-        CreateStreamOnHGlobal(NULL, TRUE, &pStream);
-
-        // 5. Nén ảnh và lưu thẳng vào IStream
-        Status stat = bitmap.Save(pStream, &jpegClsid, &encoderParameters);
-        
-        if (stat == Ok) {
-            // Lấy kích thước của dòng IStream
-            STATSTG statstg;
-            pStream->Stat(&statstg, STATFLAG_NONAME);
-            ULONG streamSize = statstg.cbSize.LowPart;
-
-            // Tua con trỏ đọc về lại đầu file ảo
-            LARGE_INTEGER liZero = {};
-            pStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-
-            // Mở rộng vector để có đủ chỗ chứa và copy dữ liệu từ IStream ra ngoài
-            outBuffer.resize(streamSize);
-            ULONG bytesRead = 0;
-            pStream->Read(outBuffer.data(), streamSize, &bytesRead);
+                for (int x = 0; x < g_screenWidth; ++x) {
+                    if (g_dibPixels[rowOffset + x] != g_prevPixels[rowOffset + x]) {
+                        if (x < minX) minX = x;
+                        break;
+                    }
+                }
+                for (int x = g_screenWidth - 1; x >= minX; --x) {
+                    if (g_dibPixels[rowOffset + x] != g_prevPixels[rowOffset + x]) {
+                        if (x > maxX) maxX = x;
+                        break;
+                    }
+                }
+                std::memcpy(&g_prevPixels[rowOffset], &g_dibPixels[rowOffset], rowBytes);
+            }
         }
 
-        // 6. Giải phóng bộ nhớ của IStream
-        if (pStream) {
-            pStream->Release();
+        // Không có thay đổi nào trên màn hình -> Không cần gửi gói tin
+        if (minX > maxX || minY > maxY) return false;
+
+        // Căn chỉnh tọa độ về số chẵn để tối ưu Chroma Subsampling 4:2:0
+        int alignedX = minX & ~1;
+        int alignedY = minY & ~1;
+        int alignedW = maxX - alignedX + 1;
+        int alignedH = maxY - alignedY + 1;
+        if ((alignedW & 1) && (alignedX + alignedW < g_screenWidth)) alignedW++;
+        if ((alignedH & 1) && (alignedY + alignedH < g_screenHeight)) alignedH++;
+
+        outX = alignedX;
+        outY = alignedY;
+        outWidth = alignedW;
+        outHeight = alignedH;
+
+        // Con trỏ tới góc trên bên trái của vùng thay đổi
+        const unsigned char* cropStartPtr = (const unsigned char*)(g_dibPixels + (outY * g_screenWidth) + outX);
+        int pitch = g_screenWidth * 4;
+
+        // Chất lượng JPEG sắc nét: 75% cho khung hình lớn, 85% cho vùng chữ/chuột nhỏ
+        int changedArea = outWidth * outHeight;
+        int quality = (changedArea > (pixelsCount / 2)) ? 75 : 85;
+
+        // Nén trực tiếp với TurboJPEG SIMD (Zero-copy crop, nén trong ~2-5ms)
+        if (tjCompress2(g_tjCompressor, cropStartPtr, outWidth, pitch, outHeight,
+                        TJPF_BGRX, &g_jpegBuf, &g_jpegBufSize,
+                        TJSAMP_420, quality, TJFLAG_FASTDCT) != 0) {
+            return false;
         }
 
-        // 6. Dọn dẹp tài nguyên đồ họa của Win32 API 
-        // (Lưu ý: hàm DeleteObject rất quan trọng. Hàm này được gọi 30 lần/giây, 
-        // nếu quên xóa, RAM máy Client sẽ bị đầy tràn chỉ sau 1 phút).
-        SelectObject(hCaptureDC, hOldBitmap);
-        DeleteObject(hCaptureBitmap);
-        DeleteDC(hCaptureDC);
-        ReleaseDC(hDesktopWnd, hDesktopDC);
+        if (g_jpegBuf && g_jpegBufSize > 0) {
+            Protocol::VideoDeltaHeader delta = { outX, outY, outWidth, outHeight };
+            outBuffer.resize(sizeof(delta) + g_jpegBufSize);
+            std::memcpy(outBuffer.data(), &delta, sizeof(delta));
+            std::memcpy(outBuffer.data() + sizeof(delta), g_jpegBuf, g_jpegBufSize);
+            return true;
+        }
 
-        return true;
+        return false;
     }
 
     void Cleanup() {
         if (!g_isInitialized) return;
+        g_prevPixels.clear();
 
-        // Tắt GDI+ khi ứng dụng kết thúc
-        GdiplusShutdown(g_gdiplusToken);
+        if (g_jpegBuf) {
+            tjFree(g_jpegBuf);
+            g_jpegBuf = nullptr;
+            g_jpegBufSize = 0;
+        }
+
+        if (g_tjCompressor) {
+            tjDestroy(g_tjCompressor);
+            g_tjCompressor = nullptr;
+        }
+
+        if (g_hCaptureDC && g_hOldBitmap) SelectObject(g_hCaptureDC, g_hOldBitmap);
+        if (g_hDibBitmap) DeleteObject(g_hDibBitmap);
+        if (g_hCaptureDC) DeleteDC(g_hCaptureDC);
+        if (g_hDesktopDC) ReleaseDC(NULL, g_hDesktopDC);
+
+        g_hCaptureDC = NULL;
+        g_hDesktopDC = NULL;
+        g_hDibBitmap = NULL;
+        g_hOldBitmap = NULL;
+        g_dibPixels = nullptr;
+
         g_isInitialized = false;
     }
-
-} // namespace ScreenCapture
+}
