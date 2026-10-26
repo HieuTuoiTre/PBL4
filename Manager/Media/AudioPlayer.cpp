@@ -110,7 +110,10 @@ namespace AudioPlayer {
                 wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8; // 4 bytes/frame
                 wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign; // 192.000 B/s
 
-                pWaveOutOpen(&g_hWaveOut, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
+                MMRESULT mmr = pWaveOutOpen(&g_hWaveOut, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
+                if (mmr != MMSYSERR_NOERROR) {
+                    g_hWaveOut = NULL;
+                }
             }
         }
         LeaveCriticalSection(&g_audioCs);
