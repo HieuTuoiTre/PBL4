@@ -57,15 +57,22 @@ TcpClient g_audioClient;
 //   - ip: Địa chỉ IP của máy Client cần kết nối (ví dụ: "192.168.1.10" hoặc "127.0.0.1")
 // Trả về: true nếu cả 3 kênh đều kết nối thành công; false nếu có bất kỳ kênh nào thất bại.
 // ============================================================================
-bool ConnectAll(const std::string& ip) {
+bool ConnectAll(const std::string& ip, std::string& outError) {
     // 1. Kết nối tới cổng Control (8080)
     if (!g_controlClient.Connect(ip, Protocol::PORT_CONTROL)) {
-        return false; // Thất bại ngay từ kênh Control thì dừng lại
+        outError = "Không thể kết nối tới kênh Điều khiển (Port " + std::to_string(Protocol::PORT_CONTROL) + ") tại " + ip + "!\n\n"
+                   "Nguyên nhân thường gặp:\n"
+                   "1. Ứng dụng Client chưa được khởi chạy trên máy đích (" + ip + ").\n"
+                   "2. Windows Firewall trên máy Client đang chặn cổng " + std::to_string(Protocol::PORT_CONTROL) + ".\n"
+                   "3. Hai máy tính không cùng một mạng LAN / Wi-Fi hoặc địa chỉ IP chưa đúng.";
+        return false;
     }
 
     // 2. Kết nối tới cổng Video (8081)
     if (!g_videoClient.Connect(ip, Protocol::PORT_VIDEO)) {
         g_controlClient.Close(); // Đóng kênh Control đã mở trước đó để tránh rò rỉ tài nguyên
+        outError = "Đã kết nối kênh Điều khiển nhưng thất bại ở kênh Hình ảnh (Port " + std::to_string(Protocol::PORT_VIDEO) + ")!\n\n"
+                   "Vui lòng kiểm tra lại cấu hình tường lửa (Firewall) hoặc khởi động lại Client.";
         return false;
     }
 
@@ -73,6 +80,8 @@ bool ConnectAll(const std::string& ip) {
     if (!g_audioClient.Connect(ip, Protocol::PORT_AUDIO)) {
         g_controlClient.Close(); // Đóng kênh Control
         g_videoClient.Close();   // Đóng kênh Video
+        outError = "Đã kết nối kênh Hình ảnh nhưng thất bại ở kênh Âm thanh (Port " + std::to_string(Protocol::PORT_AUDIO) + ")!\n\n"
+                   "Vui lòng kiểm tra lại cấu hình tường lửa (Firewall) hoặc khởi động lại Client.";
         return false;
     }
 
@@ -131,13 +140,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         // Hiển thị cửa sổ quét LAN và chọn máy Client (hàm này chặn luồng cho đến khi bấm Kết nối hoặc Thoát)
         bool ok = ConnectWindow::Show(hInst, targetIP, [](const std::string& ip, std::string& outError) {
             // Callback được gọi khi người dùng bấm nút "Kết nối" trên giao diện ConnectWindow
-            if (ConnectAll(ip)) {
-                return true; // Kết nối thành công
-            } else {
-                // Gán thông báo lỗi chi tiết để hiển thị lên hộp thông báo cho người dùng
-                outError = "Không thể kết nối tới " + ip + "!\nHãy kiểm tra lại địa chỉ IP và đảm bảo Client đang chạy.";
-                return false; // Kết nối thất bại
-            }
+            return ConnectAll(ip, outError);
         });
 
         // Nếu người dùng đóng cửa sổ kết nối hoặc bấm nút "Thoát" thì thoát hẳn chương trình

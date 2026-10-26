@@ -191,6 +191,21 @@ namespace DiscoveryScanner {
         loopbackAddr.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
         inet_pton(AF_INET, "127.0.0.1", &loopbackAddr.sin_addr);
         sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&loopbackAddr, sizeof(loopbackAddr));
+
+        // 3. Gửi trực tiếp tới địa chỉ Subnet Broadcast của từng card mạng đang bật (Wi-Fi, Ethernet...)
+        INTERFACE_INFO ifList[24] = {};
+        DWORD bytesRet = 0;
+        if (WSAIoctl(g_udpSock, SIO_GET_INTERFACE_LIST, NULL, 0, &ifList, sizeof(ifList), &bytesRet, NULL, NULL) == 0) {
+            int count = bytesRet / sizeof(INTERFACE_INFO);
+            for (int i = 0; i < count; i++) {
+                u_long flags = ifList[i].iiFlags;
+                if ((flags & IFF_UP) && (flags & IFF_BROADCAST) && !(flags & IFF_LOOPBACK)) {
+                    sockaddr_in subBcast = ifList[i].iiBroadcastAddress.AddressIn;
+                    subBcast.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
+                    sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&subBcast, sizeof(subBcast));
+                }
+            }
+        }
     }
 
     // ========================================================================

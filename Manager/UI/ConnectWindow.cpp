@@ -53,6 +53,8 @@ namespace {
     WNDPROC g_oldHeaderProc = NULL;// Con trỏ lưu hàm WndProc gốc của Header
     HWND g_hHoveredBtn = NULL;     // Handle nút bấm đang được chuột rê qua (Hover)
     bool g_editHasFocus = false;   // Trạng thái focus của ô nhập IP để vẽ viền xanh sáng
+    bool g_hasAutoFilledIp = false;       // Đã tự động điền IP của Client lần đầu tiên hay chưa
+    bool g_userManuallyEditedIp = false;  // Người dùng đã tự gõ hoặc sửa IP trong ô Edit hay chưa
     HIMAGELIST g_hImageList = NULL;// ImageList giả lập để tăng chiều cao dòng ListView
 
     // ========================================================================
@@ -113,10 +115,10 @@ namespace {
     // HÀM ĐÁNH GIÁ MỨC ĐỘ ƯU TIÊN CỦA ĐỊA CHỈ IP
     // ========================================================================
     int GetIpPriority(const std::string& ip) {
-        if (ip.rfind("192.168.", 0) == 0 && ip.rfind("192.168.56.", 0) != 0) return 3;
-        if (ip.rfind("10.", 0) == 0) return 3;
-        if (ip.rfind("172.", 0) == 0) return 2;
-        if (ip.rfind("192.168.56.", 0) == 0) return 2;
+        if (ip.rfind("192.168.", 0) == 0 && ip.rfind("192.168.56.", 0) != 0) return 4;
+        if (ip.rfind("10.", 0) == 0) return 4;
+        if (ip.rfind("172.", 0) == 0) return 3;
+        if (ip != "127.0.0.1" && !ip.empty()) return 2;
         if (ip == "127.0.0.1") return 1;
         return 0;
     }
@@ -228,6 +230,11 @@ namespace {
     // SUBCLASS CHO Ô EDIT NHẬP ĐỊA CHỈ IP
     // ========================================================================
     LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        if (uMsg == WM_CHAR || uMsg == WM_KEYDOWN) {
+            if (wParam != VK_RETURN && wParam != VK_ESCAPE && wParam != VK_TAB) {
+                g_userManuallyEditedIp = true; // Người dùng trực tiếp gõ vào ô Edit
+            }
+        }
         if (uMsg == WM_KEYDOWN) {
             if (wParam == VK_RETURN) {
                 SendMessageW(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(IDC_BTN_CONNECT, BN_CLICKED), 0);
@@ -299,8 +306,6 @@ namespace {
         } else if (!g_discoveredList.empty() && curSel == -1) {
             // Mặc định chọn dòng đầu tiên nếu chưa chọn dòng nào
             ListView_SetItemState(g_hListClients, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-            std::wstring ipW = Utils::Utf8ToWide(g_discoveredList[0].ip);
-            SetWindowTextW(g_hEditIp, ipW.c_str());
         }
 
         SendMessageW(g_hListClients, WM_SETREDRAW, TRUE, 0);
@@ -365,6 +370,7 @@ namespace {
         std::wstring ipW = Utils::Utf8ToWide(g_discoveredList[index].ip);
         SetWindowTextW(g_hEditIp, ipW.c_str());
         SendMessageW(g_hEditIp, EM_SETSEL, 0, -1);
+        g_userManuallyEditedIp = false; // Người dùng vừa chủ động chọn máy trong danh sách
 
         if (triggerConnect) {
             StartConnectionProcess(g_hConnectWnd);
@@ -707,7 +713,7 @@ namespace {
                 ListView_InsertColumn(g_hListClients, 3, &lvc);
 
                 // 4. Ô nhập IP không viền nằm chính xác giữa tâm khung Card 2 (Canh giữa quang học hoàn hảo)
-                g_hEditIp = CreateWindowExW(0, L"EDIT", L"127.0.0.1",
+                g_hEditIp = CreateWindowExW(0, L"EDIT", L"",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                     76, 405, 168, 20, hwnd, (HMENU)IDC_EDIT_IP, GetModuleHandle(NULL), NULL);
                 SendMessageW(g_hEditIp, WM_SETFONT, (WPARAM)g_hFontEdit, TRUE);
@@ -932,7 +938,11 @@ namespace {
 
             case WM_COMMAND: {
                 int id = LOWORD(wp);
-                if (id == IDC_BTN_CONNECT) {
+                if (id == IDC_EDIT_IP && HIWORD(wp) == EN_CHANGE) {
+                    if (GetFocus() == g_hEditIp) {
+                        g_userManuallyEditedIp = true; // Người dùng tự gõ/chỉnh sửa nội dung ô IP
+                    }
+                } else if (id == IDC_BTN_CONNECT) {
                     StartConnectionProcess(hwnd);
                 } else if (id == IDC_BTN_SCAN) {
                     SetStatus(L"🔄 Đang quét tìm kiếm Client trong LAN...", 1);
@@ -941,6 +951,7 @@ namespace {
                     SetWindowTextW(g_hEditIp, L"127.0.0.1");
                     SendMessageW(g_hEditIp, EM_SETSEL, 0, -1);
                     SetFocus(g_hEditIp);
+                    g_userManuallyEditedIp = true; // Đánh dấu người dùng chủ động chọn Localhost
                 } else if (id == IDC_BTN_EXIT) {
                     SendMessageW(hwnd, WM_CLOSE, 0, 0);
                 }
@@ -1075,7 +1086,7 @@ namespace {
                         if (curSel != -1) {
                             HandleSelectedRow(curSel, true);
                         }
-                    } else if (pnm->code == NM_CLICK || pnm->code == LVN_ITEMCHANGED) {
+                    } else if (pnm->code == NM_CLICK) {
                         int curSel = ListView_GetNextItem(g_hListClients, -1, LVNI_SELECTED);
                         if (curSel != -1) {
                             HandleSelectedRow(curSel, false);
@@ -1157,6 +1168,28 @@ namespace {
                 }
 
                 RefreshListViewUI();
+
+                // Tự động điền IP của Client lần đầu tiên DUY NHẤT nếu chưa từng điền và người dùng chưa tự gõ IP
+                if (!g_hasAutoFilledIp && !g_userManuallyEditedIp) {
+                    std::string autoIp = "";
+                    // Ưu tiên chọn IP mạng LAN thật khác 127.0.0.1
+                    for (const auto& c : g_discoveredList) {
+                        if (c.isOnline && c.ip != "127.0.0.1") {
+                            autoIp = c.ip;
+                            break;
+                        }
+                    }
+                    if (autoIp.empty() && !g_discoveredList.empty() && g_discoveredList[0].isOnline) {
+                        autoIp = g_discoveredList[0].ip;
+                    }
+                    if (!autoIp.empty()) {
+                        std::wstring ipW = Utils::Utf8ToWide(autoIp);
+                        SetWindowTextW(g_hEditIp, ipW.c_str());
+                        SendMessageW(g_hEditIp, EM_SETSEL, 0, -1);
+                        g_hasAutoFilledIp = true; // Chỉ tự động điền ĐÚNG 1 LẦN DUY NHẤT!
+                    }
+                }
+
                 delete pClient;
                 return 0;
             }
@@ -1178,11 +1211,12 @@ namespace {
                     EnableWindow(g_hEditIp, TRUE);
                     EnableWindow(g_hListClients, TRUE);
 
-                    std::wstring errW = L"⚠ Không thể kết nối tới Client!";
+                    std::wstring errW = L"Không thể kết nối tới Client!";
                     if (pErr && !pErr->empty()) {
-                        errW = L"⚠ " + Utils::Utf8ToWide(*pErr);
+                        errW = Utils::Utf8ToWide(*pErr);
                     }
-                    SetStatus(errW, 2);
+                    SetStatus(L"⚠ Kết nối thất bại!", 2);
+                    MessageBoxW(hwnd, errW.c_str(), L"Lỗi kết nối", MB_OK | MB_ICONERROR);
                     SetFocus(g_hEditIp);
                 }
 
@@ -1237,6 +1271,8 @@ namespace ConnectWindow {
         g_statusText = L"🔄 Đang tự động quét mạng LAN...";
         g_statusColorType = 0;
         g_discoveredList.clear();
+        g_hasAutoFilledIp = false;
+        g_userManuallyEditedIp = false;
 
         WNDCLASSW wc = {};
         wc.lpfnWndProc = ConnectWndProc;

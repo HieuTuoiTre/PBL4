@@ -168,10 +168,41 @@ bool TcpClient::Connect(const std::string& ip, int port){
         return false;
     }
 
-    if (connect(connectSocket, (sockaddr*)&serverAddress, sizeof(serverAddress)) == SOCKET_ERROR){
-        Close();
-        return false;
+    // Đặt socket sang chế độ Non-blocking để kiểm soát thời gian chờ (Timeout 4s)
+    u_long nonBlocking = 1;
+    ioctlsocket(connectSocket, FIONBIO, &nonBlocking);
+
+    int connResult = connect(connectSocket, (sockaddr*)&serverAddress, sizeof(serverAddress));
+    if (connResult == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            fd_set writeFds, errFds;
+            FD_ZERO(&writeFds); FD_SET(connectSocket, &writeFds);
+            FD_ZERO(&errFds);   FD_SET(connectSocket, &errFds);
+
+            timeval tv = { 4, 0 }; // Chờ tối đa 4 giây thay vì treo 21 giây
+            int sel = select(0, NULL, &writeFds, &errFds, &tv);
+            if (sel <= 0) {
+                Close();
+                return false;
+            }
+
+            int so_err = 0;
+            int errLen = sizeof(so_err);
+            getsockopt(connectSocket, SOL_SOCKET, SO_ERROR, (char*)&so_err, &errLen);
+            if (so_err != 0) {
+                Close();
+                return false;
+            }
+        } else {
+            Close();
+            return false;
+        }
     }
+
+    // Trả lại chế độ Blocking thông thường để truyền nhận ổn định
+    u_long blocking = 0;
+    ioctlsocket(connectSocket, FIONBIO, &blocking);
 
     BOOL nodelay = TRUE;
     setsockopt(connectSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
