@@ -312,7 +312,7 @@ namespace {
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_UP, GetModuleHandle(NULL), NULL);
 
-                g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"🔄 Làm mới",
+                g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"Làm mới",
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_REFRESH, GetModuleHandle(NULL), NULL);
 
@@ -403,12 +403,49 @@ namespace {
                     g.FillPath(&fillBrush, &path);
 
                     Gdiplus::FontFamily ff(L"Segoe UI");
-                    Gdiplus::Font font(&ff, 9.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+                    Gdiplus::Font font(&ff, 12.5f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                     Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
                     Gdiplus::StringFormat sf;
                     sf.SetAlignment(Gdiplus::StringAlignmentCenter);
                     sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
                     g.DrawString(text, -1, &font, btnRect, &sf, &textBrush);
+                } else if (pDIS->CtlID == IDC_FILE_REFRESH) {
+                    Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 226, 232, 240) : (isHover ? Gdiplus::Color(255, 241, 245, 249) : Gdiplus::Color(255, 255, 255, 255));
+                    Gdiplus::SolidBrush fillBrush(fill);
+                    g.FillPath(&fillBrush, &path);
+
+                    Gdiplus::Pen borderPen(Gdiplus::Color(255, 203, 213, 225), 1.0f);
+                    g.DrawPath(&borderPen, &path);
+
+                    Gdiplus::Color iconColor = Gdiplus::Color(255, 51, 65, 85);
+                    float icX = btnRect.X + 16.0f * scale;
+                    float icY = btnRect.Y + btnRect.Height / 2.0f;
+                    float r = 5.0f * scale;
+
+                    Gdiplus::Pen arcPen(iconColor, 1.5f * scale);
+                    arcPen.SetStartCap(Gdiplus::LineCapRound);
+                    arcPen.SetEndCap(Gdiplus::LineCapRound);
+
+                    g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 215.0f, 170.0f);
+                    float ax1 = icX + r * 0.82f;
+                    float ay1 = icY - r * 0.57f;
+                    g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.0f * scale, ay1 - 2.5f * scale);
+                    g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.0f * scale, ay1 + 2.5f * scale);
+
+                    g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 35.0f, 170.0f);
+                    float ax2 = icX - r * 0.82f;
+                    float ay2 = icY + r * 0.57f;
+                    g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.0f * scale, ay2 + 2.5f * scale);
+                    g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.0f * scale, ay2 - 2.5f * scale);
+
+                    Gdiplus::FontFamily ff(L"Segoe UI");
+                    Gdiplus::Font font(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                    Gdiplus::SolidBrush textBrush(iconColor);
+                    Gdiplus::StringFormat sf;
+                    sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+                    sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+                    Gdiplus::RectF textRect(btnRect.X + 20.0f * scale, btnRect.Y, btnRect.Width - 20.0f * scale, btnRect.Height);
+                    g.DrawString(L"Làm mới", -1, &font, textRect, &sf, &textBrush);
                 } else {
                     Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 226, 232, 240) : (isHover ? Gdiplus::Color(255, 241, 245, 249) : Gdiplus::Color(255, 255, 255, 255));
                     Gdiplus::SolidBrush fillBrush(fill);

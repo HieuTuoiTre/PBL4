@@ -263,7 +263,7 @@ namespace {
 
         if (!g_isConnecting) {
             if (g_discoveredList.empty()) {
-                SetStatus(L"🔄 Đang tự động quét mạng LAN...", 0);
+                SetStatus(L"● Đang tự động quét mạng LAN...", 0);
             } else {
                 std::wstring msg = L"✓ Đã phát hiện " + std::to_wstring(g_discoveredList.size()) + L" máy trong mạng LAN";
                 SetStatus(msg, 0);
@@ -832,7 +832,7 @@ namespace {
                 } else if (id == IDC_BTN_CONNECT) {
                     StartConnectionProcess(hwnd);
                 } else if (id == IDC_BTN_SCAN) {
-                    SetStatus(L"🔄 Đang quét tìm kiếm Client trong LAN...", 1);
+                    SetStatus(L"● Đang quét tìm kiếm Client trong LAN...", 1);
                     DiscoveryScanner::TriggerScan();
                 } else if (id == IDC_BTN_LOCALHOST) {
                     SetWindowTextW(g_hEditIp, L"127.0.0.1");
@@ -1151,7 +1151,7 @@ namespace ConnectWindow {
         g_success = false;
         g_isOpen = true;
         g_isConnecting = false;
-        g_statusText = L"🔄 Đang tự động quét mạng LAN...";
+        g_statusText = L"● Đang tự động quét mạng LAN...";
         g_statusColorType = 0;
         g_discoveredList.clear();
         g_hasAutoFilledIp = false;
