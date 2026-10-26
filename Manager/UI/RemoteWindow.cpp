@@ -538,6 +538,11 @@ namespace {
                     return 0;
                 }
 
+                // Khóa phím Windows: Không gửi lệnh nhấn Win sang Client để chống kẹt phím
+                if (wp == VK_LWIN || wp == VK_RWIN) {
+                    return 0;
+                }
+
                 if (InputHandler::IsControlling()) {
                     InputHandler::SendKey(wp, 1);
                     return 0;
@@ -547,11 +552,22 @@ namespace {
 
             case WM_KEYUP:
             case WM_SYSKEYUP: {
+                if (wp == VK_LWIN || wp == VK_RWIN) {
+                    if (InputHandler::IsControlling()) {
+                        InputHandler::SendKey(wp, 0);
+                    }
+                    return 0;
+                }
+
                 if (InputHandler::IsControlling()) {
                     InputHandler::SendKey(wp, 0);
                     return 0;
                 }
                 break;
+            }
+            case WM_KILLFOCUS: {
+                InputHandler::ReleaseModifiers();
+                return 0;
             }
 
             case WM_RBUTTONDOWN: InputHandler::SendMouse(Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight); return 0;

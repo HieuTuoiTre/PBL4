@@ -13,10 +13,8 @@
 #include <cmath>
 
 #define AUDIO_RING_SIZE 32
-
-#define SAMPLES_PER_CHUNK 1920
-
-#define PREBUFFER_CHUNKS 2
+#define SAMPLES_PER_CHUNK 960  // 40ms ở 24.000 Hz, Mono 16-bit (960 frames * 1 channel = 960 samples = 1920 bytes)
+#define PREBUFFER_CHUNKS 2     // Đệm trước ~80ms để chống jitter mạng
 
 namespace {
 
@@ -106,11 +104,11 @@ namespace AudioPlayer {
 
                 WAVEFORMATEX wfx = {};
                 wfx.wFormatTag = WAVE_FORMAT_PCM;
-                wfx.nChannels = 2;
-                wfx.nSamplesPerSec = 48000;
-                wfx.wBitsPerSample = 16;
-                wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8;
-                wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+                wfx.nChannels = 1;              // Mono
+                wfx.nSamplesPerSec = 24000;      // 24 kHz Mono
+                wfx.wBitsPerSample = 16;         // 16-bit
+                wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8; // 4 bytes/frame
+                wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign; // 192.000 B/s
 
                 MMRESULT mmr = pWaveOutOpen(&g_hWaveOut, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
                 if (mmr != MMSYSERR_NOERROR) {
@@ -131,6 +129,7 @@ namespace AudioPlayer {
             return;
         }
 
+        // Dữ liệu nhận từ Client đã được chuẩn hóa về 16-bit PCM Mono 24kHz
         const int16_t* pcmSamples = (const int16_t*)rawData;
         int sampleCount = byteSize / (int)sizeof(int16_t);
 

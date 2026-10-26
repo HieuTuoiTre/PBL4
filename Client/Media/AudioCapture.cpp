@@ -15,7 +15,10 @@ namespace {
     static const GUID GUID_SUBTYPE_IEEE_FLOAT = 
         { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 
-    const size_t TARGET_CHUNK_BYTES = 3840;
+    // Kích thước chunk chuẩn: 40ms ở 24.000 Hz, Mono 16-bit
+    // 24000 frames/s * 0.040 s = 960 frames
+    // 960 frames * 1 channel * 2 bytes = 1920 bytes = 960 int16 samples
+    const size_t TARGET_CHUNK_BYTES = 1920;
 
     struct AudioFormatConverter {
         int inChannels = 2;
@@ -23,8 +26,9 @@ namespace {
         int inBitsPerSample = 32;
         bool inIsFloat = true;
 
-        double resampleRatio = 1.0;
+        double resampleRatio = 2.0; // inSampleRate / 24000.0
         double resamplePos = 0.0;
+        float lastInMono = 0.0f;
 
         void Configure(const WAVEFORMATEX* pwfx) {
             inChannels = pwfx->nChannels;
@@ -42,18 +46,20 @@ namespace {
                 inIsFloat = true;
             }
 
-            resampleRatio = (double)inSampleRate / 48000.0;
+            resampleRatio = (double)inSampleRate / 24000.0;
             resamplePos = 0.0;
+            lastInMono = 0.0f;
         }
 
         void Process(const uint8_t* inBytes, int numFrames, bool isSilent, std::vector<int16_t>& outPcm16) {
             if (numFrames <= 0) return;
             int bytesPerFrame = inChannels * (inBitsPerSample / 8);
 
-            std::vector<std::pair<float, float>> inStereo(numFrames);
+            // 1. Chuyển đổi các frame đầu vào về dạng Mono Float [-1.0f, 1.0f]
+            std::vector<float> inMono(numFrames);
             if (isSilent || !inBytes) {
                 for (int i = 0; i < numFrames; i++) {
-                    inStereo[i] = { 0.0f, 0.0f };
+                    inMono[i] = 0.0f;
                 }
             } else {
                 for (int f = 0; f < numFrames; f++) {
@@ -75,57 +81,40 @@ namespace {
                         }
                     }
 
-                    float left = 0.0f, right = 0.0f;
+                    float mono = 0.0f;
                     if (inChannels == 1) {
-                        left = chSamples[0];
-                        right = chSamples[0];
+                        mono = chSamples[0];
                     } else if (inChannels == 2) {
-                        left = chSamples[0];
-                        right = chSamples[1];
+                        // Downmix Stereo sang Mono (gộp 2 kênh thành 1)
+                        mono = 0.5f * (chSamples[0] + chSamples[1]);
                     } else {
-                        left = chSamples[0] + 0.707f * chSamples[2] + 0.5f * chSamples[4];
-                        right = chSamples[1] + 0.707f * chSamples[2] + 0.5f * chSamples[5];
-                        float maxVal = (std::max)(std::abs(left), std::abs(right));
-                        if (maxVal > 1.0f) {
-                            left /= maxVal;
-                            right /= maxVal;
+                        // Downmix âm thanh vòm (5.1 / 7.1) về Mono
+                        mono = 0.35f * (chSamples[0] + chSamples[1]) + 0.5f * chSamples[2] + 0.25f * (chSamples[4] + chSamples[5]);
+                        if (std::abs(mono) > 1.0f) {
+                            mono = std::copysign(1.0f, mono);
                         }
                     }
-                    inStereo[f] = { left, right };
+                    inMono[f] = mono;
                 }
             }
 
-            if (inSampleRate == 48000) {
-                outPcm16.reserve(outPcm16.size() + numFrames * 2);
-                for (int f = 0; f < numFrames; f++) {
-                    int16_t l = (int16_t)std::clamp(inStereo[f].first * 32767.0f, -32768.0f, 32767.0f);
-                    int16_t r = (int16_t)std::clamp(inStereo[f].second * 32767.0f, -32768.0f, 32767.0f);
-                    outPcm16.push_back(l);
-                    outPcm16.push_back(r);
-                }
-            } else {
-                outPcm16.reserve(outPcm16.size() + (size_t)(numFrames / resampleRatio * 2) + 128);
-                while (resamplePos < (double)numFrames) {
-                    int idx0 = (int)std::floor(resamplePos);
-                    double frac = resamplePos - idx0;
+            // 2. Resample sang 24.000 Hz và chuyển sang int16
+            while (resamplePos < (double)numFrames) {
+                int idx0 = (int)std::floor(resamplePos);
+                double frac = resamplePos - idx0;
 
-                    float l0 = inStereo[idx0].first;
-                    float r0 = inStereo[idx0].second;
-                    float l1 = (idx0 + 1 < numFrames) ? inStereo[idx0 + 1].first : l0;
-                    float r1 = (idx0 + 1 < numFrames) ? inStereo[idx0 + 1].second : r0;
+                float m0 = inMono[idx0];
+                float m1 = (idx0 + 1 < numFrames) ? inMono[idx0 + 1] : inMono[idx0];
 
-                    float lInterp = (float)((1.0 - frac) * l0 + frac * l1);
-                    float rInterp = (float)((1.0 - frac) * r0 + frac * r1);
+                float mInterp = (float)((1.0 - frac) * m0 + frac * m1);
 
-                    int16_t l = (int16_t)std::clamp(lInterp * 32767.0f, -32768.0f, 32767.0f);
-                    int16_t r = (int16_t)std::clamp(rInterp * 32767.0f, -32768.0f, 32767.0f);
-                    outPcm16.push_back(l);
-                    outPcm16.push_back(r);
+                int16_t sample = (int16_t)std::clamp(mInterp * 32767.0f, -32768.0f, 32767.0f);
+                outPcm16.push_back(sample);
 
-                    resamplePos += resampleRatio;
-                }
-                resamplePos -= (double)numFrames;
+                resamplePos += resampleRatio;
             }
+            resamplePos -= (double)numFrames;
+            lastInMono = inMono.back();
         }
     };
 }
@@ -180,33 +169,58 @@ namespace AudioCapture {
                 continue;
             }
 
-            // 3. Khởi tạo Silent Render Stream để giữ cho xung nhịp phần cứng WASAPI Loopback luôn chạy liên tục
-            UINT32 bufferFrameCount = 0;
-            if (SUCCEEDED(pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&pSilentRenderClient)) && pSilentRenderClient) {
-                if (SUCCEEDED(pSilentRenderClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, pwfx, NULL))) {
-                    if (SUCCEEDED(pSilentRenderClient->GetService(__uuidof(IAudioRenderClient), (void**)&pSilentRenderService)) && pSilentRenderService) {
-                        pSilentRenderClient->GetBufferSize(&bufferFrameCount);
-                        BYTE* pData = NULL;
-                        if (SUCCEEDED(pSilentRenderService->GetBuffer(bufferFrameCount, &pData)) && pData) {
-                            pSilentRenderService->ReleaseBuffer(bufferFrameCount, AUDCLNT_BUFFERFLAGS_SILENT);
-                        }
-                        pSilentRenderClient->Start();
+        // 3. Khởi tạo Silent Render Stream để giữ cho xung nhịp phần cứng WASAPI Loopback luôn chạy liên tục
+        if (SUCCEEDED(pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&pSilentRenderClient)) && pSilentRenderClient) {
+            if (SUCCEEDED(pSilentRenderClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, pwfx, NULL))) {
+                if (SUCCEEDED(pSilentRenderClient->GetService(__uuidof(IAudioRenderClient), (void**)&pSilentRenderService)) && pSilentRenderService) {
+                    UINT32 bufferFrameCount = 0;
+                    pSilentRenderClient->GetBufferSize(&bufferFrameCount);
+                    BYTE* pSilentData = NULL;
+                    if (SUCCEEDED(pSilentRenderService->GetBuffer(bufferFrameCount, &pSilentData))) {
+                        pSilentRenderService->ReleaseBuffer(bufferFrameCount, AUDCLNT_BUFFERFLAGS_SILENT);
                     }
                 }
             }
+        }
 
-            // 4. Khởi tạo Stream LOOPBACK để thu âm lại đầu ra loa
-            if (FAILED(pCaptureAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 2000000, 0, pwfx, NULL)) ||
-                FAILED(pCaptureAudioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&pCaptureClient)) || !pCaptureClient) {
-                if (pSilentRenderClient) { pSilentRenderClient->Stop(); pSilentRenderClient->Release(); }
-                if (pSilentRenderService) pSilentRenderService->Release();
-                CoTaskMemFree(pwfx);
-                pCaptureAudioClient->Release();
-                pDevice->Release();
-                pEnumerator->Release();
-                Sleep(500);
-                continue;
+        // 4. Khởi tạo WASAPI Loopback Capture
+        HRESULT hr = pCaptureAudioClient->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK,
+            10000000,
+            0,
+            pwfx,
+            NULL
+        );
+
+        if (FAILED(hr)) {
+            if (pSilentRenderClient) {
+                pSilentRenderClient->Stop();
+                pSilentRenderClient->Release();
             }
+            if (pSilentRenderService) pSilentRenderService->Release();
+            CoTaskMemFree(pwfx);
+            pCaptureAudioClient->Release();
+            pDevice->Release();
+            pEnumerator->Release();
+            CoUninitialize();
+            return;
+        }
+
+        hr = pCaptureAudioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&pCaptureClient);
+        if (FAILED(hr) || !pCaptureClient) {
+            if (pSilentRenderClient) {
+                pSilentRenderClient->Stop();
+                pSilentRenderClient->Release();
+            }
+            if (pSilentRenderService) pSilentRenderService->Release();
+            CoTaskMemFree(pwfx);
+            pCaptureAudioClient->Release();
+            pDevice->Release();
+            pEnumerator->Release();
+            CoUninitialize();
+            return;
+        }
 
             AudioFormatConverter converter;
             converter.Configure(pwfx);
@@ -238,10 +252,8 @@ namespace AudioCapture {
                     break;
                 }
 
-                while (packetLength != 0 && isRecording) {
-                    BYTE* pData = nullptr;
-                    UINT32 numFramesAvailable = 0;
-                    DWORD flags = 0;
+        std::vector<int16_t> accumPcm;
+        accumPcm.reserve(960 * 4);
 
                     if (SUCCEEDED(pCaptureClient->GetBuffer(&pData, &numFramesAvailable, &flags, NULL, NULL))) {
                         bool isSilent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
