@@ -1,17 +1,9 @@
-// ============================================================================
-// File: ConnectWindow.cpp
-// Mô tả: Hiện thực chi tiết giao diện bảng điều khiển kết nối mạng LAN (ConnectWindow).
-// Phong cách: Windows 11 Fluent Light Theme với Card container bo góc,
-//            Hàng ListView thoáng đạt có icon máy tính vector, Badge trạng thái dạng pill,
-//            Nút bấm bo góc hiện đại và hiển thị trạng thái mượt mà.
-// ============================================================================
-
 #include "ConnectWindow.h"
 #include "../Core/DiscoveryScanner.h"
 #include "../../Shared/Utils.h"
 
 #include <commctrl.h>
-#include <objidl.h> // Bắt buộc nạp trước gdiplus.h khi dùng MinGW/GCC
+#include <objidl.h>
 #include <gdiplus.h>
 
 #include <thread>
@@ -20,15 +12,12 @@
 #include <algorithm>
 #include <cwchar>
 
-// Định nghĩa mã thông điệp tùy biến
 #define WM_CONNECT_RESULT (WM_APP + 201)
 #define WM_CLIENT_UPDATE  (WM_APP + 202)
 #define TIMER_SCAN_ID     1001
 
 namespace {
-    // ========================================================================
-    // CẤU TRÚC CLIENT LƯU TRỮ TRONG UI
-    // ========================================================================
+
     struct ClientDisplayItem {
         std::string ip;
         std::wstring computerName;
@@ -38,9 +27,6 @@ namespace {
         DWORD lastSeenTick = 0;
     };
 
-    // ========================================================================
-    // CÁC HANDLE ĐIỀU KHIỂN GIAO DIỆN CỤC BỘ (GUI HANDLES)
-    // ========================================================================
     HWND g_hConnectWnd = NULL;
     HWND g_hListClients = NULL;
     HWND g_hEditIp = NULL;
@@ -49,30 +35,24 @@ namespace {
     HWND g_hBtnScan = NULL;
     HWND g_hBtnExit = NULL;
 
-    HWND g_hHeader = NULL;         // Handle thanh Header của ListView
-    WNDPROC g_oldHeaderProc = NULL;// Con trỏ lưu hàm WndProc gốc của Header
-    HWND g_hHoveredBtn = NULL;     // Handle nút bấm đang được chuột rê qua (Hover)
-    bool g_editHasFocus = false;   // Trạng thái focus của ô nhập IP để vẽ viền xanh sáng
-    bool g_hasAutoFilledIp = false;       // Đã tự động điền IP của Client lần đầu tiên hay chưa
-    bool g_userManuallyEditedIp = false;  // Người dùng đã tự gõ hoặc sửa IP trong ô Edit hay chưa
-    HIMAGELIST g_hImageList = NULL;// ImageList giả lập để tăng chiều cao dòng ListView
+    HWND g_hHeader = NULL;
+    WNDPROC g_oldHeaderProc = NULL;
+    HWND g_hHoveredBtn = NULL;
+    bool g_editHasFocus = false;
+    bool g_hasAutoFilledIp = false;
+    bool g_userManuallyEditedIp = false;
+    HIMAGELIST g_hImageList = NULL;
 
-    // ========================================================================
-    // TÀI NGUYÊN ĐỒ HỌA GDI & GDI+
-    // ========================================================================
-    HFONT g_hFontTitle = NULL;     // Segoe UI 20px, Bold
-    HFONT g_hFontSub = NULL;       // Segoe UI 11px, Bold
-    HFONT g_hFontNormal = NULL;    // Segoe UI 12px, Regular
-    HFONT g_hFontHeader = NULL;    // Segoe UI 12px, Semi-bold (Header ListView)
-    HFONT g_hFontCardTitle = NULL; // Segoe UI 13px, Bold
-    HFONT g_hFontEdit = NULL;      // Segoe UI 13px, Regular
+    HFONT g_hFontTitle = NULL;
+    HFONT g_hFontSub = NULL;
+    HFONT g_hFontNormal = NULL;
+    HFONT g_hFontHeader = NULL;
+    HFONT g_hFontCardTitle = NULL;
+    HFONT g_hFontEdit = NULL;
 
-    HBRUSH g_hBgBrush = NULL;      // Nền chính #F1F5F9 (RGB 241, 245, 249)
-    HBRUSH g_hWhiteBrush = NULL;   // Nền Card trắng #FFFFFF
+    HBRUSH g_hBgBrush = NULL;
+    HBRUSH g_hWhiteBrush = NULL;
 
-    // ========================================================================
-    // BIẾN QUẢN LÝ DỮ LIỆU VÀ TRẠNG THÁI
-    // ========================================================================
     WNDPROC g_oldEditProc = NULL;
     ConnectWindow::ConnectCallback g_callback = nullptr;
 
@@ -82,11 +62,10 @@ namespace {
     std::string g_targetIP = "";
     std::string g_connectedIP = "";
     std::wstring g_statusText = L"Đang tự động quét mạng LAN...";
-    int g_statusColorType = 0; // 0: Bình thường (Slate), 1: Thông tin (Blue), 2: Lỗi (Red)
+    int g_statusColorType = 0;
 
     std::vector<ClientDisplayItem> g_discoveredList;
 
-    // Định danh ID của các control
     enum ControlId {
         IDC_LIST_CLIENTS  = 100,
         IDC_EDIT_IP       = 101,
@@ -96,9 +75,6 @@ namespace {
         IDC_BTN_EXIT      = 105
     };
 
-    // ========================================================================
-    // HÀM TIỆN ÍCH ĐỒ HỌA GDI+
-    // ========================================================================
     void AddRoundRectPath(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& rect, float radius) {
         float d = radius * 2.0f;
         if (d > rect.Width) d = rect.Width;
@@ -111,9 +87,6 @@ namespace {
         path.CloseFigure();
     }
 
-    // ========================================================================
-    // HÀM ĐÁNH GIÁ MỨC ĐỘ ƯU TIÊN CỦA ĐỊA CHỈ IP
-    // ========================================================================
     int GetIpPriority(const std::string& ip) {
         if (ip.rfind("192.168.", 0) == 0 && ip.rfind("192.168.56.", 0) != 0) return 4;
         if (ip.rfind("10.", 0) == 0) return 4;
@@ -123,23 +96,16 @@ namespace {
         return 0;
     }
 
-    // ========================================================================
-    // CẬP NHẬT TRẠNG THÁI VÀ VẼ LẠI DẢI THÔNG BÁO
-    // ========================================================================
     void SetStatus(const std::wstring& text, int colorType) {
         g_statusText = text;
         g_statusColorType = colorType;
         if (g_hConnectWnd) {
-            // Vùng thông báo nằm ở góc trên bên phải phía dưới nút Quét mạng
+
             RECT rc = { 460, 60, 740, 86 };
             InvalidateRect(g_hConnectWnd, &rc, TRUE);
         }
     }
 
-    // ========================================================================
-    // SUBCLASS TÙY BIẾN THANH TIÊU ĐỀ CỘT LISTVIEW (HEADER CONTROL)
-    // Loại bỏ viền 3D màu xám cổ điển, vẽ nền trắng phẳng và font Segoe UI hiện đại
-    // ========================================================================
     LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         if (uMsg == WM_ERASEBKGND) {
             HDC hdc = (HDC)wParam;
@@ -167,18 +133,14 @@ namespace {
                 g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-                // Nền trắng tinh khiết ăn khớp với Card 1
                 Gdiplus::SolidBrush whiteBrush(Gdiplus::Color(255, 255, 255, 255));
                 g.FillRectangle(&whiteBrush, 0, 0, w, h);
 
-                // Đường viền dưới tinh tế #E2E8F0 ngăn cách header với hàng nội dung
                 Gdiplus::Pen botPen(Gdiplus::Color(255, 226, 232, 240), 1.0f);
                 g.DrawLine(&botPen, 0.0f, (float)h - 1.0f, (float)w, (float)h - 1.0f);
 
-                // Đường phân cách mờ giữa các cột
                 Gdiplus::Pen sepPen(Gdiplus::Color(255, 241, 245, 249), 1.0f);
 
-                // Font Segoe UI cho Header: thanh mảnh, hiện đại, màu Slate 700 (#334155)
                 Gdiplus::FontFamily ff(L"Segoe UI");
                 Gdiplus::Font fontHeader(&ff, 12.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                 Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 51, 65, 85));
@@ -200,12 +162,10 @@ namespace {
                     hdi.cchTextMax = 127;
                     Header_GetItem(hWnd, i, &hdi);
 
-                    // Vẽ tiêu đề cột canh lề trái với khoảng đệm 8px
                     Gdiplus::RectF textRc((float)itemRc.left + 8.0f, (float)itemRc.top,
                                          (float)(itemRc.right - itemRc.left - 12), (float)(itemRc.bottom - itemRc.top));
                     g.DrawString(text, -1, &fontHeader, textRc, &sf, &textBrush);
 
-                    // Vẽ đường phân cách dọc mỏng giữa các cột
                     if (i < count - 1) {
                         g.DrawLine(&sepPen, (float)itemRc.right - 1.0f, (float)itemRc.top + 4.0f,
                                             (float)itemRc.right - 1.0f, (float)itemRc.bottom - 5.0f);
@@ -226,13 +186,10 @@ namespace {
         return CallWindowProcW(g_oldHeaderProc, hWnd, uMsg, wParam, lParam);
     }
 
-    // ========================================================================
-    // SUBCLASS CHO Ô EDIT NHẬP ĐỊA CHỈ IP
-    // ========================================================================
     LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         if (uMsg == WM_CHAR || uMsg == WM_KEYDOWN) {
             if (wParam != VK_RETURN && wParam != VK_ESCAPE && wParam != VK_TAB) {
-                g_userManuallyEditedIp = true; // Người dùng trực tiếp gõ vào ô Edit
+                g_userManuallyEditedIp = true;
             }
         }
         if (uMsg == WM_KEYDOWN) {
@@ -255,9 +212,6 @@ namespace {
         return CallWindowProcW(g_oldEditProc, hWnd, uMsg, wParam, lParam);
     }
 
-    // ========================================================================
-    // CẬP NHẬT BẢNG DANH SÁCH MÁY CLIENT (REFRESH LISTVIEW UI)
-    // ========================================================================
     void RefreshListViewUI() {
         if (!g_hListClients) return;
 
@@ -274,7 +228,6 @@ namespace {
         for (int i = 0; i < (int)g_discoveredList.size(); i++) {
             const auto& client = g_discoveredList[i];
 
-            // Cột 0: Tên máy tính
             LVITEMW lvi = {};
             lvi.mask = LVIF_TEXT;
             lvi.iItem = i;
@@ -282,14 +235,11 @@ namespace {
             lvi.pszText = (LPWSTR)client.computerName.c_str();
             ListView_InsertItem(g_hListClients, &lvi);
 
-            // Cột 1: Địa chỉ IP
             std::wstring ipW = Utils::Utf8ToWide(client.ip);
             ListView_SetItemText(g_hListClients, i, 1, (LPWSTR)ipW.c_str());
 
-            // Cột 2: Tên tài khoản Windows
             ListView_SetItemText(g_hListClients, i, 2, (LPWSTR)client.userName.c_str());
 
-            // Cột 3: Trạng thái (Đang hoạt động / Đang bận / Ngoại tuyến)
             std::wstring statusStr = L"Ngoại tuyến";
             if (client.isOnline) {
                 statusStr = client.isBusy ? L"Đang bận" : L"Đang hoạt động";
@@ -304,7 +254,7 @@ namespace {
         if (newSelIdx != -1) {
             ListView_SetItemState(g_hListClients, newSelIdx, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
         } else if (!g_discoveredList.empty() && curSel == -1) {
-            // Mặc định chọn dòng đầu tiên nếu chưa chọn dòng nào
+
             ListView_SetItemState(g_hListClients, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
         }
 
@@ -321,9 +271,6 @@ namespace {
         }
     }
 
-    // ========================================================================
-    // TIẾN TRÌNH KHỞI TẠO KẾT NỐI (START CONNECTION PROCESS)
-    // ========================================================================
     void StartConnectionProcess(HWND hwnd) {
         if (g_isConnecting) return;
 
@@ -363,51 +310,42 @@ namespace {
         }).detach();
     }
 
-    // Xử lý khi người dùng chọn dòng trong ListView
     void HandleSelectedRow(int index, bool triggerConnect) {
         if (index < 0 || index >= (int)g_discoveredList.size()) return;
 
         std::wstring ipW = Utils::Utf8ToWide(g_discoveredList[index].ip);
         SetWindowTextW(g_hEditIp, ipW.c_str());
         SendMessageW(g_hEditIp, EM_SETSEL, 0, -1);
-        g_userManuallyEditedIp = false; // Người dùng vừa chủ động chọn máy trong danh sách
+        g_userManuallyEditedIp = false;
 
         if (triggerConnect) {
             StartConnectionProcess(g_hConnectWnd);
         }
     }
 
-    // ========================================================================
-    // VẼ VECTOR BIỂU TƯỢNG SƠ ĐỒ MẠNG LAN TRÊN BANNER
-    // ========================================================================
     void DrawNetworkBannerIcon(Gdiplus::Graphics& g, float x, float y) {
-        // Màn hình chính ở đỉnh sơ đồ
+
         Gdiplus::RectF hostScr(x + 12.0f, y, 22.0f, 15.0f);
         Gdiplus::GraphicsPath hostPath;
         AddRoundRectPath(hostPath, hostScr, 2.0f);
-        Gdiplus::SolidBrush blueFill(Gdiplus::Color(255, 37, 99, 235)); // #2563EB
+        Gdiplus::SolidBrush blueFill(Gdiplus::Color(255, 37, 99, 235));
         Gdiplus::Pen bluePen(Gdiplus::Color(255, 29, 78, 216), 1.2f);
         g.FillPath(&blueFill, &hostPath);
         g.DrawPath(&bluePen, &hostPath);
 
-        // Chi tiết màn hình bên trong
-        Gdiplus::SolidBrush glowFill(Gdiplus::Color(255, 147, 197, 253)); // #93C5FD
+        Gdiplus::SolidBrush glowFill(Gdiplus::Color(255, 147, 197, 253));
         Gdiplus::RectF innerScr(x + 15.0f, y + 3.0f, 16.0f, 7.0f);
         g.FillRectangle(&glowFill, innerScr);
 
-        // Chân đế màn hình
-        Gdiplus::Pen slatePen(Gdiplus::Color(255, 71, 85, 105), 1.5f); // #475569
+        Gdiplus::Pen slatePen(Gdiplus::Color(255, 71, 85, 105), 1.5f);
         g.DrawLine(&slatePen, x + 23.0f, y + 15.0f, x + 23.0f, y + 19.0f);
         g.DrawLine(&slatePen, x + 18.0f, y + 19.0f, x + 28.0f, y + 19.0f);
 
-        // Dây mạng nối xuống đường trục Bus
-        Gdiplus::Pen busPen(Gdiplus::Color(255, 148, 163, 184), 1.5f); // #94A3B8
+        Gdiplus::Pen busPen(Gdiplus::Color(255, 148, 163, 184), 1.5f);
         g.DrawLine(&busPen, x + 23.0f, y + 19.0f, x + 23.0f, y + 25.0f);
 
-        // Trục cáp ngang Bus
         g.DrawLine(&busPen, x + 6.0f, y + 25.0f, x + 40.0f, y + 25.0f);
 
-        // 3 nhánh rẽ xuống 3 máy trạm Client
         float drops[3] = { x + 8.0f, x + 23.0f, x + 38.0f };
         for (int i = 0; i < 3; i++) {
             g.DrawLine(&busPen, drops[i], y + 25.0f, drops[i], y + 30.0f);
@@ -420,26 +358,19 @@ namespace {
         }
     }
 
-    // ========================================================================
-    // VẼ VECTOR BIỂU TƯỢNG MÁY TÍNH DESKTOP TRONG DÒNG LISTVIEW
-    // ========================================================================
     void DrawMonitorRowIcon(Gdiplus::Graphics& g, float x, float y) {
         Gdiplus::RectF scr(x, y, 18.0f, 13.0f);
         Gdiplus::GraphicsPath scrPath;
         AddRoundRectPath(scrPath, scr, 1.5f);
-        Gdiplus::Pen pen(Gdiplus::Color(255, 51, 65, 85), 1.4f); // #334155
+        Gdiplus::Pen pen(Gdiplus::Color(255, 51, 65, 85), 1.4f);
         Gdiplus::SolidBrush scrBg(Gdiplus::Color(255, 255, 255, 255));
         g.FillPath(&scrBg, &scrPath);
         g.DrawPath(&pen, &scrPath);
 
-        // Đường chân đế
         g.DrawLine(&pen, x + 9.0f, y + 13.0f, x + 9.0f, y + 16.0f);
         g.DrawLine(&pen, x + 4.5f, y + 16.0f, x + 13.5f, y + 16.0f);
     }
 
-    // ========================================================================
-    // VẼ BADGE TRẠNG THÁI DẠNG PILL (ĐANG HOẠT ĐỘNG, ĐANG BẬN, NGOẠI TUYẾN)
-    // ========================================================================
     void DrawStatusBadgePill(Gdiplus::Graphics& g, const Gdiplus::RectF& cellRect, int statusType, const std::wstring& text) {
         float pillH = 26.0f;
         float pillY = cellRect.Y + (cellRect.Height - pillH) / 2.0f;
@@ -448,23 +379,23 @@ namespace {
         Gdiplus::Color bgColor, borderColor, dotColor, textColor;
         float pillW = 126.0f;
 
-        if (statusType == 0) { // Sẵn sàng / Đang hoạt động
-            bgColor = Gdiplus::Color(255, 220, 252, 231);     // #DCFCE7
-            borderColor = Gdiplus::Color(255, 187, 247, 208); // #BBF7D0
-            dotColor = Gdiplus::Color(255, 34, 197, 94);      // #22C55E
-            textColor = Gdiplus::Color(255, 21, 128, 61);     // #15803D
+        if (statusType == 0) {
+            bgColor = Gdiplus::Color(255, 220, 252, 231);
+            borderColor = Gdiplus::Color(255, 187, 247, 208);
+            dotColor = Gdiplus::Color(255, 34, 197, 94);
+            textColor = Gdiplus::Color(255, 21, 128, 61);
             pillW = 126.0f;
-        } else if (statusType == 1) { // Đang bận
-            bgColor = Gdiplus::Color(255, 254, 243, 199);     // #FEF3C7
-            borderColor = Gdiplus::Color(255, 253, 230, 138); // #FDE68A
-            dotColor = Gdiplus::Color(255, 245, 158, 11);     // #F59E0B
-            textColor = Gdiplus::Color(255, 180, 83, 9);      // #B45309
+        } else if (statusType == 1) {
+            bgColor = Gdiplus::Color(255, 254, 243, 199);
+            borderColor = Gdiplus::Color(255, 253, 230, 138);
+            dotColor = Gdiplus::Color(255, 245, 158, 11);
+            textColor = Gdiplus::Color(255, 180, 83, 9);
             pillW = 98.0f;
-        } else { // Ngoại tuyến
-            bgColor = Gdiplus::Color(255, 241, 245, 249);     // #F1F5F9
-            borderColor = Gdiplus::Color(255, 226, 232, 240); // #E2E8F0
-            dotColor = Gdiplus::Color(255, 100, 116, 139);    // #64748B
-            textColor = Gdiplus::Color(255, 71, 85, 105);     // #475569
+        } else {
+            bgColor = Gdiplus::Color(255, 241, 245, 249);
+            borderColor = Gdiplus::Color(255, 226, 232, 240);
+            dotColor = Gdiplus::Color(255, 100, 116, 139);
+            textColor = Gdiplus::Color(255, 71, 85, 105);
             pillW = 108.0f;
         }
 
@@ -477,14 +408,12 @@ namespace {
         g.FillPath(&bgBrush, &pillPath);
         g.DrawPath(&borderPen, &pillPath);
 
-        // Chấm tròn trạng thái
         float dotSize = 7.0f;
         float dotX = pillX + 11.0f;
         float dotY = pillY + (pillH - dotSize) / 2.0f;
         Gdiplus::SolidBrush dotBrush(dotColor);
         g.FillEllipse(&dotBrush, dotX, dotY, dotSize, dotSize);
 
-        // Chữ trạng thái
         Gdiplus::FontFamily ff(L"Segoe UI");
         Gdiplus::Font font(&ff, 12.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
         Gdiplus::SolidBrush textBrush(textColor);
@@ -497,9 +426,6 @@ namespace {
         g.DrawString(text.c_str(), -1, &font, textRect, &sf, &textBrush);
     }
 
-    // ========================================================================
-    // VẼ NÚT BẤM TÙY BIẾN (OWNER-DRAW BUTTONS)
-    // ========================================================================
     void DrawModernButton(LPDRAWITEMSTRUCT dis) {
         Gdiplus::Graphics g(dis->hDC);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -520,60 +446,60 @@ namespace {
         Gdiplus::Color bgColor, borderColor, textColor;
 
         if (dis->CtlID == IDC_BTN_CONNECT) {
-            // Nút "Kết nối" (Royal Blue #2563EB)
+
             if (isDisabled) {
                 bgColor = Gdiplus::Color(255, 147, 197, 253);
                 borderColor = Gdiplus::Color(255, 191, 219, 254);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else if (isSelected) {
-                bgColor = Gdiplus::Color(255, 30, 58, 138); // #1E3A8A
+                bgColor = Gdiplus::Color(255, 30, 58, 138);
                 borderColor = Gdiplus::Color(255, 30, 58, 138);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else if (isHovered) {
-                bgColor = Gdiplus::Color(255, 29, 78, 216); // #1D4ED8
+                bgColor = Gdiplus::Color(255, 29, 78, 216);
                 borderColor = Gdiplus::Color(255, 29, 78, 216);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else {
-                bgColor = Gdiplus::Color(255, 37, 99, 235); // #2563EB
+                bgColor = Gdiplus::Color(255, 37, 99, 235);
                 borderColor = Gdiplus::Color(255, 37, 99, 235);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             }
         } else if (dis->CtlID == IDC_BTN_SCAN) {
-            // Nút "Quét mạng" (Deep Royal Blue / Navy #1E3A8A)
+
             if (isDisabled) {
                 bgColor = Gdiplus::Color(255, 148, 163, 184);
                 borderColor = Gdiplus::Color(255, 148, 163, 184);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else if (isSelected) {
-                bgColor = Gdiplus::Color(255, 23, 37, 84); // #172554
+                bgColor = Gdiplus::Color(255, 23, 37, 84);
                 borderColor = Gdiplus::Color(255, 23, 37, 84);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else if (isHovered) {
-                bgColor = Gdiplus::Color(255, 29, 78, 216); // #1D4ED8
+                bgColor = Gdiplus::Color(255, 29, 78, 216);
                 borderColor = Gdiplus::Color(255, 29, 78, 216);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else {
-                bgColor = Gdiplus::Color(255, 30, 58, 138); // #1E3A8A
+                bgColor = Gdiplus::Color(255, 30, 58, 138);
                 borderColor = Gdiplus::Color(255, 30, 58, 138);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             }
         } else if (dis->CtlID == IDC_BTN_LOCALHOST) {
-            // Nút "Localhost" (#E2E8F0)
+
             if (isSelected) {
-                bgColor = Gdiplus::Color(255, 203, 213, 225); // #CBD5E1
+                bgColor = Gdiplus::Color(255, 203, 213, 225);
                 borderColor = Gdiplus::Color(255, 148, 163, 184);
                 textColor = Gdiplus::Color(255, 15, 23, 42);
             } else if (isHovered) {
-                bgColor = Gdiplus::Color(255, 226, 232, 240); // #E2E8F0
+                bgColor = Gdiplus::Color(255, 226, 232, 240);
                 borderColor = Gdiplus::Color(255, 203, 213, 225);
                 textColor = Gdiplus::Color(255, 15, 23, 42);
             } else {
-                bgColor = Gdiplus::Color(255, 241, 245, 249); // #F1F5F9
+                bgColor = Gdiplus::Color(255, 241, 245, 249);
                 borderColor = Gdiplus::Color(255, 203, 213, 225);
                 textColor = Gdiplus::Color(255, 51, 65, 85);
             }
         } else {
-            // Nút "Thoát" (#FFFFFF)
+
             if (isSelected) {
                 bgColor = Gdiplus::Color(255, 226, 232, 240);
                 borderColor = Gdiplus::Color(255, 148, 163, 184);
@@ -589,13 +515,11 @@ namespace {
             }
         }
 
-        // Đổ nền bo góc và viền
         Gdiplus::SolidBrush bgBrush(bgColor);
         Gdiplus::Pen borderPen(borderColor, 1.0f);
         g.FillPath(&bgBrush, &path);
         g.DrawPath(&borderPen, &path);
 
-        // Lấy chuỗi văn bản của nút
         wchar_t text[128] = {0};
         GetWindowTextW(dis->hwndItem, text, 127);
 
@@ -607,7 +531,6 @@ namespace {
         sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
         sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
-        // Nếu là nút "Quét mạng", vẽ icon làm mới / radar hai chiều xoay vòng đối xứng
         if (dis->CtlID == IDC_BTN_SCAN) {
             float icX = rf.X + 18.0f;
             float icY = rf.Y + rf.Height / 2.0f;
@@ -617,17 +540,15 @@ namespace {
             arcPen.SetStartCap(Gdiplus::LineCapRound);
             arcPen.SetEndCap(Gdiplus::LineCapRound);
 
-            // Cung tròn phía trên (quay theo chiều kim đồng hồ)
             g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 215.0f, 170.0f);
-            // Đầu mũi tên của cung trên
+
             float ax1 = icX + r * 0.82f;
             float ay1 = icY - r * 0.57f;
             g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.2f, ay1 - 2.5f);
             g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.2f, ay1 + 2.5f);
 
-            // Cung tròn phía dưới (quay theo chiều kim đồng hồ)
             g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 35.0f, 170.0f);
-            // Đầu mũi tên của cung dưới
+
             float ax2 = icX - r * 0.82f;
             float ay2 = icY + r * 0.57f;
             g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.2f, ay2 + 2.5f);
@@ -640,15 +561,11 @@ namespace {
         }
     }
 
-    // ========================================================================
-    // HÀM XỬ LÝ THÔNG ĐIỆP CHÍNH (CONNECTWNDPROC)
-    // ========================================================================
     LRESULT CALLBACK ConnectWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
             case WM_CREATE: {
                 g_hConnectWnd = hwnd;
 
-                // 1. Khởi tạo Font chữ chuẩn Segoe UI
                 g_hFontTitle = CreateFontW(26, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
@@ -667,36 +584,29 @@ namespace {
                 g_hFontEdit = CreateFontW(17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
-                // Tạo các cọ vẽ GDI
-                g_hBgBrush = CreateSolidBrush(RGB(241, 245, 249));   // Slate 100
-                g_hWhiteBrush = CreateSolidBrush(RGB(255, 255, 255)); // Pure White
+                g_hBgBrush = CreateSolidBrush(RGB(241, 245, 249));
+                g_hWhiteBrush = CreateSolidBrush(RGB(255, 255, 255));
 
-                // 2. Nút "Quét mạng" ở góc trên bên phải
                 g_hBtnScan = CreateWindowExW(0, L"BUTTON", L"Quét mạng",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     608, 22, 124, 36, hwnd, (HMENU)IDC_BTN_SCAN, GetModuleHandle(NULL), NULL);
 
-                // 3. Tạo bảng SysListView32 bên trong Card 1 (không viền thô)
                 g_hListClients = CreateWindowExW(0, L"SysListView32", L"",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                     36, 132, 688, 202, hwnd, (HMENU)IDC_LIST_CLIENTS, GetModuleHandle(NULL), NULL);
 
-                // Thiết lập phong cách bảng: Full row select và đệm đôi chống giật
                 ListView_SetExtendedListViewStyle(g_hListClients, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
                 ListView_SetBkColor(g_hListClients, RGB(255, 255, 255));
                 ListView_SetTextBkColor(g_hListClients, RGB(255, 255, 255));
 
-                // Gán ImageList giả lập để tăng chiều cao mỗi dòng lên 34px thoáng đãng
                 g_hImageList = ImageList_Create(1, 34, ILC_COLOR32, 1, 1);
                 ListView_SetImageList(g_hListClients, g_hImageList, LVSIL_SMALL);
 
-                // Gán Subclass cho thanh Header của ListView để vẽ giao diện phẳng hiện đại, xóa viền xám 3D
                 g_hHeader = ListView_GetHeader(g_hListClients);
                 if (g_hHeader) {
                     g_oldHeaderProc = (WNDPROC)SetWindowLongPtrW(g_hHeader, GWLP_WNDPROC, (LONG_PTR)HeaderSubclassProc);
                 }
 
-                // Cấu hình 4 cột
                 LVCOLUMNW lvc = {};
                 lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
 
@@ -712,7 +622,6 @@ namespace {
                 lvc.iSubItem = 3; lvc.cx = 170; lvc.pszText = (LPWSTR)L"Trạng thái";
                 ListView_InsertColumn(g_hListClients, 3, &lvc);
 
-                // 4. Ô nhập IP không viền nằm chính xác giữa tâm khung Card 2 (Canh giữa quang học hoàn hảo)
                 g_hEditIp = CreateWindowExW(0, L"EDIT", L"",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                     76, 405, 168, 20, hwnd, (HMENU)IDC_EDIT_IP, GetModuleHandle(NULL), NULL);
@@ -720,25 +629,20 @@ namespace {
 
                 g_oldEditProc = (WNDPROC)SetWindowLongPtrW(g_hEditIp, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
-                // Nút "Localhost"
                 g_hBtnLocalhost = CreateWindowExW(0, L"BUTTON", L"Localhost",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     262, 394, 88, 36, hwnd, (HMENU)IDC_BTN_LOCALHOST, GetModuleHandle(NULL), NULL);
 
-                // 5. Nút "Kết nối" (Royal Blue)
                 g_hBtnConnect = CreateWindowExW(0, L"BUTTON", L"↗  Kết nối",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     552, 402, 102, 38, hwnd, (HMENU)IDC_BTN_CONNECT, GetModuleHandle(NULL), NULL);
 
-                // 6. Nút "Thoát"
                 g_hBtnExit = CreateWindowExW(0, L"BUTTON", L"Thoát",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     662, 402, 70, 38, hwnd, (HMENU)IDC_BTN_EXIT, GetModuleHandle(NULL), NULL);
 
-                // 7. Khởi động Timer quét mạng định kỳ mỗi 3500ms
                 SetTimer(hwnd, TIMER_SCAN_ID, 3500, NULL);
 
-                // 8. Bắt đầu lắng nghe phản hồi UDP từ Client
                 DiscoveryScanner::Start([hwnd](const DiscoveredClient& client, bool isOnline) {
                     DiscoveredClient* pCopy = new DiscoveredClient(client);
                     PostMessageW(hwnd, WM_CLIENT_UPDATE, isOnline ? 1 : 0, (LPARAM)pCopy);
@@ -747,7 +651,6 @@ namespace {
                 return 0;
             }
 
-            // Vẽ toàn bộ nền, Header, Card containers và biểu tượng bằng GDI+
             case WM_PAINT: {
                 PAINTSTRUCT ps;
                 HDC hdc = BeginPaint(hwnd, &ps);
@@ -757,7 +660,6 @@ namespace {
                 int clientW = rc.right;
                 int clientH = rc.bottom;
 
-                // Tạo Memory DC và Bitmap để đệm đôi chống chớp giật
                 HDC memDC = CreateCompatibleDC(hdc);
                 HBITMAP memBmp = CreateCompatibleBitmap(hdc, clientW, clientH);
                 HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
@@ -767,11 +669,9 @@ namespace {
                     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                     g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-                    // 1. Tô nền toàn cửa sổ #F1F5F9
                     Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 241, 245, 249));
                     g.FillRectangle(&bgBrush, 0, 0, clientW, clientH);
 
-                    // 2. Vẽ Banner trên cùng: Biểu tượng sơ đồ LAN mạng + Tiêu đề
                     DrawNetworkBannerIcon(g, 26.0f, 20.0f);
 
                     Gdiplus::FontFamily ff(L"Segoe UI");
@@ -780,22 +680,18 @@ namespace {
                     sfLeft.SetLineAlignment(Gdiplus::StringAlignmentNear);
                     sfLeft.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
-                    // Dòng phụ đề nhỏ phía trên: "LAN REMOTE DESKTOP"
                     Gdiplus::Font fontPre(&ff, 10.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                    Gdiplus::SolidBrush preBrush(Gdiplus::Color(255, 71, 85, 105)); // #475569
+                    Gdiplus::SolidBrush preBrush(Gdiplus::Color(255, 71, 85, 105));
                     g.DrawString(L"LAN REMOTE DESKTOP", -1, &fontPre, Gdiplus::PointF(80.0f, 18.0f), &sfLeft, &preBrush);
 
-                    // Tiêu đề lớn: "QUẢN LÝ KẾT NỐI"
                     Gdiplus::Font fontMain(&ff, 18.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                    Gdiplus::SolidBrush mainBrush(Gdiplus::Color(255, 15, 23, 42)); // #0F172A
+                    Gdiplus::SolidBrush mainBrush(Gdiplus::Color(255, 15, 23, 42));
                     g.DrawString(L"QUẢN LÝ KẾT NỐI", -1, &fontMain, Gdiplus::PointF(80.0f, 32.0f), &sfLeft, &mainBrush);
 
-                    // Dòng mô tả: "Tự động phát hiện các máy Client trong mạng LAN • Kết nối điều khiển"
                     Gdiplus::Font fontDesc(&ff, 11.5f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-                    Gdiplus::SolidBrush descBrush(Gdiplus::Color(255, 100, 116, 139)); // #64748B
+                    Gdiplus::SolidBrush descBrush(Gdiplus::Color(255, 100, 116, 139));
                     g.DrawString(L"Tự động phát hiện các máy Client trong mạng LAN • Kết nối điều khiển", -1, &fontDesc, Gdiplus::PointF(80.0f, 57.0f), &sfLeft, &descBrush);
 
-                    // Trạng thái quét mạng LAN góc trên bên phải
                     Gdiplus::StringFormat sfRight;
                     sfRight.SetAlignment(Gdiplus::StringAlignmentFar);
                     sfRight.SetLineAlignment(Gdiplus::StringAlignmentCenter);
@@ -810,33 +706,28 @@ namespace {
                     Gdiplus::RectF statRect(460.0f, 62.0f, 272.0f, 20.0f);
                     g.DrawString(g_statusText.c_str(), -1, &fontStat, statRect, &sfRight, &statBrush);
 
-                    // 3. Card 1: Khung danh sách máy Client (Bo góc 10px, Nền trắng, Viền #E2E8F0)
                     Gdiplus::RectF card1Rect(24.0f, 88.0f, (float)(clientW - 48), 252.0f);
                     Gdiplus::GraphicsPath card1Path;
                     AddRoundRectPath(card1Path, card1Rect, 10.0f);
 
                     Gdiplus::SolidBrush whiteBrush(Gdiplus::Color(255, 255, 255, 255));
-                    Gdiplus::Pen cardBorder(Gdiplus::Color(255, 226, 232, 240), 1.0f); // #E2E8F0
+                    Gdiplus::Pen cardBorder(Gdiplus::Color(255, 226, 232, 240), 1.0f);
                     g.FillPath(&whiteBrush, &card1Path);
                     g.DrawPath(&cardBorder, &card1Path);
 
-                    // Tiêu đề trong Card 1: "Danh sách máy Client đang bật trong mạng LAN"
                     Gdiplus::Font fontCard1(&ff, 13.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                     Gdiplus::SolidBrush card1TitleBrush(Gdiplus::Color(255, 15, 23, 42));
                     g.DrawString(L"Danh sách máy Client đang bật trong mạng LAN", -1, &fontCard1, Gdiplus::PointF(40.0f, 102.0f), &sfLeft, &card1TitleBrush);
 
-                    // 4. Card 2: Khung nhập địa chỉ IP thủ công
                     Gdiplus::RectF card2Rect(24.0f, 356.0f, 340.0f, 84.0f);
                     Gdiplus::GraphicsPath card2Path;
                     AddRoundRectPath(card2Path, card2Rect, 10.0f);
                     g.FillPath(&whiteBrush, &card2Path);
                     g.DrawPath(&cardBorder, &card2Path);
 
-                    // Tiêu đề trong Card 2: "Hoặc nhập địa chỉ IP Client thủ công:"
                     Gdiplus::Font fontCard2(&ff, 12.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                     g.DrawString(L"Hoặc nhập địa chỉ IP Client thủ công:", -1, &fontCard2, Gdiplus::PointF(38.0f, 368.0f), &sfLeft, &card1TitleBrush);
 
-                    // Hộp viền bao quanh ô nhập IP và icon máy tính IP
                     Gdiplus::RectF ipBoxRect(38.0f, 394.0f, 214.0f, 36.0f);
                     Gdiplus::GraphicsPath ipBoxPath;
                     AddRoundRectPath(ipBoxPath, ipBoxRect, 6.0f);
@@ -845,7 +736,6 @@ namespace {
                                             g_editHasFocus ? 1.6f : 1.0f);
                     g.DrawPath(&ipBorderPen, &ipBoxPath);
 
-                    // Icon máy tính thu nhỏ có chữ IP bên trong canh giữa thẳng hàng
                     Gdiplus::RectF miniScr(46.0f, 404.0f, 22.0f, 15.0f);
                     Gdiplus::GraphicsPath miniScrPath;
                     AddRoundRectPath(miniScrPath, miniScr, 1.5f);
@@ -862,7 +752,6 @@ namespace {
                     g.DrawString(L"IP", -1, &fontMiniIP, miniScr, &sfCenter, &ipTextBrush);
                 }
 
-                // Chép từ Memory DC lên màn hình HDC chính
                 BitBlt(hdc, 0, 0, clientW, clientH, memDC, 0, 0, SRCCOPY);
 
                 SelectObject(memDC, oldBmp);
@@ -874,12 +763,11 @@ namespace {
             }
 
             case WM_ERASEBKGND:
-                return 1; // Ngăn chặn nhấp nháy màn hình
+                return 1;
 
-            // Tùy biến màu nền ô Edit để hòa vào Card trắng
             case WM_CTLCOLOREDIT: {
                 HDC hdcEdit = (HDC)wp;
-                SetTextColor(hdcEdit, RGB(15, 23, 42)); // #0F172A
+                SetTextColor(hdcEdit, RGB(15, 23, 42));
                 SetBkColor(hdcEdit, RGB(255, 255, 255));
                 return (LRESULT)g_hWhiteBrush;
             }
@@ -894,7 +782,6 @@ namespace {
                 break;
             }
 
-            // Theo dõi chuột để tạo hiệu ứng hover mượt mà cho 4 nút bấm
             case WM_SETCURSOR: {
                 HWND hCursorWnd = (HWND)wp;
                 if (hCursorWnd == g_hBtnScan || hCursorWnd == g_hBtnLocalhost ||
@@ -926,7 +813,7 @@ namespace {
             }
 
             case WM_LBUTTONDOWN: {
-                // Nhấp vào vùng hộp IP -> Tự động focus ô Edit
+
                 int x = LOWORD(lp);
                 int y = HIWORD(lp);
                 if (x >= 38 && x <= 252 && y >= 394 && y <= 430) {
@@ -940,7 +827,7 @@ namespace {
                 int id = LOWORD(wp);
                 if (id == IDC_EDIT_IP && HIWORD(wp) == EN_CHANGE) {
                     if (GetFocus() == g_hEditIp) {
-                        g_userManuallyEditedIp = true; // Người dùng tự gõ/chỉnh sửa nội dung ô IP
+                        g_userManuallyEditedIp = true;
                     }
                 } else if (id == IDC_BTN_CONNECT) {
                     StartConnectionProcess(hwnd);
@@ -951,16 +838,13 @@ namespace {
                     SetWindowTextW(g_hEditIp, L"127.0.0.1");
                     SendMessageW(g_hEditIp, EM_SETSEL, 0, -1);
                     SetFocus(g_hEditIp);
-                    g_userManuallyEditedIp = true; // Đánh dấu người dùng chủ động chọn Localhost
+                    g_userManuallyEditedIp = true;
                 } else if (id == IDC_BTN_EXIT) {
                     SendMessageW(hwnd, WM_CLOSE, 0, 0);
                 }
                 return 0;
             }
 
-            // ================================================================
-            // TÙY BIẾN VẼ BẢNG LISTVIEW VỚI ICON VECTOR VÀ PILL BADGE
-            // ================================================================
             case WM_NOTIFY: {
                 LPNMHDR pnm = (LPNMHDR)lp;
                 if (pnm->idFrom == IDC_LIST_CLIENTS) {
@@ -983,18 +867,18 @@ namespace {
                             g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
                             if (isSelected) {
-                                // Hàng được chọn: Nền xanh nhạt #EFF6FF bo góc mềm mại, viền #BFDBFE
+
                                 Gdiplus::RectF rf((float)rcItem.left + 2.0f, (float)rcItem.top + 2.0f,
                                                  (float)(rcItem.right - rcItem.left) - 4.0f, (float)(rcItem.bottom - rcItem.top) - 4.0f);
                                 Gdiplus::GraphicsPath selPath;
                                 AddRoundRectPath(selPath, rf, 6.0f);
 
-                                Gdiplus::SolidBrush selBg(Gdiplus::Color(255, 239, 246, 255)); // #EFF6FF
-                                Gdiplus::Pen selBorder(Gdiplus::Color(255, 191, 219, 254), 1.0f); // #BFDBFE
+                                Gdiplus::SolidBrush selBg(Gdiplus::Color(255, 239, 246, 255));
+                                Gdiplus::Pen selBorder(Gdiplus::Color(255, 191, 219, 254), 1.0f);
                                 g.FillPath(&selBg, &selPath);
                                 g.DrawPath(&selBorder, &selPath);
                             } else {
-                                // Hàng không chọn: Nền trắng và đường kẻ phân cách nhẹ dưới cùng
+
                                 Gdiplus::SolidBrush whiteBg(Gdiplus::Color(255, 255, 255, 255));
                                 g.FillRectangle(&whiteBg, (INT)rcItem.left, (INT)rcItem.top, (INT)(rcItem.right - rcItem.left), (INT)(rcItem.bottom - rcItem.top));
 
@@ -1026,7 +910,7 @@ namespace {
                             sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
 
                             if (subItem == 0) {
-                                // Cột 0: Icon máy tính vector + Tên máy tính
+
                                 float rowH = (float)(subRect.bottom - subRect.top);
                                 float iconY = (float)subRect.top + (rowH - 17.0f) / 2.0f;
                                 DrawMonitorRowIcon(g, (float)subRect.left + 8.0f, iconY);
@@ -1041,7 +925,7 @@ namespace {
 
                                 return CDRF_SKIPDEFAULT;
                             } else if (subItem == 1) {
-                                // Cột 1: Địa chỉ IP
+
                                 wchar_t ipBuf[64] = {0};
                                 ListView_GetItemText(g_hListClients, itemIdx, 1, ipBuf, 63);
 
@@ -1052,7 +936,7 @@ namespace {
 
                                 return CDRF_SKIPDEFAULT;
                             } else if (subItem == 2) {
-                                // Cột 2: Tên tài khoản Windows
+
                                 wchar_t userBuf[64] = {0};
                                 ListView_GetItemText(g_hListClients, itemIdx, 2, userBuf, 63);
 
@@ -1063,11 +947,11 @@ namespace {
 
                                 return CDRF_SKIPDEFAULT;
                             } else if (subItem == 3) {
-                                // Cột 3: Badge dạng Pill hiển thị trạng thái
+
                                 wchar_t statusBuf[64] = {0};
                                 ListView_GetItemText(g_hListClients, itemIdx, 3, statusBuf, 63);
 
-                                int stType = 2; // Mặc định: Ngoại tuyến
+                                int stType = 2;
                                 if (wcsstr(statusBuf, L"hoạt động") != nullptr || wcsstr(statusBuf, L"Sẵn sàng") != nullptr) {
                                     stType = 0;
                                 } else if (wcsstr(statusBuf, L"bận") != nullptr || wcsstr(statusBuf, L"Bận") != nullptr) {
@@ -1103,13 +987,13 @@ namespace {
 
                     for (auto it = g_discoveredList.begin(); it != g_discoveredList.end(); ) {
                         if (it->isOnline && (now - it->lastSeenTick > 8000)) {
-                            // Quá 8 giây không nhận được gói tin UDP -> Chuyển sang Ngoại tuyến
+
                             it->isOnline = false;
                             it->isBusy = false;
                             listChanged = true;
                             ++it;
                         } else if (!it->isOnline && (now - it->lastSeenTick > 60000)) {
-                            // Ngoại tuyến quá 60 giây -> Dọn dẹp khỏi bảng
+
                             it = g_discoveredList.erase(it);
                             listChanged = true;
                         } else {
@@ -1159,7 +1043,7 @@ namespace {
                         g_discoveredList.push_back(item);
                     }
                 } else {
-                    // Nhận tín hiệu DISCOVERY_BYE -> Đánh dấu Ngoại tuyến ngay
+
                     if (it != g_discoveredList.end()) {
                         it->isOnline = false;
                         it->isBusy = false;
@@ -1169,10 +1053,9 @@ namespace {
 
                 RefreshListViewUI();
 
-                // Tự động điền IP của Client lần đầu tiên DUY NHẤT nếu chưa từng điền và người dùng chưa tự gõ IP
                 if (!g_hasAutoFilledIp && !g_userManuallyEditedIp) {
                     std::string autoIp = "";
-                    // Ưu tiên chọn IP mạng LAN thật khác 127.0.0.1
+
                     for (const auto& c : g_discoveredList) {
                         if (c.isOnline && c.ip != "127.0.0.1") {
                             autoIp = c.ip;
@@ -1186,7 +1069,7 @@ namespace {
                         std::wstring ipW = Utils::Utf8ToWide(autoIp);
                         SetWindowTextW(g_hEditIp, ipW.c_str());
                         SendMessageW(g_hEditIp, EM_SETSEL, 0, -1);
-                        g_hasAutoFilledIp = true; // Chỉ tự động điền ĐÚNG 1 LẦN DUY NHẤT!
+                        g_hasAutoFilledIp = true;
                     }
                 }
 
@@ -1283,7 +1166,6 @@ namespace ConnectWindow {
 
         RegisterClassW(&wc);
 
-        // Kích thước chuẩn xác cân đối tỷ lệ vàng theo thiết kế
         int targetClientW = 760;
         int targetClientH = 470;
 
