@@ -20,6 +20,5 @@ Thumbs.db
 *.png
 *.jpg
 
-.agents/
 .vscode/
 Instruction.txt
