@@ -50,7 +50,7 @@ namespace {
 
     bool g_prebuffering = true;
 
-    float g_volume = 1.5f;
+    float g_volume = 1.0f;
 
     CRITICAL_SECTION g_audioCs;
 
@@ -67,18 +67,32 @@ namespace AudioPlayer {
         }
 
         EnterCriticalSection(&g_audioCs);
+
+        if (g_hWaveOut) {
+            if (pWaveOutReset) pWaveOutReset(g_hWaveOut);
+            for (int i = 0; i < AUDIO_RING_SIZE; i++) {
+                if (g_waveHeaders[i].dwFlags & WHDR_PREPARED && pWaveOutUnprepareHeader) {
+                    pWaveOutUnprepareHeader(g_hWaveOut, &g_waveHeaders[i], sizeof(WAVEHDR));
+                }
+            }
+            if (pWaveOutClose) pWaveOutClose(g_hWaveOut);
+            g_hWaveOut = NULL;
+        }
+
         g_isMuted = defaultMuted;
         g_prebuffering = true;
         g_audioIdx = 0;
         g_stagingBuffer.clear();
-        g_stagingBuffer.reserve(SAMPLES_PER_CHUNK * 4);
+        g_stagingBuffer.reserve(SAMPLES_PER_CHUNK * 8);
 
         for (int i = 0; i < AUDIO_RING_SIZE; i++) {
             memset(&g_waveHeaders[i], 0, sizeof(WAVEHDR));
-            g_audioBuffers[i].resize(SAMPLES_PER_CHUNK, 0);
+            g_audioBuffers[i].assign(SAMPLES_PER_CHUNK, 0);
         }
 
-        g_hWinMM = LoadLibraryA("winmm.dll");
+        if (!g_hWinMM) {
+            g_hWinMM = LoadLibraryA("winmm.dll");
+        }
         if (g_hWinMM) {
 
             pWaveOutOpen = (PFN_waveOutOpen)GetProcAddress(g_hWinMM, "waveOutOpen");
@@ -98,7 +112,10 @@ namespace AudioPlayer {
                 wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8;
                 wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
 
-                pWaveOutOpen(&g_hWaveOut, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
+                MMRESULT mmr = pWaveOutOpen(&g_hWaveOut, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
+                if (mmr != MMSYSERR_NOERROR) {
+                    g_hWaveOut = NULL;
+                }
             }
         }
         LeaveCriticalSection(&g_audioCs);
@@ -141,6 +158,12 @@ namespace AudioPlayer {
             g_stagingBuffer.insert(g_stagingBuffer.end(), pcmSamples, pcmSamples + sampleCount);
         }
 
+        const size_t MAX_STAGING_SAMPLES = SAMPLES_PER_CHUNK * 6;
+        if (g_stagingBuffer.size() > MAX_STAGING_SAMPLES) {
+            size_t excess = g_stagingBuffer.size() - MAX_STAGING_SAMPLES;
+            g_stagingBuffer.erase(g_stagingBuffer.begin(), g_stagingBuffer.begin() + excess);
+        }
+
         if (g_prebuffering) {
             if (g_stagingBuffer.size() < (size_t)(SAMPLES_PER_CHUNK * PREBUFFER_CHUNKS)) {
                 LeaveCriticalSection(&g_audioCs);
@@ -163,7 +186,7 @@ namespace AudioPlayer {
             }
 
             if (targetSlot == -1) {
-                targetSlot = g_audioIdx;
+                break;
             }
 
             WAVEHDR& hdr = g_waveHeaders[targetSlot];
@@ -220,7 +243,7 @@ namespace AudioPlayer {
     }
 
     float GetVolume() {
-        if (!g_csInitialized) return 1.5f;
+        if (!g_csInitialized) return 1.0f;
         EnterCriticalSection(&g_audioCs);
         float vol = g_volume;
         LeaveCriticalSection(&g_audioCs);

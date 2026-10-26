@@ -126,12 +126,15 @@ namespace {
 
     void ReceiveAudioLoop(TcpClient* client) {
         Protocol::PacketHeader hdr;
+        std::vector<char> buf;
+        buf.reserve(8192);
 
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
 
-            if (hdr.size == 0 || hdr.size > 1024 * 1024) continue;
+            if (hdr.size == 0) continue;
+            if (hdr.size > 1024 * 1024) break;
 
-            std::vector<char> buf(hdr.size);
+            buf.resize(hdr.size);
             if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
 
             if (hdr.type == Protocol::MSG_AUDIO_CHUNK) {
