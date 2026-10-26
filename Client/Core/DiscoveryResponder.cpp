@@ -3,10 +3,12 @@
 #include "../../Shared/Utils.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <thread>
 #include <atomic>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
@@ -45,20 +47,40 @@ namespace {
         Protocol::DiscoveryPacket pkt;
         FillPacket(pkt, type);
 
-        // 1. Gửi Broadcast tới Manager trên cổng PORT_DISCOVERY_MGR (8088) toàn mạng LAN
+        // 1. Gửi Broadcast tới 255.255.255.255 trên cổng PORT_DISCOVERY_MGR (8088)
         sockaddr_in bcastAddr = {};
         bcastAddr.sin_family = AF_INET;
         bcastAddr.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
         bcastAddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-
         sendto(g_udpSock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
 
-        // 2. Gửi thêm vào loopback 127.0.0.1:8088 (để hỗ trợ test Client & Manager trên cùng 1 máy)
+        // 2. Gửi vào Subnet Directed Broadcast của TẤT CẢ các card mạng (Wi-Fi, Ethernet, ZeroTier, VPN ảo)
+        ULONG size = 0;
+        GetIpAddrTable(NULL, &size, FALSE);
+        if (size > 0) {
+            std::vector<BYTE> buf(size);
+            PMIB_IPADDRTABLE pTable = (PMIB_IPADDRTABLE)buf.data();
+            if (GetIpAddrTable(pTable, &size, FALSE) == NO_ERROR) {
+                for (DWORD i = 0; i < pTable->dwNumEntries; i++) {
+                    const MIB_IPADDRROW& row = pTable->table[i];
+                    if (row.dwAddr == 0) continue;
+                    if ((row.dwAddr & 0xFF) == 127) continue; // Bỏ qua loopback
+
+                    sockaddr_in ifBcast = {};
+                    ifBcast.sin_family = AF_INET;
+                    ifBcast.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
+                    ifBcast.sin_addr.s_addr = (row.dwAddr & row.dwMask) | (~row.dwMask);
+
+                    sendto(g_udpSock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&ifBcast, sizeof(ifBcast));
+                }
+            }
+        }
+
+        // 3. Gửi thêm vào loopback 127.0.0.1:8088 (để hỗ trợ test Client & Manager trên cùng 1 máy)
         sockaddr_in loopbackAddr = {};
         loopbackAddr.sin_family = AF_INET;
         loopbackAddr.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
         inet_pton(AF_INET, "127.0.0.1", &loopbackAddr.sin_addr);
-
         sendto(g_udpSock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&loopbackAddr, sizeof(loopbackAddr));
     }
 
@@ -81,17 +103,14 @@ namespace {
 
             if (bytes == sizeof(Protocol::DiscoveryPacket) && memcmp(recvPkt.magic, "LAND", 4) == 0) {
                 if (recvPkt.type == Protocol::DISCOVERY_QUERY) {
-                    // Manager đang quét mạng -> phản hồi lại cho Manager
+                    // Nhận được yêu cầu quét từ Manager -> Phản hồi trực tiếp về IP và Port của Manager
                     Protocol::DiscoveryPacket respPkt;
                     FillPacket(respPkt, Protocol::DISCOVERY_RESPONSE);
 
-                    // Phản hồi thẳng về địa chỉ/cổng của Manager vừa gửi query
-                    sendto(g_udpSock, (const char*)&respPkt, sizeof(respPkt), 0, (sockaddr*)&senderAddr, senderLen);
+                    sockaddr_in replyAddr = senderAddr;
+                    replyAddr.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
 
-                    // Đồng thời gửi tới cổng PORT_DISCOVERY_MGR cố định của Manager
-                    sockaddr_in mgrAddr = senderAddr;
-                    mgrAddr.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
-                    sendto(g_udpSock, (const char*)&respPkt, sizeof(respPkt), 0, (sockaddr*)&mgrAddr, sizeof(mgrAddr));
+                    sendto(g_udpSock, (const char*)&respPkt, sizeof(respPkt), 0, (sockaddr*)&replyAddr, sizeof(replyAddr));
                 }
             }
         }
@@ -113,11 +132,9 @@ namespace DiscoveryResponder {
         DWORD dwBytesReturned = 0;
         WSAIoctl(g_udpSock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
 
-        // Cho phép chia sẻ cổng (SO_REUSEADDR)
         BOOL reuse = TRUE;
         setsockopt(g_udpSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 
-        // Bật quyền gửi broadcast
         BOOL bcast = TRUE;
         setsockopt(g_udpSock, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
 
@@ -135,7 +152,7 @@ namespace DiscoveryResponder {
         g_isRunning = true;
         g_listenThread = std::thread(ListenLoop);
 
-        // Phát tín hiệu "Chào sân" để Manager đang mở nhận diện được ngay lập tức
+        // Báo danh lần đầu tiên khi vừa khởi động
         SendBroadcast(Protocol::DISCOVERY_HELLO);
         return true;
     }
@@ -143,7 +160,7 @@ namespace DiscoveryResponder {
     void Stop() {
         if (!g_isRunning) return;
 
-        // Phát tín hiệu "Tắt app" để Manager xóa máy khỏi danh sách tức thì
+        // Báo danh tắt app trước khi hủy socket
         SendBroadcast(Protocol::DISCOVERY_BYE);
 
         g_isRunning = false;
@@ -159,7 +176,7 @@ namespace DiscoveryResponder {
 
     void SetBusy(bool busy) {
         g_isBusy = busy;
-        // Gửi cập nhật trạng thái mới cho toàn mạng
-        SendBroadcast(Protocol::DISCOVERY_RESPONSE);
+        // Gửi thông báo cập nhật trạng thái mới ra toàn mạng
+        SendBroadcast(Protocol::DISCOVERY_HELLO);
     }
 }

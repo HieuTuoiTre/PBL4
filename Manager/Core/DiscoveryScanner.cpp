@@ -3,9 +3,11 @@
 #include "../../Shared/Utils.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <thread>
 #include <atomic>
 #include <cstring>
+#include <vector>
 
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
@@ -111,14 +113,37 @@ namespace DiscoveryScanner {
         memcpy(queryPkt.magic, "LAND", 4);
         queryPkt.type = Protocol::DISCOVERY_QUERY;
 
-        // 1. Gửi broadcast tới cổng PORT_DISCOVERY_CLIENT (8089) toàn mạng LAN
+        // 1. Gửi broadcast tới 255.255.255.255 trên cổng 8089
         sockaddr_in bcastAddr = {};
         bcastAddr.sin_family = AF_INET;
         bcastAddr.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
         bcastAddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
         sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
 
-        // 2. Gửi thêm vào loopback 127.0.0.1:8089 để hỗ trợ test Client & Manager trên cùng 1 máy
+        // 2. Quét qua TẤT CẢ các card mạng (Wi-Fi, Ethernet, ZeroTier, VPN ảo):
+        // Tính địa chỉ Subnet Directed Broadcast của từng card để gói tin đi xuyên qua card mạng ảo ZeroTier
+        ULONG size = 0;
+        GetIpAddrTable(NULL, &size, FALSE);
+        if (size > 0) {
+            std::vector<BYTE> buf(size);
+            PMIB_IPADDRTABLE pTable = (PMIB_IPADDRTABLE)buf.data();
+            if (GetIpAddrTable(pTable, &size, FALSE) == NO_ERROR) {
+                for (DWORD i = 0; i < pTable->dwNumEntries; i++) {
+                    const MIB_IPADDRROW& row = pTable->table[i];
+                    if (row.dwAddr == 0) continue;
+                    if ((row.dwAddr & 0xFF) == 127) continue; // Bỏ qua loopback
+
+                    sockaddr_in ifBcast = {};
+                    ifBcast.sin_family = AF_INET;
+                    ifBcast.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
+                    ifBcast.sin_addr.s_addr = (row.dwAddr & row.dwMask) | (~row.dwMask);
+
+                    sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&ifBcast, sizeof(ifBcast));
+                }
+            }
+        }
+
+        // 3. Gửi thêm vào loopback 127.0.0.1:8089 để hỗ trợ test Client & Manager trên cùng 1 máy
         sockaddr_in loopbackAddr = {};
         loopbackAddr.sin_family = AF_INET;
         loopbackAddr.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);

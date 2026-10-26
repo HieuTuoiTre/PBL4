@@ -58,7 +58,7 @@ namespace {
     int GetIpPriority(const std::string& ip) {
         if (ip.rfind("192.168.", 0) == 0 && ip.rfind("192.168.56.", 0) != 0) return 3; // IP LAN thật (Wi-Fi/Ethernet)
         if (ip.rfind("10.", 0) == 0) return 3;                                          // IP LAN doanh nghiệp
-        if (ip.rfind("172.", 0) == 0) return 2;                                         // IP card ảo (WSL, Docker)
+        if (ip.rfind("172.", 0) == 0) return 3;                                         // IP ZeroTier / LAN trường học
         if (ip.rfind("192.168.56.", 0) == 0) return 2;                                 // IP VirtualBox
         if (ip == "127.0.0.1") return 1;                                               // Localhost
         return 0;
