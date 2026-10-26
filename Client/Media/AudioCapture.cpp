@@ -136,6 +136,7 @@ namespace AudioCapture {
             IAudioClient* pSilentRenderClient = NULL;
             IAudioRenderClient* pSilentRenderService = NULL;
             WAVEFORMATEX* pwfx = NULL;
+            UINT32 silentBufferFrameCount = 0;
 
             // 1. Tìm thiết bị âm thanh đầu ra mặc định (Loa / Render Endpoint)
             if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator)) || !pEnumerator) {
@@ -169,73 +170,73 @@ namespace AudioCapture {
                 continue;
             }
 
-        // 3. Khởi tạo Silent Render Stream để giữ cho xung nhịp phần cứng WASAPI Loopback luôn chạy liên tục
-        if (SUCCEEDED(pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&pSilentRenderClient)) && pSilentRenderClient) {
-            if (SUCCEEDED(pSilentRenderClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, pwfx, NULL))) {
-                if (SUCCEEDED(pSilentRenderClient->GetService(__uuidof(IAudioRenderClient), (void**)&pSilentRenderService)) && pSilentRenderService) {
-                    UINT32 bufferFrameCount = 0;
-                    pSilentRenderClient->GetBufferSize(&bufferFrameCount);
-                    BYTE* pSilentData = NULL;
-                    if (SUCCEEDED(pSilentRenderService->GetBuffer(bufferFrameCount, &pSilentData))) {
-                        pSilentRenderService->ReleaseBuffer(bufferFrameCount, AUDCLNT_BUFFERFLAGS_SILENT);
+            // 3. Khởi tạo Silent Render Stream để giữ cho xung nhịp phần cứng WASAPI Loopback luôn chạy liên tục
+            if (SUCCEEDED(pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&pSilentRenderClient)) && pSilentRenderClient) {
+                if (SUCCEEDED(pSilentRenderClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, pwfx, NULL))) {
+                    if (SUCCEEDED(pSilentRenderClient->GetService(__uuidof(IAudioRenderClient), (void**)&pSilentRenderService)) && pSilentRenderService) {
+                        pSilentRenderClient->GetBufferSize(&silentBufferFrameCount);
+                        BYTE* pSilentData = NULL;
+                        if (SUCCEEDED(pSilentRenderService->GetBuffer(silentBufferFrameCount, &pSilentData))) {
+                            pSilentRenderService->ReleaseBuffer(silentBufferFrameCount, AUDCLNT_BUFFERFLAGS_SILENT);
+                        }
+                        pSilentRenderClient->Start();
                     }
                 }
             }
-        }
 
-        // 4. Khởi tạo WASAPI Loopback Capture
-        HRESULT hr = pCaptureAudioClient->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            10000000,
-            0,
-            pwfx,
-            NULL
-        );
+            // 4. Khởi tạo WASAPI Loopback Capture
+            hr = pCaptureAudioClient->Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                10000000,
+                0,
+                pwfx,
+                NULL
+            );
 
-        if (FAILED(hr)) {
-            if (pSilentRenderClient) {
-                pSilentRenderClient->Stop();
-                pSilentRenderClient->Release();
+            if (FAILED(hr)) {
+                if (pSilentRenderClient) {
+                    pSilentRenderClient->Stop();
+                    pSilentRenderClient->Release();
+                }
+                if (pSilentRenderService) pSilentRenderService->Release();
+                CoTaskMemFree(pwfx);
+                pCaptureAudioClient->Release();
+                pDevice->Release();
+                pEnumerator->Release();
+                Sleep(500);
+                continue;
             }
-            if (pSilentRenderService) pSilentRenderService->Release();
-            CoTaskMemFree(pwfx);
-            pCaptureAudioClient->Release();
-            pDevice->Release();
-            pEnumerator->Release();
-            CoUninitialize();
-            return;
-        }
 
-        hr = pCaptureAudioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&pCaptureClient);
-        if (FAILED(hr) || !pCaptureClient) {
-            if (pSilentRenderClient) {
-                pSilentRenderClient->Stop();
-                pSilentRenderClient->Release();
+            hr = pCaptureAudioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&pCaptureClient);
+            if (FAILED(hr) || !pCaptureClient) {
+                if (pSilentRenderClient) {
+                    pSilentRenderClient->Stop();
+                    pSilentRenderClient->Release();
+                }
+                if (pSilentRenderService) pSilentRenderService->Release();
+                CoTaskMemFree(pwfx);
+                pCaptureAudioClient->Release();
+                pDevice->Release();
+                pEnumerator->Release();
+                Sleep(500);
+                continue;
             }
-            if (pSilentRenderService) pSilentRenderService->Release();
-            CoTaskMemFree(pwfx);
-            pCaptureAudioClient->Release();
-            pDevice->Release();
-            pEnumerator->Release();
-            CoUninitialize();
-            return;
-        }
 
             AudioFormatConverter converter;
             converter.Configure(pwfx);
 
             pCaptureAudioClient->Start();
 
-        std::vector<int16_t> accumPcm;
-        accumPcm.reserve(960 * 4);
+            std::vector<int16_t> accumPcm;
+            accumPcm.reserve(960 * 4);
 
             while (isRecording) {
                 // Tiếp tục bơm silence vào render stream để giữ xung nhịp phần cứng WASAPI luôn hoạt động
-                if (pSilentRenderService && pSilentRenderClient && bufferFrameCount > 0) {
+                if (pSilentRenderService && pSilentRenderClient && silentBufferFrameCount > 0) {
                     UINT32 padding = 0;
                     if (SUCCEEDED(pSilentRenderClient->GetCurrentPadding(&padding))) {
-                        UINT32 needed = (bufferFrameCount > padding) ? (bufferFrameCount - padding) : 0;
+                        UINT32 needed = (silentBufferFrameCount > padding) ? (silentBufferFrameCount - padding) : 0;
                         if (needed > 0) {
                             BYTE* pSilentData = NULL;
                             if (SUCCEEDED(pSilentRenderService->GetBuffer(needed, &pSilentData)) && pSilentData) {
@@ -252,8 +253,10 @@ namespace AudioCapture {
                     break;
                 }
 
-        std::vector<int16_t> accumPcm;
-        accumPcm.reserve(960 * 4);
+                while (packetLength != 0 && isRecording) {
+                    BYTE* pData = nullptr;
+                    UINT32 numFramesAvailable = 0;
+                    DWORD flags = 0;
 
                     if (SUCCEEDED(pCaptureClient->GetBuffer(&pData, &numFramesAvailable, &flags, NULL, NULL))) {
                         bool isSilent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
