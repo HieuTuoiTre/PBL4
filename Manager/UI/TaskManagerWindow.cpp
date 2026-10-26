@@ -1,11 +1,7 @@
 #include "TaskManagerWindow.h"
-
 #include "../../Shared/Utils.h"
-
 #include <commctrl.h>
-
 #include <gdiplus.h>
-
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -21,7 +17,6 @@
 #define IDC_TASK_SEARCH  1004
 
 namespace {
-
     HWND g_hTaskWnd = NULL;
     HWND g_hTaskList = NULL;
     HWND g_hSearchEdit = NULL;
@@ -42,7 +37,6 @@ namespace {
 
     HFONT g_hFontNormal = NULL;
     HFONT g_hFontBtn = NULL;
-    HFONT g_hFontHeader = NULL;
     HBRUSH g_hBgBrush = NULL;
 
     float GetDpiScale(HWND hwnd) {
@@ -88,50 +82,61 @@ namespace {
             int width = rc.right - rc.left;
             int height = rc.bottom - rc.top;
 
-            Gdiplus::Graphics g(hdc);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, width, height);
+            HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
 
-            Gdiplus::SolidBrush whiteBrush(Gdiplus::Color(255, 255, 255, 255));
-            g.FillRectangle(&whiteBrush, 0, 0, width, height);
+            {
+                Gdiplus::Graphics g(memDC);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-            Gdiplus::Pen borderPen(Gdiplus::Color(255, 229, 231, 235), 1.0f);
-            g.DrawLine(&borderPen, 0, height - 1, width, height - 1);
+                Gdiplus::SolidBrush whiteBrush(Gdiplus::Color(255, 255, 255, 255));
+                g.FillRectangle(&whiteBrush, 0, 0, width, height);
 
-            int itemCount = Header_GetItemCount(hWnd);
-            Gdiplus::FontFamily fontFamily(L"Segoe UI");
-            Gdiplus::Font fontHeader(&fontFamily, 9.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
-            Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 30, 41, 59));
+                Gdiplus::Pen borderPen(Gdiplus::Color(255, 226, 232, 240), 1.0f);
+                g.DrawLine(&borderPen, 0, height - 1, width, height - 1);
 
-            for (int i = 0; i < itemCount; i++) {
-                RECT itemRc;
-                Header_GetItemRect(hWnd, i, &itemRc);
+                int itemCount = Header_GetItemCount(hWnd);
+                Gdiplus::FontFamily fontFamily(L"Segoe UI");
+                Gdiplus::Font fontHeader(&fontFamily, 12.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 51, 65, 85));
 
-                wchar_t textBuf[128] = {0};
-                HDITEMW hdi = {};
-                hdi.mask = HDI_TEXT | HDI_FORMAT;
-                hdi.pszText = textBuf;
-                hdi.cchTextMax = 127;
-                Header_GetItem(hWnd, i, &hdi);
+                for (int i = 0; i < itemCount; i++) {
+                    RECT itemRc;
+                    Header_GetItemRect(hWnd, i, &itemRc);
 
-                Gdiplus::RectF textRect((float)itemRc.left + 10.0f, (float)itemRc.top, (float)(itemRc.right - itemRc.left - 20), (float)(itemRc.bottom - itemRc.top));
-                Gdiplus::StringFormat sf;
-                sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                if (hdi.fmt & HDF_RIGHT) {
-                    sf.SetAlignment(Gdiplus::StringAlignmentFar);
-                } else if (hdi.fmt & HDF_CENTER) {
-                    sf.SetAlignment(Gdiplus::StringAlignmentCenter);
-                } else {
-                    sf.SetAlignment(Gdiplus::StringAlignmentNear);
-                }
+                    wchar_t textBuf[128] = {0};
+                    HDITEMW hdi = {};
+                    hdi.mask = HDI_TEXT | HDI_FORMAT;
+                    hdi.pszText = textBuf;
+                    hdi.cchTextMax = 127;
+                    Header_GetItem(hWnd, i, &hdi);
 
-                g.DrawString(textBuf, -1, &fontHeader, textRect, &sf, &textBrush);
+                    Gdiplus::RectF textRect((float)itemRc.left + 10.0f, (float)itemRc.top, (float)(itemRc.right - itemRc.left - 20), (float)(itemRc.bottom - itemRc.top));
+                    Gdiplus::StringFormat sf;
+                    sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+                    if (hdi.fmt & HDF_RIGHT) {
+                        sf.SetAlignment(Gdiplus::StringAlignmentFar);
+                    } else if (hdi.fmt & HDF_CENTER) {
+                        sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+                    } else {
+                        sf.SetAlignment(Gdiplus::StringAlignmentNear);
+                    }
 
-                if (i < itemCount - 1) {
-                    Gdiplus::Pen sepPen(Gdiplus::Color(255, 226, 232, 240), 1.0f);
-                    g.DrawLine(&sepPen, (float)itemRc.right, (float)itemRc.top + 4.0f, (float)itemRc.right, (float)itemRc.bottom - 4.0f);
+                    g.DrawString(textBuf, -1, &fontHeader, textRect, &sf, &textBrush);
+
+                    if (i < itemCount - 1) {
+                        Gdiplus::Pen sepPen(Gdiplus::Color(255, 226, 232, 240), 1.0f);
+                        g.DrawLine(&sepPen, (float)itemRc.right, (float)itemRc.top + 4.0f, (float)itemRc.right, (float)itemRc.bottom - 4.0f);
+                    }
                 }
             }
+
+            BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
 
             EndPaint(hWnd, &ps);
             return 0;
@@ -161,10 +166,8 @@ namespace {
             wchar_t* endPtr = nullptr;
             uint32_t pid = (uint32_t)wcstoul(pidBuf, &endPtr, 10);
             if (endPtr != pidBuf && pid > 0) {
-
                 std::wstring confirmMsg = L"Bạn có chắc chắn muốn kết thúc (Kill) tiến trình '" + std::wstring(nameBuf) + L"' (PID: " + std::wstring(pidBuf) + L") không?";
                 if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận kết thúc tác vụ", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
-
                     g_client->SendPacket(Protocol::MSG_KILL_PROCESS, (char*)&pid, sizeof(pid));
                     g_client->SendPacket(Protocol::MSG_PROCESS_LIST_REQUEST, nullptr, 0);
                     g_client->SendPacket(Protocol::MSG_SYS_INFO_REQUEST, nullptr, 0);
@@ -272,106 +275,132 @@ namespace {
         float scale = GetDpiScale(hwnd);
         if (width <= 0 || headerH <= 0) return;
 
-        Gdiplus::Bitmap memBmp(width, headerH, PixelFormat32bppRGB);
-        Gdiplus::Graphics g(&memBmp);
-        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, width, headerH);
+        HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
 
-        Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 243, 244, 246));
-        g.FillRectangle(&bgBrush, 0, 0, width, headerH);
+        {
+            Gdiplus::Graphics g(memDC);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-        EnterCriticalSection(&g_dataCs);
-        Protocol::SysInfoPayload sys = g_latestSys;
-        int procCount = (int)g_latestProcesses.size();
-        LeaveCriticalSection(&g_dataCs);
+            Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 243, 244, 246));
+            g.FillRectangle(&bgBrush, 0, 0, width, headerH);
 
-        float padX = 16.0f * scale;
-        float cardGap = 12.0f * scale;
-        float cardY = 14.0f * scale;
-        float cardH = (float)headerH - 22.0f * scale;
-        float totalGaps = cardGap * 3.0f + padX * 2.0f;
-        float cardW = (width - totalGaps) / 4.0f;
-        if (cardW < 90.0f) cardW = 90.0f;
+            EnterCriticalSection(&g_dataCs);
+            Protocol::SysInfoPayload sys = g_latestSys;
+            int procCount = (int)g_latestProcesses.size();
+            LeaveCriticalSection(&g_dataCs);
 
-        Gdiplus::FontFamily fontFamily(L"Segoe UI");
-        Gdiplus::Font fontTitle(&fontFamily, 9.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
-        Gdiplus::Font fontVal(&fontFamily, 16.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+            float padX = 16.0f * scale;
+            float cardGap = 12.0f * scale;
+            float cardY = 12.0f * scale;
+            float cardH = (float)headerH - 24.0f * scale;
+            float totalGaps = cardGap * 3.0f + padX * 2.0f;
+            float cardW = (width - totalGaps) / 4.0f;
+            if (cardW < 100.0f) cardW = 100.0f;
 
-        struct StatCard {
-            std::wstring title;
-            std::wstring value;
-            int percent;
-            Gdiplus::Color accentColor;
-        };
+            Gdiplus::FontFamily fontFamily(L"Segoe UI");
+            Gdiplus::Font fontTitle(&fontFamily, 11.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::Font fontVal(&fontFamily, 22.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::Font fontSub(&fontFamily, 10.5f * scale, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 
-        Gdiplus::Color green(255, 16, 185, 129);
-        Gdiplus::Color yellow(255, 234, 179, 8);
-        Gdiplus::Color red(255, 239, 68, 68);
-        Gdiplus::Color blue(255, 37, 99, 235);
+            struct StatCard {
+                std::wstring title;
+                std::wstring value;
+                int percent;
+                Gdiplus::Color accentColor;
+            };
 
-        auto GetUsageColor = [&](int p) {
-            if (p >= 85) return red;
-            if (p >= 65) return yellow;
-            return green;
-        };
+            Gdiplus::Color green(255, 16, 185, 129);
+            Gdiplus::Color yellow(255, 234, 179, 8);
+            Gdiplus::Color red(255, 239, 68, 68);
+            Gdiplus::Color blue(255, 37, 99, 235);
 
-        StatCard cards[4] = {
-            { L"CPU USAGE", std::to_wstring(sys.cpuUsage) + L"%", sys.cpuUsage, GetUsageColor(sys.cpuUsage) },
-            { L"RAM MEMORY", std::to_wstring(sys.ramUsage) + L"%", sys.ramUsage, GetUsageColor(sys.ramUsage) },
-            { L"DISK ACTIVE", std::to_wstring(sys.diskUsage) + L"%", sys.diskUsage, GetUsageColor(sys.diskUsage) },
-            { L"PROCESSES", std::to_wstring(procCount), -1, blue }
-        };
+            auto GetUsageColor = [&](int p) {
+                if (p >= 85) return red;
+                if (p >= 65) return yellow;
+                return green;
+            };
 
-        Gdiplus::GraphicsPath path;
-        float radius = 8.0f * scale;
+            StatCard cards[4] = {
+                { L"CPU USAGE", std::to_wstring(sys.cpuUsage) + L"%", sys.cpuUsage, GetUsageColor(sys.cpuUsage) },
+                { L"RAM MEMORY", std::to_wstring(sys.ramUsage) + L"%", sys.ramUsage, GetUsageColor(sys.ramUsage) },
+                { L"DISK ACTIVE", std::to_wstring(sys.diskUsage) + L"%", sys.diskUsage, GetUsageColor(sys.diskUsage) },
+                { L"PROCESSES", std::to_wstring(procCount), -1, blue }
+            };
 
-        Gdiplus::StringFormat sf;
-        sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
-        sf.SetLineAlignment(Gdiplus::StringAlignmentNear);
-        sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+            Gdiplus::GraphicsPath path;
+            float radius = 8.0f * scale;
 
-        for (int i = 0; i < 4; i++) {
-            float cx = padX + i * (cardW + cardGap);
-            Gdiplus::RectF cr(cx, cardY, cardW, cardH);
+            Gdiplus::StringFormat sf;
+            sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+            sf.SetLineAlignment(Gdiplus::StringAlignmentNear);
+            sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
-            AddRoundRectPath(path, cr, radius);
-            Gdiplus::SolidBrush cardBg(Gdiplus::Color(255, 255, 255, 255));
-            g.FillPath(&cardBg, &path);
-            Gdiplus::Pen cardBorder(Gdiplus::Color(255, 229, 231, 235), 1.0f);
-            g.DrawPath(&cardBorder, &path);
+            for (int i = 0; i < 4; i++) {
+                float cx = padX + i * (cardW + cardGap);
+                Gdiplus::RectF cr(cx, cardY, cardW, cardH);
 
-            Gdiplus::RectF titleRect(cx + 12.0f * scale, cardY + 10.0f * scale, cardW - 24.0f * scale, 18.0f * scale);
-            Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 100, 116, 139));
-            g.DrawString(cards[i].title.c_str(), -1, &fontTitle, titleRect, &sf, &titleBrush);
+                AddRoundRectPath(path, cr, radius);
+                Gdiplus::SolidBrush cardBg(Gdiplus::Color(255, 255, 255, 255));
+                g.FillPath(&cardBg, &path);
+                Gdiplus::Pen cardBorder(Gdiplus::Color(255, 226, 232, 240), 1.0f);
+                g.DrawPath(&cardBorder, &path);
 
-            Gdiplus::RectF valRect(cx + 12.0f * scale, cardY + 28.0f * scale, cardW - 24.0f * scale, 28.0f * scale);
-            Gdiplus::SolidBrush valBrush(cards[i].accentColor);
-            g.DrawString(cards[i].value.c_str(), -1, &fontVal, valRect, &sf, &valBrush);
+                Gdiplus::RectF titleRect(cx + 14.0f * scale, cardY + 12.0f * scale, cardW - 28.0f * scale, 16.0f * scale);
+                Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 100, 116, 139));
+                g.DrawString(cards[i].title.c_str(), -1, &fontTitle, titleRect, &sf, &titleBrush);
 
-            if (cards[i].percent >= 0) {
-                float barH = 4.0f * scale;
-                float barY = cardY + cardH - barH - 12.0f * scale;
-                float barW = cardW - 24.0f * scale;
-                Gdiplus::SolidBrush barBg(Gdiplus::Color(255, 241, 245, 249));
-                g.FillRectangle(&barBg, cx + 12.0f * scale, barY, barW, barH);
+                Gdiplus::RectF valRect(cx + 14.0f * scale, cardY + 30.0f * scale, cardW - 28.0f * scale, 28.0f * scale);
+                Gdiplus::SolidBrush valBrush(cards[i].accentColor);
+                g.DrawString(cards[i].value.c_str(), -1, &fontVal, valRect, &sf, &valBrush);
 
-                float fillW = barW * (float)cards[i].percent / 100.0f;
-                if (fillW > barW) fillW = barW;
-                Gdiplus::SolidBrush barFill(cards[i].accentColor);
-                g.FillRectangle(&barFill, cx + 12.0f * scale, barY, fillW, barH);
+                if (cards[i].percent >= 0) {
+                    float barH = 4.0f * scale;
+                    float barY = cardY + cardH - barH - 12.0f * scale;
+                    float barW = cardW - 28.0f * scale;
+
+                    Gdiplus::RectF barBgRect(cx + 14.0f * scale, barY, barW, barH);
+                    Gdiplus::GraphicsPath barBgPath;
+                    AddRoundRectPath(barBgPath, barBgRect, 2.0f * scale);
+                    Gdiplus::SolidBrush barBg(Gdiplus::Color(255, 241, 245, 249));
+                    g.FillPath(&barBg, &barBgPath);
+
+                    float fillW = barW * (float)cards[i].percent / 100.0f;
+                    if (fillW > barW) fillW = barW;
+                    if (fillW > 0.0f) {
+                        Gdiplus::RectF barFillRect(cx + 14.0f * scale, barY, fillW, barH);
+                        Gdiplus::GraphicsPath barFillPath;
+                        AddRoundRectPath(barFillPath, barFillRect, 2.0f * scale);
+                        Gdiplus::SolidBrush barFill(cards[i].accentColor);
+                        g.FillPath(&barFill, &barFillPath);
+                    }
+                } else {
+                    float dotSize = 6.0f * scale;
+                    float dotX = cx + 14.0f * scale;
+                    float dotY = cardY + cardH - dotSize - 12.0f * scale;
+                    Gdiplus::SolidBrush dotBrush(blue);
+                    g.FillEllipse(&dotBrush, dotX, dotY, dotSize, dotSize);
+
+                    Gdiplus::RectF subRect(dotX + dotSize + 6.0f * scale, dotY - 2.0f * scale, cardW - 40.0f * scale, 14.0f * scale);
+                    Gdiplus::SolidBrush subBrush(Gdiplus::Color(255, 100, 116, 139));
+                    g.DrawString(L"Đang hoạt động", -1, &fontSub, subRect, &sf, &subBrush);
+                }
             }
         }
 
-        Gdiplus::Graphics gScreen(hdc);
-        gScreen.DrawImage(&memBmp, 0, 0, width, headerH);
+        BitBlt(hdc, 0, 0, width, headerH, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
     }
 
     LRESULT CALLBACK TaskWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         float scale = GetDpiScale(hwnd);
-        int headerH = (int)std::round(95.0f * scale);
+        int headerH = (int)std::round(105.0f * scale);
 
         switch (msg) {
-
             case WM_CREATE: {
                 g_hTaskWnd = hwnd;
 
@@ -380,7 +409,7 @@ namespace {
                     0, 0, 0, 0, hwnd, (HMENU)IDC_TASK_SEARCH, GetModuleHandle(NULL), NULL);
                 SendMessageW(g_hSearchEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"🔍 Tìm kiếm tiến trình theo Tên hoặc PID...");
 
-                g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"🔄 Làm mới",
+                g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"Làm mới",
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_TASK_REFRESH, GetModuleHandle(NULL), NULL);
 
@@ -405,7 +434,7 @@ namespace {
 
                 LVCOLUMNW lvc = { LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM, LVCFMT_LEFT, (int)(280 * scale), (LPWSTR)L"Tên tiến trình", 0, 0 };
                 SendMessageW(g_hTaskList, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvc);
-                lvc.cx = (int)(85 * scale); lvc.pszText = (LPWSTR)L"PID"; SendMessageW(g_hTaskList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvc);
+                lvc.cx = (int)(85 * scale); lvc.fmt = LVCFMT_RIGHT; lvc.pszText = (LPWSTR)L"PID"; SendMessageW(g_hTaskList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvc);
                 lvc.cx = (int)(115 * scale); lvc.fmt = LVCFMT_RIGHT; lvc.pszText = (LPWSTR)L"Bộ nhớ (RAM)"; SendMessageW(g_hTaskList, LVM_INSERTCOLUMNW, 2, (LPARAM)&lvc);
                 lvc.cx = (int)(120 * scale); lvc.fmt = LVCFMT_RIGHT; lvc.pszText = (LPWSTR)L"Ổ đĩa (Disk)"; SendMessageW(g_hTaskList, LVM_INSERTCOLUMNW, 3, (LPARAM)&lvc);
 
@@ -413,7 +442,7 @@ namespace {
                     WS_CHILD | WS_VISIBLE | SS_LEFT | SS_PATHELLIPSIS,
                     0, 0, 0, 0, hwnd, NULL, GetModuleHandle(NULL), NULL);
 
-                g_hFontNormal = CreateFontW((int)(-12 * scale), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
+                g_hFontNormal = CreateFontW((int)(-13 * scale), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
                 g_hFontBtn = CreateFontW((int)(-12 * scale), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
                 SendMessageW(g_hSearchEdit, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
                 SendMessageW(g_hTaskList, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
@@ -426,6 +455,9 @@ namespace {
                 SetTimer(hwnd, 1, 3000, NULL);
                 return 0;
             }
+
+            case WM_ERASEBKGND:
+                return 1;
 
             case WM_CTLCOLORSTATIC: {
                 HDC hdcStatic = (HDC)wp;
@@ -457,22 +489,19 @@ namespace {
                 Gdiplus::GraphicsPath path;
                 AddRoundRectPath(path, btnRect, 6.0f * scale);
 
-                wchar_t text[64] = {0};
-                GetWindowTextW(pDIS->hwndItem, text, 63);
-
                 if (pDIS->CtlID == IDC_TASK_KILL) {
                     Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 185, 28, 28) : (isHover ? Gdiplus::Color(255, 220, 38, 38) : Gdiplus::Color(255, 239, 68, 68));
                     Gdiplus::SolidBrush fillBrush(fill);
                     g.FillPath(&fillBrush, &path);
 
                     Gdiplus::FontFamily ff(L"Segoe UI");
-                    Gdiplus::Font font(&ff, 9.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+                    Gdiplus::Font font(&ff, 12.5f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                     Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
                     Gdiplus::StringFormat sf;
                     sf.SetAlignment(Gdiplus::StringAlignmentCenter);
                     sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                    g.DrawString(text, -1, &font, btnRect, &sf, &textBrush);
-                } else {
+                    g.DrawString(L"✕ Kết thúc tác vụ", -1, &font, btnRect, &sf, &textBrush);
+                } else if (pDIS->CtlID == IDC_TASK_REFRESH) {
                     Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 226, 232, 240) : (isHover ? Gdiplus::Color(255, 241, 245, 249) : Gdiplus::Color(255, 255, 255, 255));
                     Gdiplus::SolidBrush fillBrush(fill);
                     g.FillPath(&fillBrush, &path);
@@ -480,13 +509,35 @@ namespace {
                     Gdiplus::Pen borderPen(Gdiplus::Color(255, 203, 213, 225), 1.0f);
                     g.DrawPath(&borderPen, &path);
 
+                    Gdiplus::Color iconColor = Gdiplus::Color(255, 51, 65, 85);
+                    float icX = btnRect.X + 20.0f * scale;
+                    float icY = btnRect.Y + btnRect.Height / 2.0f;
+                    float r = 5.0f * scale;
+
+                    Gdiplus::Pen arcPen(iconColor, 1.5f * scale);
+                    arcPen.SetStartCap(Gdiplus::LineCapRound);
+                    arcPen.SetEndCap(Gdiplus::LineCapRound);
+
+                    g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 215.0f, 170.0f);
+                    float ax1 = icX + r * 0.82f;
+                    float ay1 = icY - r * 0.57f;
+                    g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.0f * scale, ay1 - 2.5f * scale);
+                    g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.0f * scale, ay1 + 2.5f * scale);
+
+                    g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 35.0f, 170.0f);
+                    float ax2 = icX - r * 0.82f;
+                    float ay2 = icY + r * 0.57f;
+                    g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.0f * scale, ay2 + 2.5f * scale);
+                    g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.0f * scale, ay2 - 2.5f * scale);
+
                     Gdiplus::FontFamily ff(L"Segoe UI");
-                    Gdiplus::Font font(&ff, 9.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
-                    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 51, 65, 85));
+                    Gdiplus::Font font(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                    Gdiplus::SolidBrush textBrush(iconColor);
                     Gdiplus::StringFormat sf;
                     sf.SetAlignment(Gdiplus::StringAlignmentCenter);
                     sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                    g.DrawString(text, -1, &font, btnRect, &sf, &textBrush);
+                    Gdiplus::RectF textRect(btnRect.X + 24.0f * scale, btnRect.Y, btnRect.Width - 24.0f * scale, btnRect.Height);
+                    g.DrawString(L"Làm mới", -1, &font, textRect, &sf, &textBrush);
                 }
                 return TRUE;
             }
@@ -503,9 +554,13 @@ namespace {
                 HDC hdc = BeginPaint(hwnd, &ps);
                 RECT r;
                 GetClientRect(hwnd, &r);
-                if (ps.rcPaint.top < headerH) {
-                    PaintHeaderCards(hwnd, hdc, r.right, headerH);
-                }
+
+                PaintHeaderCards(hwnd, hdc, r.right, headerH);
+
+                RECT bottomBg = { 0, headerH, r.right, r.bottom };
+                if (!g_hBgBrush) g_hBgBrush = CreateSolidBrush(RGB(243, 244, 246));
+                FillRect(hdc, &bottomBg, g_hBgBrush);
+
                 EndPaint(hwnd, &ps);
                 return 0;
             }
@@ -520,15 +575,15 @@ namespace {
             case WM_SIZE: {
                 int w = LOWORD(lp);
                 int h = HIWORD(lp);
-                int actionH = (int)std::round(42.0f * scale);
+                int actionH = (int)std::round(44.0f * scale);
                 int statusH = (int)std::round(24.0f * scale);
                 int pad = (int)std::round(16.0f * scale);
                 int gap = (int)std::round(10.0f * scale);
                 int btnH = (int)std::round(32.0f * scale);
 
                 int actionY = headerH + (actionH - btnH) / 2;
-                int btnRefW = (int)std::round(110.0f * scale);
-                int btnKillW = (int)std::round(145.0f * scale);
+                int btnRefW = (int)std::round(105.0f * scale);
+                int btnKillW = (int)std::round(150.0f * scale);
 
                 int killX = w - pad - btnKillW;
                 int refX = killX - gap - btnRefW;
@@ -544,9 +599,9 @@ namespace {
                 if (listH < 60) listH = 60;
                 MoveWindow(g_hTaskList, pad, listY, w - pad * 2, listH, TRUE);
 
-                int colPidW = (int)std::round(85.0f * scale);
+                int colPidW = (int)std::round(80.0f * scale);
                 int colRamW = (int)std::round(115.0f * scale);
-                int colDiskW = (int)std::round(120.0f * scale);
+                int colDiskW = (int)std::round(115.0f * scale);
                 int scrollW = GetSystemMetrics(SM_CXVSCROLL) + 4;
                 int colNameW = (w - pad * 2) - colPidW - colRamW - colDiskW - scrollW;
                 if (colNameW < (int)(200.0f * scale)) colNameW = (int)(200.0f * scale);
@@ -669,7 +724,6 @@ namespace {
 }
 
 namespace TaskManagerWindow {
-
     void Show(HWND hParent, TcpClient* client) {
         if (!g_csInit) {
             InitializeCriticalSection(&g_dataCs);
@@ -677,7 +731,6 @@ namespace TaskManagerWindow {
         }
         g_client = client;
         if (!g_hTaskWnd) {
-
             WNDCLASSW wc = {};
             wc.lpfnWndProc = TaskWndProc;
             wc.lpszClassName = L"TaskClassW";
