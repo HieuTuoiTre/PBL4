@@ -1,10 +1,7 @@
 #include "../../Shared/Network.h"
 #include <windows.h>
-<<<<<<< HEAD
-#include <timeapi.h>
-=======
 #include <mmsystem.h>
->>>>>>> origin/main
+#include <timeapi.h>
 #include <thread>
 
 #include "SessionManager.h"

@@ -1,67 +1,37 @@
 #include "RemoteWindow.h"
-<<<<<<< HEAD
-=======
 #include "InputHandler.h"
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
 #include "../Media/AudioPlayer.h"
+#include <gdiplus.h>
 #include <turbojpeg.h>
 #include <string>
-#include <cmath>
 #include <vector>
+#include <cmath>
 #include <algorithm>
-#include <cstring>
->>>>>>> origin/main
-
-#include "InputHandler.h"
-
-#include "TaskManagerWindow.h"
-
-#include "FileExplorerWindow.h"
-
-#include "../Media/AudioPlayer.h"
-
-#include <gdiplus.h>
-
-#include <string>
-#include <vector>
-#include <cmath>
 #include <cstring>
 
 namespace {
-
     HWND g_hwnd = NULL;
     TcpClient* g_client = nullptr;
-<<<<<<< HEAD
-    HDC g_hFrameDC = NULL;
-    HBITMAP g_hFrameBmp = NULL;
-    HBITMAP g_hOldFrameBmp = NULL;
-    int g_frameW = 0;
-    int g_frameH = 0;
-    IStream* g_decodeStream = nullptr;
-=======
-    
-    // Bộ đệm màn hình 32bpp BGRA (Direct Framebuffer)
+
     std::vector<uint32_t> g_framePixels;
     int g_frameWidth = 0;
     int g_frameHeight = 0;
     BITMAPINFO g_bmi = {};
 
     tjhandle g_tjDecompressor = nullptr;
->>>>>>> origin/main
     CRITICAL_SECTION g_cs;
 
     int g_fps = 0;
     int g_frameCount = 0;
     DWORD g_lastTime = 0;
 
-<<<<<<< HEAD
-    int GetFrameWidth() { return g_frameW; }
-    int GetFrameHeight() { return g_frameH; }
+    int GetFrameWidth() { return g_frameWidth; }
+    int GetFrameHeight() { return g_frameHeight; }
 
     float GetDpiScale(HWND hwnd) {
         typedef UINT (WINAPI *PFN_GetDpiForWindow)(HWND);
-
         static PFN_GetDpiForWindow pGetDpiForWindow = (PFN_GetDpiForWindow)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
         UINT dpi = 96;
         if (pGetDpiForWindow && hwnd) {
@@ -203,13 +173,11 @@ namespace {
         float radius = 5.0f * scale;
 
         for (const auto& btn : buttons) {
-
             if (btn.rect.GetRight() > (float)(width - 125 * scale)) continue;
 
             AddRoundRectPath(path, btn.rect, radius);
 
             if (btn.id == BTN_NONE) {
-
                 Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 200, 205, 215));
                 g.DrawString(btn.text.c_str(), -1, &fontVol, btn.rect, &sfCenter, &textBrush);
                 continue;
@@ -225,23 +193,19 @@ namespace {
             if (btn.id == BTN_MODE) {
                 bool isCtrl = InputHandler::IsControlling();
                 if (isCtrl) {
-
                     fillColor = isPressed ? Gdiplus::Color(255, 14, 52, 28) : (isHovered ? Gdiplus::Color(255, 20, 68, 36) : Gdiplus::Color(255, 16, 58, 31));
                     borderColor = Gdiplus::Color(255, 34, 197, 94);
                     textColor = Gdiplus::Color(255, 134, 239, 172);
                 } else {
-
                     fillColor = isPressed ? Gdiplus::Color(255, 30, 32, 38) : (isHovered ? Gdiplus::Color(255, 50, 53, 64) : Gdiplus::Color(255, 38, 40, 48));
                     borderColor = Gdiplus::Color(255, 75, 80, 95);
                     textColor = Gdiplus::Color(255, 160, 165, 180);
                 }
             } else if (btn.id == BTN_MUTE && AudioPlayer::IsMuted()) {
-
                 fillColor = isPressed ? Gdiplus::Color(255, 60, 20, 20) : (isHovered ? Gdiplus::Color(255, 80, 28, 28) : Gdiplus::Color(255, 68, 24, 24));
                 borderColor = Gdiplus::Color(255, 239, 68, 68);
                 textColor = Gdiplus::Color(255, 252, 165, 165);
             } else {
-
                 fillColor = isPressed ? Gdiplus::Color(255, 28, 30, 36) : (isHovered ? Gdiplus::Color(255, 52, 55, 66) : Gdiplus::Color(255, 38, 40, 48));
                 borderColor = isHovered ? Gdiplus::Color(255, 85, 90, 108) : Gdiplus::Color(255, 58, 61, 74);
                 textColor = isHovered ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 220, 224, 232);
@@ -255,7 +219,6 @@ namespace {
             Gdiplus::SolidBrush textBrush(textColor);
 
             if (btn.id == BTN_MODE) {
-
                 bool isCtrl = InputHandler::IsControlling();
                 float dotSize = 7.0f * scale;
                 float dotX = btn.rect.X + 10.0f * scale;
@@ -269,7 +232,6 @@ namespace {
                 textRect.Width -= (dotSize + 4.0f * scale);
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
             } else if (btn.id == BTN_MUTE) {
-
                 bool isMuted = AudioPlayer::IsMuted();
                 float iconW = 12.0f * scale;
                 float iconX = btn.rect.X + 10.0f * scale;
@@ -296,7 +258,6 @@ namespace {
                 textRect.Width -= (iconW + 4.0f * scale);
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
             } else if (btn.id == BTN_TASK_MGR) {
-
                 float iconW = 12.0f * scale;
                 float iconX = btn.rect.X + 10.0f * scale;
                 float iconY = btn.rect.Y + (btn.rect.Height - 11.0f * scale) / 2.0f;
@@ -309,7 +270,6 @@ namespace {
                 textRect.Width -= (iconW + 4.0f * scale);
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
             } else if (btn.id == BTN_FILE_EXP) {
-
                 float iconW = 13.0f * scale;
                 float iconX = btn.rect.X + 10.0f * scale;
                 float iconY = btn.rect.Y + (btn.rect.Height - 10.0f * scale) / 2.0f;
@@ -355,79 +315,33 @@ namespace {
         Gdiplus::Graphics targetG(hdc);
         targetG.DrawImage(&memBmp, 0, 0, width, tbHeight);
     }
-=======
-    int GetFrameWidth() { return g_frameWidth; }
-    int GetFrameHeight() { return g_frameHeight; }
->>>>>>> origin/main
 
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int tbHeight = GetToolbarHeight(hwnd);
 
         switch (msg) {
-
             case WM_PAINT: {
                 PAINTSTRUCT ps;
                 HDC hdc = BeginPaint(hwnd, &ps);
                 RECT r;
                 GetClientRect(hwnd, &r);
 
-<<<<<<< HEAD
                 if (ps.rcPaint.top < tbHeight) {
                     RenderToolbar(hwnd, hdc, r, tbHeight);
                 }
 
                 if (ps.rcPaint.bottom > tbHeight) {
                     EnterCriticalSection(&g_cs);
-                    if (g_hFrameDC && g_frameW > 0 && g_frameH > 0) {
+                    if (!g_framePixels.empty() && g_frameWidth > 0 && g_frameHeight > 0) {
                         int dstW = r.right;
                         int dstH = r.bottom - tbHeight;
-                        if (dstW == g_frameW && dstH == g_frameH) {
-                            BitBlt(hdc, 0, tbHeight, dstW, dstH, g_hFrameDC, 0, 0, SRCCOPY);
-                        } else {
-                            SetStretchBltMode(hdc, COLORONCOLOR);
-                            StretchBlt(hdc, 0, tbHeight, dstW, dstH, g_hFrameDC, 0, 0, g_frameW, g_frameH, SRCCOPY);
-                        }
-=======
-                // 1. Vẽ thanh Toolbar ở phía trên
-                if (ps.rcPaint.top < TOOLBAR_HEIGHT) {
-                    RECT toolbarRect = {0, 0, r.right, TOOLBAR_HEIGHT};
-                    HBRUSH brush = CreateSolidBrush(RGB(45, 45, 48));
-                    FillRect(hdc, &toolbarRect, brush);
-                    DeleteObject(brush);
-
-                    SetBkMode(hdc, TRANSPARENT);
-                    SetTextColor(hdc, RGB(255, 255, 255));
-                    HFONT hFont = CreateFontW(15, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
-                    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
-
-                    int volPercent = (int)std::round(AudioPlayer::GetVolume() * 100.0f);
-                    std::wstring statusStr = (InputHandler::IsControlling() ? L"🔴 ĐIỀU KHIỂN" : L"👁️ CHỈ XEM")
-                                           + std::wstring(AudioPlayer::IsMuted() ? L" | 🔇 MUTE" : (L" | 🔊 " + std::to_wstring(volPercent) + L"%"));
-                    std::wstring shortcutStr = L"[Ctrl+Tab: TaskMgr] | [Ctrl+E: File] | [Ctrl+M: Loa] | [Ctrl+↑/↓: Âm lượng]";
-                    std::wstring fpsStr = L"FPS: " + std::to_wstring(g_fps);
-
-                    RECT leftRect = toolbarRect; leftRect.left += 12;
-                    DrawTextW(hdc, statusStr.c_str(), -1, &leftRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                    DrawTextW(hdc, shortcutStr.c_str(), -1, &toolbarRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                    RECT rightRect = toolbarRect; rightRect.right -= 12;
-                    DrawTextW(hdc, fpsStr.c_str(), -1, &rightRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-
-                    SelectObject(hdc, hOldFont);
-                    DeleteObject(hFont);
-                }
-
-                // 2. Vẽ màn hình máy Client bằng StretchDIBits (Tăng tốc phần cứng GDI, <1ms)
-                if (ps.rcPaint.bottom > TOOLBAR_HEIGHT) {
-                    EnterCriticalSection(&g_cs);
-                    if (!g_framePixels.empty() && g_frameWidth > 0 && g_frameHeight > 0) {
                         SetStretchBltMode(hdc, COLORONCOLOR);
                         StretchDIBits(
                             hdc,
-                            0, TOOLBAR_HEIGHT, r.right, r.bottom - TOOLBAR_HEIGHT,
+                            0, tbHeight, dstW, dstH,
                             0, 0, g_frameWidth, g_frameHeight,
                             g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
                         );
->>>>>>> origin/main
                     }
                     LeaveCriticalSection(&g_cs);
                 }
@@ -578,7 +492,6 @@ namespace {
 
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN: {
-
                 if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000)) {
                     if ((lp & (1 << 30)) == 0) {
                         InputHandler::ToggleControlling();
@@ -654,17 +567,10 @@ namespace {
 }
 
 namespace RemoteWindow {
-
     HWND Create(HINSTANCE hInst, TcpClient* client) {
         g_client = client;
         InitializeCriticalSection(&g_cs);
-<<<<<<< HEAD
-
-        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, 2 * 1024 * 1024);
-        CreateStreamOnHGlobal(hMem, TRUE, &g_decodeStream);
-=======
         g_tjDecompressor = tjInitDecompress();
->>>>>>> origin/main
         g_lastTime = GetTickCount();
 
         WNDCLASSW wc = {};
@@ -683,73 +589,12 @@ namespace RemoteWindow {
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
         if (jpegSize <= 0 || !jpegData || !g_tjDecompressor) return;
 
-<<<<<<< HEAD
-        LARGE_INTEGER liZero = {};
-        g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-
-        HGLOBAL hMem = NULL;
-        if (GetHGlobalFromStream(g_decodeStream, &hMem) == S_OK && hMem) {
-            void* pData = GlobalLock(hMem);
-            if (pData) {
-                std::memcpy(pData, jpegData, jpegSize);
-                GlobalUnlock(hMem);
-            }
-        }
-        g_decodeStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-
-        Gdiplus::Image* img = Gdiplus::Image::FromStream(g_decodeStream);
-        if (img && img->GetLastStatus() == Gdiplus::Ok) {
-            int reqW = delta.x + delta.width;
-            int reqH = delta.y + delta.height;
-
-            EnterCriticalSection(&g_cs);
-
-            if (!g_hFrameDC || g_frameW < reqW || g_frameH < reqH) {
-                int newW = (g_frameW > reqW) ? g_frameW : reqW;
-                int newH = (g_frameH > reqH) ? g_frameH : reqH;
-
-                HDC screenDC = GetDC(NULL);
-                HDC newDC = CreateCompatibleDC(screenDC);
-
-                BITMAPINFO bmi = {0};
-                bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                bmi.bmiHeader.biWidth = newW;
-                bmi.bmiHeader.biHeight = -newH;
-                bmi.bmiHeader.biPlanes = 1;
-                bmi.bmiHeader.biBitCount = 32;
-                bmi.bmiHeader.biCompression = BI_RGB;
-
-                void* pPixels = nullptr;
-                HBITMAP newBmp = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &pPixels, NULL, 0);
-                HBITMAP oldBmp = (HBITMAP)SelectObject(newDC, newBmp);
-
-                if (g_hFrameDC) {
-                    BitBlt(newDC, 0, 0, g_frameW, g_frameH, g_hFrameDC, 0, 0, SRCCOPY);
-                    if (g_hOldFrameBmp) SelectObject(g_hFrameDC, g_hOldFrameBmp);
-                    DeleteDC(g_hFrameDC);
-                    if (g_hFrameBmp) DeleteObject(g_hFrameBmp);
-                }
-                ReleaseDC(NULL, screenDC);
-
-                g_hFrameDC = newDC;
-                g_hFrameBmp = newBmp;
-                g_hOldFrameBmp = oldBmp;
-                g_frameW = newW;
-                g_frameH = newH;
-            }
-
-            {
-                Gdiplus::Graphics g(g_hFrameDC);
-                g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-                g.DrawImage(img, delta.x, delta.y, delta.width, delta.height);
-=======
         int reqW = delta.x + delta.width;
         int reqH = delta.y + delta.height;
         if (reqW <= 0 || reqH <= 0 || delta.width <= 0 || delta.height <= 0) return;
 
         EnterCriticalSection(&g_cs);
 
-        // Mở rộng bộ đệm nếu khung hình mới lớn hơn
         if (g_frameWidth < reqW || g_frameHeight < reqH) {
             int newW = (std::max)(g_frameWidth, reqW);
             int newH = (std::max)(g_frameHeight, reqH);
@@ -758,28 +603,20 @@ namespace RemoteWindow {
                 for (int y = 0; y < g_frameHeight; ++y) {
                     std::memcpy(&newPixels[y * newW], &g_framePixels[y * g_frameWidth], g_frameWidth * sizeof(uint32_t));
                 }
->>>>>>> origin/main
             }
             g_framePixels = std::move(newPixels);
             g_frameWidth = newW;
             g_frameHeight = newH;
 
-<<<<<<< HEAD
-            LeaveCriticalSection(&g_cs);
-
-            delete img;
-
-=======
             std::memset(&g_bmi, 0, sizeof(g_bmi));
             g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
             g_bmi.bmiHeader.biWidth = g_frameWidth;
-            g_bmi.bmiHeader.biHeight = -g_frameHeight; // Top-down
+            g_bmi.bmiHeader.biHeight = -g_frameHeight;
             g_bmi.bmiHeader.biPlanes = 1;
             g_bmi.bmiHeader.biBitCount = 32;
             g_bmi.bmiHeader.biCompression = BI_RGB;
         }
 
-        // Giải nén trực tiếp vào đúng vị trí delta trên bộ đệm màn hình (Zero intermediate allocation, ~1-2ms)
         unsigned char* targetPtr = (unsigned char*)(g_framePixels.data() + (delta.y * g_frameWidth) + delta.x);
         int pitch = g_frameWidth * 4;
 
@@ -798,7 +635,6 @@ namespace RemoteWindow {
         LeaveCriticalSection(&g_cs);
 
         if (decompRes == 0) {
->>>>>>> origin/main
             g_frameCount++;
             DWORD currentTime = GetTickCount();
             bool fpsUpdated = false;
@@ -822,30 +658,10 @@ namespace RemoteWindow {
                 clientRect.top = tbHeight;
                 InvalidateRect(g_hwnd, &clientRect, FALSE);
             }
-        } else {
-            if (img) delete img;
         }
     }
 
     void Cleanup() {
-<<<<<<< HEAD
-        if (g_decodeStream) {
-            g_decodeStream->Release();
-            g_decodeStream = nullptr;
-        }
-        EnterCriticalSection(&g_cs);
-        if (g_hFrameDC) {
-            if (g_hOldFrameBmp) SelectObject(g_hFrameDC, g_hOldFrameBmp);
-            DeleteDC(g_hFrameDC);
-            g_hFrameDC = NULL;
-        }
-        if (g_hFrameBmp) {
-            DeleteObject(g_hFrameBmp);
-            g_hFrameBmp = NULL;
-        }
-        g_frameW = 0;
-        g_frameH = 0;
-=======
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();
         g_frameWidth = 0;
@@ -854,7 +670,6 @@ namespace RemoteWindow {
             tjDestroy(g_tjDecompressor);
             g_tjDecompressor = nullptr;
         }
->>>>>>> origin/main
         LeaveCriticalSection(&g_cs);
         DeleteCriticalSection(&g_cs);
     }

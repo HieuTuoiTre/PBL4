@@ -58,20 +58,12 @@ namespace ScreenCapture {
         bmi.bmiHeader.biCompression = BI_RGB;
 
         g_hDibBitmap = CreateDIBSection(g_hDesktopDC, &bmi, DIB_RGB_COLORS, (void**)&g_dibPixels, NULL, 0);
-<<<<<<< HEAD
-        if (!g_hDibBitmap || !g_dibPixels) return false;
-
-        // Cấp phát sẵn bộ đệm 2MB HGLOBAL để nén ảnh không bị phân mảnh bộ nhớ
-        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, 2 * 1024 * 1024);
-        if (!hMem || CreateStreamOnHGlobal(hMem, TRUE, &g_pStream) != S_OK) return false;
-=======
         if (!g_hDibBitmap || !g_dibPixels) {
             DeleteDC(g_hCaptureDC); g_hCaptureDC = NULL;
             ReleaseDC(NULL, g_hDesktopDC); g_hDesktopDC = NULL;
             tjDestroy(g_tjCompressor); g_tjCompressor = nullptr;
             return false;
         }
->>>>>>> origin/main
 
         g_hOldBitmap = (HBITMAP)SelectObject(g_hCaptureDC, g_hDibBitmap);
         g_prevPixels.clear();
@@ -105,16 +97,15 @@ namespace ScreenCapture {
                 if (y < minY) minY = y;
                 if (y > maxY) maxY = y;
 
-                // Tối ưu quét biên: chỉ quét trong phạm vi có thể mở rộng biên minX/maxX
-                for (int x = 0; x < minX; ++x) {
+                for (int x = 0; x < g_screenWidth; ++x) {
                     if (g_dibPixels[rowOffset + x] != g_prevPixels[rowOffset + x]) {
-                        minX = x;
+                        if (x < minX) minX = x;
                         break;
                     }
                 }
-                for (int x = g_screenWidth - 1; x > maxX; --x) {
+                for (int x = g_screenWidth - 1; x >= minX; --x) {
                     if (g_dibPixels[rowOffset + x] != g_prevPixels[rowOffset + x]) {
-                        maxX = x;
+                        if (x > maxX) maxX = x;
                         break;
                     }
                 }
@@ -125,20 +116,6 @@ namespace ScreenCapture {
         // Không có thay đổi nào trên màn hình -> Không cần gửi gói tin
         if (minX > maxX || minY > maxY) return false;
 
-<<<<<<< HEAD
-        // Căn chỉnh tọa độ theo block 16px (MCU JPEG) để tăng tốc nén tối đa
-        int alignX = (minX / 16) * 16;
-        int alignY = (minY / 16) * 16;
-        int alignR = ((maxX + 16) / 16) * 16;
-        int alignB = ((maxY + 16) / 16) * 16;
-        if (alignR > g_screenWidth) alignR = g_screenWidth;
-        if (alignB > g_screenHeight) alignB = g_screenHeight;
-
-        outX = alignX;
-        outY = alignY;
-        outWidth = alignR - alignX;
-        outHeight = alignB - alignY;
-=======
         // Căn chỉnh tọa độ về số chẵn để tối ưu Chroma Subsampling 4:2:0
         int alignedX = minX & ~1;
         int alignedY = minY & ~1;
@@ -146,7 +123,6 @@ namespace ScreenCapture {
         int alignedH = maxY - alignedY + 1;
         if ((alignedW & 1) && (alignedX + alignedW < g_screenWidth)) alignedW++;
         if ((alignedH & 1) && (alignedY + alignedH < g_screenHeight)) alignedH++;
->>>>>>> origin/main
 
         outX = alignedX;
         outY = alignedY;
@@ -159,35 +135,6 @@ namespace ScreenCapture {
 
         // Chất lượng JPEG sắc nét: 75% cho khung hình lớn, 85% cho vùng chữ/chuột nhỏ
         int changedArea = outWidth * outHeight;
-<<<<<<< HEAD
-        ULONG quality = 50;
-        if (changedArea > (pixelsCount / 2)) {
-            quality = 35; // Khi toàn màn hình thay đổi -> nén nhanh hơn để giữ 60 FPS
-        } else if (changedArea > (pixelsCount / 4)) {
-            quality = 40;
-        }
-
-        EncoderParameters encoderParameters;
-        encoderParameters.Count = 1;
-        encoderParameters.Parameter[0].Guid = EncoderQuality;
-        encoderParameters.Parameter[0].Type = EncoderParameterValueTypeLong;
-        encoderParameters.Parameter[0].NumberOfValues = 1;
-        encoderParameters.Parameter[0].Value = &quality;
-
-        // Reset vị trí ghi về đầu stream (tái sử dụng buffer 2MB HGLOBAL)
-        LARGE_INTEGER liZero = {};
-        g_pStream->Seek(liZero, STREAM_SEEK_SET, NULL);
-
-        if (croppedBmp.Save(g_pStream, &g_jpegClsid, &encoderParameters) != Ok) {
-            return false;
-        }
-
-        ULARGE_INTEGER streamPos = {};
-        g_pStream->Seek(liZero, STREAM_SEEK_CUR, &streamPos);
-        ULONG streamSize = (ULONG)streamPos.QuadPart;
-
-        if (streamSize > 0) {
-=======
         int quality = (changedArea > (pixelsCount / 2)) ? 75 : 85;
 
         // Nén trực tiếp với TurboJPEG SIMD (Zero-copy crop, nén trong ~2-5ms)
@@ -198,26 +145,11 @@ namespace ScreenCapture {
         }
 
         if (g_jpegBuf && g_jpegBufSize > 0) {
->>>>>>> origin/main
             Protocol::VideoDeltaHeader delta = { outX, outY, outWidth, outHeight };
             outBuffer.resize(sizeof(delta) + g_jpegBufSize);
             std::memcpy(outBuffer.data(), &delta, sizeof(delta));
-<<<<<<< HEAD
-
-            HGLOBAL hMem = NULL;
-            if (GetHGlobalFromStream(g_pStream, &hMem) == S_OK && hMem) {
-                void* pData = GlobalLock(hMem);
-                if (pData) {
-                    std::memcpy(outBuffer.data() + sizeof(delta), pData, streamSize);
-                    GlobalUnlock(hMem);
-                }
-            }
-        } else {
-            outBuffer.clear();
-=======
             std::memcpy(outBuffer.data() + sizeof(delta), g_jpegBuf, g_jpegBufSize);
             return true;
->>>>>>> origin/main
         }
 
         return false;
