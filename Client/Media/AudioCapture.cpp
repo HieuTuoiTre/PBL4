@@ -179,7 +179,6 @@ namespace AudioCapture {
                     if (SUCCEEDED(pSilentRenderService->GetBuffer(bufferFrameCount, &pSilentData))) {
                         pSilentRenderService->ReleaseBuffer(bufferFrameCount, AUDCLNT_BUFFERFLAGS_SILENT);
                     }
-                    pSilentRenderClient->Start();
                 }
             }
         }
@@ -253,10 +252,8 @@ namespace AudioCapture {
                     break;
                 }
 
-                while (packetLength != 0 && isRecording) {
-                    BYTE* pData = nullptr;
-                    UINT32 numFramesAvailable = 0;
-                    DWORD flags = 0;
+        std::vector<int16_t> accumPcm;
+        accumPcm.reserve(960 * 4);
 
                     if (SUCCEEDED(pCaptureClient->GetBuffer(&pData, &numFramesAvailable, &flags, NULL, NULL))) {
                         bool isSilent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
