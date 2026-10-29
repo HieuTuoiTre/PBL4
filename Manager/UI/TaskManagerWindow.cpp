@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cwchar>
 #include <cmath>
+#include <unordered_map>
+#include <set>
 
 #define WM_TASK_UPDATE_SYS  (WM_APP + 101)
 #define WM_TASK_UPDATE_LIST (WM_APP + 102)
@@ -25,6 +27,8 @@ namespace {
     HWND g_hStatusLabel = NULL;
     HWND g_hHeader = NULL;
     WNDPROC g_oldHeaderProc = NULL;
+    WNDPROC g_oldListProc = NULL;
+    WNDPROC g_oldSearchProc = NULL;
     HWND g_hHoveredBtn = NULL;
     HIMAGELIST g_hImageList = NULL;
     TcpClient* g_client = nullptr;
@@ -34,6 +38,23 @@ namespace {
     Protocol::SysInfoPayload g_latestSys = {};
     std::vector<Protocol::ProcessInfoPayload> g_latestProcesses;
     std::wstring g_searchQuery = L"";
+
+    // Cấu trúc mô hình hóa danh sách tiến trình dạng Cây gom nhóm (chuẩn Windows Task Manager)
+    struct ProcessDisplayRow {
+        bool isGroup;                     // true nếu là hàng cha gom nhóm (vd: Zalo 8 PIDs)
+        bool isExpanded;                  // true nếu hàng cha đang mở rộng
+        std::wstring groupKey;            // Key định danh nhóm chữ thường (vd: L"zalo.exe")
+        std::wstring nameDisplay;         // Tên hiển thị cột 0: "\u25B6 Zalo.exe (8)" hoặc "       \u2514 Zalo.exe"
+        std::wstring pidDisplay;          // Cột 1: "8 PIDs" hoặc "1240"
+        std::wstring ramDisplay;          // Cột 2: "221 MB" hoặc "126 MB"
+        std::wstring diskDisplay;         // Cột 3: "0 MB"
+        uint32_t pid;                     // PID nếu là con đơn lẻ (hoặc 0)
+        std::vector<uint32_t> allPids;    // Danh sách toàn bộ PID cần kill khi chọn hàng này
+        std::wstring appDisplayName;      // Tên app sạch hiển thị trong thông báo xác nhận
+    };
+
+    std::vector<ProcessDisplayRow> g_currentDisplayRows;
+    std::set<std::wstring> g_expandedGroups; // Lưu trạng thái mở rộng của các nhóm
 
     HFONT g_hFontNormal = NULL;
     HFONT g_hFontBtn = NULL;
@@ -66,6 +87,31 @@ namespace {
         path.AddArc(rect.X + rect.Width - d, rect.Y + rect.Height - d, d, d, 0.0f, 90.0f);
         path.AddArc(rect.X, rect.Y + rect.Height - d, d, d, 90.0f, 90.0f);
         path.CloseFigure();
+    }
+
+    // Cuộn danh sách tiến trình bằng con lăn chuột mượt mà
+    void ScrollTaskList(short zDelta) {
+        if (!g_hTaskList) return;
+        float scale = GetDpiScale(g_hTaskWnd ? g_hTaskWnd : g_hTaskList);
+        int lines = -(zDelta / WHEEL_DELTA) * 3;
+        int pixelScroll = lines * (int)std::round(30.0f * scale);
+        ListView_Scroll(g_hTaskList, 0, pixelScroll);
+    }
+
+    LRESULT CALLBACK SearchEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        if (uMsg == WM_MOUSEWHEEL) {
+            ScrollTaskList(GET_WHEEL_DELTA_WPARAM(wParam));
+            return 0;
+        }
+        return CallWindowProcW(g_oldSearchProc, hWnd, uMsg, wParam, lParam);
+    }
+
+    LRESULT CALLBACK TaskListSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        if (uMsg == WM_MOUSEWHEEL) {
+            ScrollTaskList(GET_WHEEL_DELTA_WPARAM(wParam));
+            return 0;
+        }
+        return CallWindowProcW(g_oldListProc, hWnd, uMsg, wParam, lParam);
     }
 
     LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -145,33 +191,55 @@ namespace {
         return CallWindowProcW(g_oldHeaderProc, hWnd, uMsg, wParam, lParam);
     }
 
+    void RenderProcessListOnUI();
+
+    void ToggleGroupExpand(int itemIndex) {
+        if (itemIndex < 0 || itemIndex >= (int)g_currentDisplayRows.size()) return;
+        const auto& row = g_currentDisplayRows[itemIndex];
+        if (!row.isGroup) return;
+
+        if (g_expandedGroups.count(row.groupKey)) {
+            g_expandedGroups.erase(row.groupKey);
+        } else {
+            g_expandedGroups.insert(row.groupKey);
+        }
+        RenderProcessListOnUI();
+    }
+
     void TriggerKillSelectedProcess(HWND hwnd) {
         if (!g_hTaskList || !g_client) return;
 
         int sel = (int)SendMessageW(g_hTaskList, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
-        if (sel == -1) {
+        if (sel == -1 || sel >= (int)g_currentDisplayRows.size()) {
             MessageBoxW(hwnd, L"Vui lòng chọn một tiến trình trong bảng trước khi bấm kết thúc tác vụ!", L"Thông báo", MB_OK | MB_ICONINFORMATION);
             return;
         }
 
-        wchar_t nameBuf[256] = {0};
-        wchar_t pidBuf[32] = {0};
-        LVITEMW lvi = {};
-        lvi.iSubItem = 0; lvi.pszText = nameBuf; lvi.cchTextMax = 256;
-        SendMessageW(g_hTaskList, LVM_GETITEMTEXTW, sel, (LPARAM)&lvi);
-        lvi.iSubItem = 1; lvi.pszText = pidBuf; lvi.cchTextMax = 32;
-        SendMessageW(g_hTaskList, LVM_GETITEMTEXTW, sel, (LPARAM)&lvi);
+        const auto& row = g_currentDisplayRows[sel];
+        if (row.allPids.empty()) return;
 
-        if (wcslen(pidBuf) > 0) {
-            wchar_t* endPtr = nullptr;
-            uint32_t pid = (uint32_t)wcstoul(pidBuf, &endPtr, 10);
-            if (endPtr != pidBuf && pid > 0) {
-                std::wstring confirmMsg = L"Bạn có chắc chắn muốn kết thúc (Kill) tiến trình '" + std::wstring(nameBuf) + L"' (PID: " + std::wstring(pidBuf) + L") không?";
-                if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận kết thúc tác vụ", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
-                    g_client->SendPacket(Protocol::MSG_KILL_PROCESS, (char*)&pid, sizeof(pid));
-                    g_client->SendPacket(Protocol::MSG_PROCESS_LIST_REQUEST, nullptr, 0);
-                    g_client->SendPacket(Protocol::MSG_SYS_INFO_REQUEST, nullptr, 0);
+        if (row.isGroup) {
+            // Hàng cha gom nhóm: Xác nhận kill TOÀN BỘ các tiến trình của ứng dụng
+            std::wstring confirmMsg = L"Ứng dụng '" + row.appDisplayName + L"' đang chạy với " +
+                                      std::to_wstring(row.allPids.size()) + L" tiến trình (" +
+                                      row.ramDisplay + L" RAM).\n\n" +
+                                      L"Bạn có chắc chắn muốn kết thúc (Kill) TOÀN BỘ " +
+                                      std::to_wstring(row.allPids.size()) + L" tiến trình của ứng dụng này không?";
+            if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận kết thúc toàn bộ ứng dụng", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+                for (uint32_t p : row.allPids) {
+                    g_client->SendPacket(Protocol::MSG_KILL_PROCESS, (char*)&p, sizeof(p));
                 }
+                g_client->SendPacket(Protocol::MSG_PROCESS_LIST_REQUEST, nullptr, 0);
+                g_client->SendPacket(Protocol::MSG_SYS_INFO_REQUEST, nullptr, 0);
+            }
+        } else {
+            // Hàng con hoặc ứng dụng đơn lẻ: Kill 1 PID
+            std::wstring confirmMsg = L"Bạn có chắc chắn muốn kết thúc (Kill) tiến trình '" + row.appDisplayName + L"' (PID: " + std::to_wstring(row.pid) + L") không?";
+            if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận kết thúc tác vụ", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+                uint32_t p = row.pid;
+                g_client->SendPacket(Protocol::MSG_KILL_PROCESS, (char*)&p, sizeof(p));
+                g_client->SendPacket(Protocol::MSG_PROCESS_LIST_REQUEST, nullptr, 0);
+                g_client->SendPacket(Protocol::MSG_SYS_INFO_REQUEST, nullptr, 0);
             }
         }
     }
@@ -183,50 +251,155 @@ namespace {
         std::vector<Protocol::ProcessInfoPayload> fullList = g_latestProcesses;
         LeaveCriticalSection(&g_dataCs);
 
-        std::vector<Protocol::ProcessInfoPayload> pList;
+        std::vector<Protocol::ProcessInfoPayload> filteredList;
         std::wstring lowerQuery = g_searchQuery;
         std::transform(lowerQuery.begin(), lowerQuery.end(), lowerQuery.begin(), ::towlower);
 
         for (const auto& item : fullList) {
             if (lowerQuery.empty()) {
-                pList.push_back(item);
+                filteredList.push_back(item);
             } else {
                 std::wstring nameW = Utils::Utf8ToWide(item.name);
                 std::wstring lowerName = nameW;
                 std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::towlower);
                 if (lowerName.find(lowerQuery) != std::wstring::npos) {
-                    pList.push_back(item);
+                    filteredList.push_back(item);
                 }
             }
         }
 
-        int count = (int)pList.size();
+        // Nhóm các tiến trình theo tên file thực thi (.exe)
+        struct TempGroup {
+            std::wstring appName;
+            std::wstring key;
+            uint32_t totalRamMB = 0;
+            uint32_t totalDiskMB = 0;
+            std::vector<Protocol::ProcessInfoPayload> items;
+        };
 
-        std::wstring selectedPid = L"";
-        int curSel = (int)SendMessageW(g_hTaskList, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
-        if (curSel != -1) {
-            wchar_t buf[32] = {0};
-            LVITEMW lvi = {};
-            lvi.iSubItem = 1; lvi.pszText = buf; lvi.cchTextMax = 32;
-            SendMessageW(g_hTaskList, LVM_GETITEMTEXTW, curSel, (LPARAM)&lvi);
-            selectedPid = buf;
+        std::vector<TempGroup> groups;
+        std::unordered_map<std::wstring, size_t> keyToIdx;
+
+        for (const auto& item : filteredList) {
+            std::wstring nameW = Utils::Utf8ToWide(item.name);
+            std::wstring lowerName = nameW;
+            std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::towlower);
+
+            auto it = keyToIdx.find(lowerName);
+            if (it != keyToIdx.end()) {
+                size_t idx = it->second;
+                groups[idx].totalRamMB += item.ramUsageMB;
+                groups[idx].totalDiskMB += item.diskUsageMB;
+                groups[idx].items.push_back(item);
+            } else {
+                TempGroup grp;
+                grp.appName = nameW;
+                grp.key = lowerName;
+                grp.totalRamMB = item.ramUsageMB;
+                grp.totalDiskMB = item.diskUsageMB;
+                grp.items.push_back(item);
+                keyToIdx[lowerName] = groups.size();
+                groups.push_back(grp);
+            }
         }
 
+        // Sắp xếp các nhóm ứng dụng theo tổng RAM giảm dần (những app nặng nhất như Edge, Zalo lên trên cùng)
+        std::sort(groups.begin(), groups.end(), [](const TempGroup& a, const TempGroup& b) {
+            if (a.totalRamMB != b.totalRamMB) return a.totalRamMB > b.totalRamMB;
+            return a.appName < b.appName;
+        });
+
+        // Với mỗi nhóm, sắp xếp các tiến trình con bên trong theo RAM giảm dần
+        for (auto& grp : groups) {
+            std::sort(grp.items.begin(), grp.items.end(), [](const Protocol::ProcessInfoPayload& a, const Protocol::ProcessInfoPayload& b) {
+                if (a.ramUsageMB != b.ramUsageMB) return a.ramUsageMB > b.ramUsageMB;
+                return a.pid < b.pid;
+            });
+        }
+
+        // Lưu lại vị trí hàng đang được chọn trước khi cập nhật
+        std::wstring selectedRowId = L"";
+        int curSel = (int)SendMessageW(g_hTaskList, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
+        if (curSel >= 0 && curSel < (int)g_currentDisplayRows.size()) {
+            const auto& prevRow = g_currentDisplayRows[curSel];
+            if (prevRow.isGroup) {
+                selectedRowId = L"grp:" + prevRow.groupKey;
+            } else {
+                selectedRowId = L"pid:" + std::to_wstring(prevRow.pid);
+            }
+        }
+
+        // Xây dựng danh sách hiển thị phẳng g_currentDisplayRows
+        g_currentDisplayRows.clear();
+        for (const auto& grp : groups) {
+            if (grp.items.size() == 1) {
+                // Ứng dụng chỉ có 1 tiến trình: hiển thị phẳng
+                ProcessDisplayRow row;
+                row.isGroup = false;
+                row.isExpanded = false;
+                row.groupKey = grp.key;
+                row.nameDisplay = grp.appName;
+                row.pidDisplay = std::to_wstring(grp.items[0].pid);
+                row.ramDisplay = std::to_wstring(grp.items[0].ramUsageMB) + L" MB";
+                row.diskDisplay = std::to_wstring(grp.items[0].diskUsageMB) + L" MB";
+                row.pid = grp.items[0].pid;
+                row.allPids = { grp.items[0].pid };
+                row.appDisplayName = grp.appName;
+                g_currentDisplayRows.push_back(row);
+            } else {
+                // Ứng dụng đa tiến trình (như Edge, Zalo, Chrome...): Tạo hàng cha gom nhóm
+                bool isExp = (g_expandedGroups.count(grp.key) > 0);
+                std::vector<uint32_t> childPids;
+                for (const auto& c : grp.items) childPids.push_back(c.pid);
+
+                ProcessDisplayRow groupRow;
+                groupRow.isGroup = true;
+                groupRow.isExpanded = isExp;
+                groupRow.groupKey = grp.key;
+                // Dùng mã Unicode \u25BC (▼) và \u25B6 (▶) an toàn tuyệt đối, không lo lỗi font
+                groupRow.nameDisplay = (isExp ? L"\u25BC " : L"\u25B6 ") + grp.appName + L" (" + std::to_wstring(grp.items.size()) + L")";
+                groupRow.pidDisplay = std::to_wstring(grp.items.size()) + L" PIDs";
+                groupRow.ramDisplay = std::to_wstring(grp.totalRamMB) + L" MB";
+                groupRow.diskDisplay = std::to_wstring(grp.totalDiskMB) + L" MB";
+                groupRow.pid = 0;
+                groupRow.allPids = childPids;
+                groupRow.appDisplayName = grp.appName;
+                g_currentDisplayRows.push_back(groupRow);
+
+                if (isExp) {
+                    // Nếu đang mở rộng: Thêm các hàng con thụt lề
+                    for (const auto& c : grp.items) {
+                        ProcessDisplayRow childRow;
+                        childRow.isGroup = false;
+                        childRow.isExpanded = false;
+                        childRow.groupKey = grp.key;
+                        childRow.nameDisplay = L"       \u2514 " + grp.appName;
+                        childRow.pidDisplay = std::to_wstring(c.pid);
+                        childRow.ramDisplay = std::to_wstring(c.ramUsageMB) + L" MB";
+                        childRow.diskDisplay = std::to_wstring(c.diskUsageMB) + L" MB";
+                        childRow.pid = c.pid;
+                        childRow.allPids = { c.pid };
+                        childRow.appDisplayName = grp.appName + L" (PID: " + std::to_wstring(c.pid) + L")";
+                        g_currentDisplayRows.push_back(childRow);
+                    }
+                }
+            }
+        }
+
+        // Đồng bộ danh sách hiển thị vào Win32 ListView
+        int count = (int)g_currentDisplayRows.size();
         SendMessageW(g_hTaskList, WM_SETREDRAW, FALSE, 0);
 
         int existingCount = (int)SendMessageW(g_hTaskList, LVM_GETITEMCOUNT, 0, 0);
 
         for (int i = 0; i < count; i++) {
-            std::wstring nameW = Utils::Utf8ToWide(pList[i].name);
-            std::wstring pidW = std::to_wstring(pList[i].pid);
-            std::wstring ramW = std::to_wstring(pList[i].ramUsageMB) + L" MB";
-            std::wstring diskW = std::to_wstring(pList[i].diskUsageMB) + L" MB";
+            const auto& row = g_currentDisplayRows[i];
 
             LVITEMW lvi = {};
             lvi.mask = LVIF_TEXT;
             lvi.iItem = i;
             lvi.iSubItem = 0;
-            lvi.pszText = (LPWSTR)nameW.c_str();
+            lvi.pszText = (LPWSTR)row.nameDisplay.c_str();
 
             if (i >= existingCount) {
                 SendMessageW(g_hTaskList, LVM_INSERTITEMW, 0, (LPARAM)&lvi);
@@ -235,18 +408,20 @@ namespace {
             }
 
             lvi.iSubItem = 1;
-            lvi.pszText = (LPWSTR)pidW.c_str();
+            lvi.pszText = (LPWSTR)row.pidDisplay.c_str();
             SendMessageW(g_hTaskList, LVM_SETITEMTEXTW, i, (LPARAM)&lvi);
 
             lvi.iSubItem = 2;
-            lvi.pszText = (LPWSTR)ramW.c_str();
+            lvi.pszText = (LPWSTR)row.ramDisplay.c_str();
             SendMessageW(g_hTaskList, LVM_SETITEMTEXTW, i, (LPARAM)&lvi);
 
             lvi.iSubItem = 3;
-            lvi.pszText = (LPWSTR)diskW.c_str();
+            lvi.pszText = (LPWSTR)row.diskDisplay.c_str();
             SendMessageW(g_hTaskList, LVM_SETITEMTEXTW, i, (LPARAM)&lvi);
 
-            if (!selectedPid.empty() && pidW == selectedPid) {
+            // Khôi phục lựa chọn
+            std::wstring rowId = row.isGroup ? (L"grp:" + row.groupKey) : (L"pid:" + std::to_wstring(row.pid));
+            if (!selectedRowId.empty() && rowId == selectedRowId) {
                 LVITEMW stateItem = {};
                 stateItem.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
                 stateItem.state = LVIS_SELECTED | LVIS_FOCUSED;
@@ -262,11 +437,12 @@ namespace {
         InvalidateRect(g_hTaskList, NULL, FALSE);
 
         if (g_hStatusLabel) {
-            std::wstring statusStr = L"✓ Đang hiển thị " + std::to_wstring(count) + L" / " + std::to_wstring(fullList.size()) + L" tiến trình đang chạy";
+            std::wstring statusStr = L"✓ Đang hiển thị " + std::to_wstring(groups.size()) + L" ứng dụng (" +
+                                     std::to_wstring(fullList.size()) + L" tiến trình)";
             if (!g_searchQuery.empty()) {
                 statusStr += L" (Lọc: \"" + g_searchQuery + L"\")";
             }
-            statusStr += L"  •  Nhấp đúp chuột hoặc chọn và bấm 'Kết thúc tác vụ' để đóng app";
+            statusStr += L"  •  Lăn chuột để xem danh sách  •  Nhấp đúp hoặc bấm \u25B6 để mở rộng  •  Chọn và bấm 'Kết thúc tác vụ' để đóng app";
             SetWindowTextW(g_hStatusLabel, statusStr.c_str());
         }
     }
@@ -408,6 +584,7 @@ namespace {
                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_TASK_SEARCH, GetModuleHandle(NULL), NULL);
                 SendMessageW(g_hSearchEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"🔍 Tìm kiếm tiến trình theo Tên hoặc PID...");
+                g_oldSearchProc = (WNDPROC)SetWindowLongPtrW(g_hSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditSubclassProc);
 
                 g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"Làm mới",
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -418,11 +595,13 @@ namespace {
                     0, 0, 0, 0, hwnd, (HMENU)IDC_TASK_KILL, GetModuleHandle(NULL), NULL);
 
                 g_hTaskList = CreateWindowExW(0, L"SysListView32", L"",
-                    WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                    WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_TASK_LIST, GetModuleHandle(NULL), NULL);
 
                 SendMessageW(g_hTaskList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
                     LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+
+                g_oldListProc = (WNDPROC)SetWindowLongPtrW(g_hTaskList, GWLP_WNDPROC, (LONG_PTR)TaskListSubclassProc);
 
                 g_hImageList = ImageList_Create(1, (int)std::round(30.0f * scale), ILC_COLOR32, 1, 1);
                 ListView_SetImageList(g_hTaskList, g_hImageList, LVSIL_SMALL);
@@ -448,11 +627,18 @@ namespace {
                 SendMessageW(g_hTaskList, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
                 SendMessageW(g_hStatusLabel, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
+                SetFocus(g_hTaskList);
+
                 if (g_client) {
                     g_client->SendPacket(Protocol::MSG_PROCESS_LIST_REQUEST, nullptr, 0);
                     g_client->SendPacket(Protocol::MSG_SYS_INFO_REQUEST, nullptr, 0);
                 }
                 SetTimer(hwnd, 1, 3000, NULL);
+                return 0;
+            }
+
+            case WM_MOUSEWHEEL: {
+                ScrollTaskList(GET_WHEEL_DELTA_WPARAM(wp));
                 return 0;
             }
 
@@ -599,7 +785,7 @@ namespace {
                 if (listH < 60) listH = 60;
                 MoveWindow(g_hTaskList, pad, listY, w - pad * 2, listH, TRUE);
 
-                int colPidW = (int)std::round(80.0f * scale);
+                int colPidW = (int)std::round(85.0f * scale);
                 int colRamW = (int)std::round(115.0f * scale);
                 int colDiskW = (int)std::round(115.0f * scale);
                 int scrollW = GetSystemMetrics(SM_CXVSCROLL) + 4;
@@ -661,8 +847,32 @@ namespace {
                 LPNMHDR nmh = (LPNMHDR)lp;
                 if (nmh->idFrom == IDC_TASK_LIST) {
                     if (nmh->code == NM_DBLCLK) {
-                        TriggerKillSelectedProcess(hwnd);
+                        int sel = (int)SendMessageW(g_hTaskList, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
+                        if (sel >= 0 && sel < (int)g_currentDisplayRows.size()) {
+                            if (g_currentDisplayRows[sel].isGroup) {
+                                ToggleGroupExpand(sel);
+                            } else {
+                                TriggerKillSelectedProcess(hwnd);
+                            }
+                        }
                         return 0;
+                    }
+                    if (nmh->code == NM_CLICK) {
+                        // Click vào vùng mũi tên \u25B6 / \u25BC ở đầu hàng
+                        LVHITTESTINFO hti = {};
+                        GetCursorPos(&hti.pt);
+                        ScreenToClient(g_hTaskList, &hti.pt);
+                        SendMessageW(g_hTaskList, LVM_SUBITEMHITTEST, 0, (LPARAM)&hti);
+                        if (hti.iItem >= 0 && hti.iItem < (int)g_currentDisplayRows.size() && hti.iSubItem == 0) {
+                            if (g_currentDisplayRows[hti.iItem].isGroup) {
+                                RECT itemRc = {};
+                                ListView_GetItemRect(g_hTaskList, hti.iItem, &itemRc, LVIR_LABEL);
+                                if (hti.pt.x < itemRc.left + 28) {
+                                    ToggleGroupExpand(hti.iItem);
+                                    return 0;
+                                }
+                            }
+                        }
                     }
                     if (nmh->code == NM_CUSTOMDRAW) {
                         LPNMLVCUSTOMDRAW pLVCD = (LPNMLVCUSTOMDRAW)lp;
@@ -673,11 +883,14 @@ namespace {
                             int itemIdx = (int)pLVCD->nmcd.dwItemSpec;
                             bool isSel = (ListView_GetItemState(g_hTaskList, itemIdx, LVIS_SELECTED) & LVIS_SELECTED) != 0;
                             if (isSel) {
-                                pLVCD->clrText = RGB(29, 78, 216);
-                                pLVCD->clrTextBk = RGB(239, 246, 255);
+                                pLVCD->clrText = RGB(29, 78, 216);      // Blue primary
+                                pLVCD->clrTextBk = RGB(239, 246, 255);  // Soft blue highlight
+                            } else if (itemIdx >= 0 && itemIdx < (int)g_currentDisplayRows.size() && g_currentDisplayRows[itemIdx].isGroup) {
+                                pLVCD->clrText = RGB(15, 23, 42);       // Dark Slate đậm cho hàng cha
+                                pLVCD->clrTextBk = (itemIdx % 2 == 1) ? RGB(241, 245, 249) : RGB(248, 250, 252);
                             } else {
-                                pLVCD->clrText = RGB(30, 41, 59);
-                                pLVCD->clrTextBk = (itemIdx % 2 == 1) ? RGB(248, 250, 252) : RGB(255, 255, 255);
+                                pLVCD->clrText = RGB(71, 85, 105);      // Muted Slate cho hàng con
+                                pLVCD->clrTextBk = RGB(255, 255, 255);  // White background
                             }
                             return CDRF_DODEFAULT;
                         }
@@ -697,6 +910,15 @@ namespace {
                 if (wp == VK_DELETE) {
                     TriggerKillSelectedProcess(hwnd);
                     return 0;
+                }
+                if (wp == VK_RETURN || wp == VK_SPACE) {
+                    int sel = (int)SendMessageW(g_hTaskList, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
+                    if (sel >= 0 && sel < (int)g_currentDisplayRows.size()) {
+                        if (g_currentDisplayRows[sel].isGroup) {
+                            ToggleGroupExpand(sel);
+                            return 0;
+                        }
+                    }
                 }
                 break;
             }

@@ -36,24 +36,51 @@ namespace {
         frameBuffer.reserve(512 * 1024); // Cấp phát sẵn 512KB tránh cấp phát lại
         int x, y, w, h;
 
+        // Chu kỳ chuẩn xác cho 60.0 FPS = 16,666 microsecond (16.666 ms)
+        constexpr std::chrono::microseconds FRAME_TARGET_TIME(16666);
+        auto nextFrameTime = std::chrono::steady_clock::now();
+
         while (g_isConnected && g_isRunning) {
-            auto startTime = std::chrono::steady_clock::now();
+            nextFrameTime += FRAME_TARGET_TIME;
+
+            // Chống dồn hàng đợi (TCP Flow-Control): Nếu socket đang bận thì bỏ qua khung
+            if (!g_videoServer.CanSendWithoutBlocking()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                auto now = std::chrono::steady_clock::now();
+                if (now > nextFrameTime + FRAME_TARGET_TIME) {
+                    nextFrameTime = now;
+                }
+                continue;
+            }
 
             if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
                 // frameBuffer đã chứa sẵn [VideoDeltaHeader + JPEG Data], gửi thẳng qua socket video!
+                auto tSendStart = std::chrono::steady_clock::now();
                 if (!g_videoServer.SendPacket(Protocol::MSG_VIDEO_FRAME, frameBuffer.data(), (int)frameBuffer.size())) {
                     g_isConnected = false;
                     break;
                 }
+                auto tSendEnd = std::chrono::steady_clock::now();
+                double sendMs = std::chrono::duration<double, std::milli>(tSendEnd - tSendStart).count();
+                ScreenCapture::ReportSendTime(sendMs);
             }
 
-            // Giữ nhịp ~60 FPS thông minh: Trừ đi thời gian đã tốn để chụp & nén
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - startTime
-            ).count();
-            
-            if (elapsed < 16) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed));
+            // Bộ giữ nhịp độ chính xác cao (High-Precision Frame Pacer chuẩn 60.0 FPS)
+            auto now = std::chrono::steady_clock::now();
+            if (nextFrameTime > now) {
+                auto remainingUs = std::chrono::duration_cast<std::chrono::microseconds>(nextFrameTime - now).count();
+                // Nếu còn nhiều hơn 2.5ms, ngủ nhẹ để nhường CPU cho các luồng khác
+                if (remainingUs > 2500) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(remainingUs - 2000));
+                }
+                // Trong 2ms cuối cùng, spin-wait kết hợp yield để căn trúng đích 60.0 FPS chuẩn xác
+                while (std::chrono::steady_clock::now() < nextFrameTime) {
+                    std::this_thread::yield();
+                }
+            } else {
+                if (now - nextFrameTime > FRAME_TARGET_TIME * 2) {
+                    nextFrameTime = now;
+                }
             }
         }
         ScreenCapture::Cleanup();

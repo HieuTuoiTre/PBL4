@@ -652,12 +652,14 @@ namespace RemoteWindow {
 
         if (decompRes == 0) {
             g_frameCount++;
-            DWORD currentTime = GetTickCount();
+            static auto s_lastFpsTime = std::chrono::steady_clock::now();
+            auto nowTime = std::chrono::steady_clock::now();
+            double elapsedSec = std::chrono::duration<double>(nowTime - s_lastFpsTime).count();
             bool fpsUpdated = false;
-            if (currentTime - g_lastTime >= 1000) {
-                g_fps = g_frameCount;
+            if (elapsedSec >= 1.0) {
+                g_fps = (int)std::round(g_frameCount / elapsedSec);
                 g_frameCount = 0;
-                g_lastTime = currentTime;
+                s_lastFpsTime = nowTime;
                 fpsUpdated = true;
             }
 
@@ -671,8 +673,20 @@ namespace RemoteWindow {
                 }
                 RECT clientRect;
                 GetClientRect(g_hwnd, &clientRect);
-                clientRect.top = tbHeight;
-                InvalidateRect(g_hwnd, &clientRect, FALSE);
+                int clientW = clientRect.right;
+                int clientH = clientRect.bottom - tbHeight;
+                if (clientW > 0 && clientH > 0 && g_frameWidth > 0 && g_frameHeight > 0) {
+                    RECT dirtyRect;
+                    dirtyRect.left = (delta.x * clientW) / g_frameWidth;
+                    dirtyRect.top = tbHeight + (delta.y * clientH) / g_frameHeight;
+                    dirtyRect.right = ((delta.x + delta.width) * clientW + g_frameWidth - 1) / g_frameWidth;
+                    dirtyRect.bottom = tbHeight + ((delta.y + delta.height) * clientH + g_frameHeight - 1) / g_frameHeight;
+                    InvalidateRect(g_hwnd, &dirtyRect, FALSE);
+                } else {
+                    clientRect.top = tbHeight;
+                    InvalidateRect(g_hwnd, &clientRect, FALSE);
+                }
+                UpdateWindow(g_hwnd);
             }
         }
     }

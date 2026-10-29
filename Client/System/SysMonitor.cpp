@@ -14,11 +14,28 @@ namespace {
     uint64_t FileTimeToInt64(const FILETIME& ft) {
         return (((uint64_t)ft.dwHighDateTime) << 32) | ((uint64_t)ft.dwLowDateTime);
     }
+
+    // Kích hoạt đặc quyền SeDebugPrivilege để có thể kết thúc tiến trình khi cần
+    void EnableDebugPrivilege() {
+        HANDLE hToken = NULL;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+            TOKEN_PRIVILEGES tp;
+            LUID luid;
+            if (LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &luid)) {
+                tp.PrivilegeCount = 1;
+                tp.Privileges[0].Luid = luid;
+                tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+                AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+            }
+            CloseHandle(hToken);
+        }
+    }
 }
 
 namespace SysMonitor {
 
     void Initialize() {
+        EnableDebugPrivilege();
         // Lấy mốc thời gian CPU hiện tại lưu vào biến toàn cục
         GetSystemTimes(&g_prevIdleTime, &g_prevKernelTime, &g_prevUserTime);
         g_isInitialized = true;
@@ -136,6 +153,9 @@ namespace SysMonitor {
         if (pid <= 4) return false;
 
         HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if (hProcess == NULL) {
+            hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+        }
         if (hProcess == NULL) return false;
         
         bool result = TerminateProcess(hProcess, 0);
