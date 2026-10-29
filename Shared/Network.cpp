@@ -145,6 +145,18 @@ bool TcpServer::ReceiveExact(char* buffer, int length){
     return true;
 }
 
+bool TcpServer::CanSendWithoutBlocking(){
+    if (clientSocket == INVALID_SOCKET){
+        return false;
+    }
+    fd_set writeFds;
+    FD_ZERO(&writeFds);
+    FD_SET(clientSocket, &writeFds);
+    timeval tv = { 0, 0 }; // 0 ms: Polling tức thì
+    int result = select(0, NULL, &writeFds, NULL, &tv);
+    return (result > 0);
+}
+
 //Tcp client
 TcpClient::TcpClient(){}
 

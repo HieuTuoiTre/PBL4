@@ -38,6 +38,7 @@ class TcpServer{
         //pointer is for memory efficency, not forcing the cpu to clone the data
         bool SendPacket(Protocol::MessageType type, const char* payload, int payloadSize);
         bool ReceiveExact(char* buffer, int length);
+        bool CanSendWithoutBlocking();
 };
 
 //the client (control the machine)
