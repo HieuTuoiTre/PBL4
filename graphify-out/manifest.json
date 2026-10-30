@@ -293,12 +293,6 @@
     "ast_hash": "229a27b44d4bc4f4cc0a0c06fa5a9475",
     "semantic_hash": "229a27b44d4bc4f4cc0a0c06fa5a9475"
   },
-  "tests/test_chat_system.cpp": {
-    "mtime": 1793293580.994694,
-    "seen": 1793341748.3153198,
-    "ast_hash": "e9e425c845a0d665fc3f9e658716f758",
-    "semantic_hash": "e9e425c845a0d665fc3f9e658716f758"
-  },
   "README.md": {
     "mtime": 1789966629.4221885,
     "seen": 1793341748.3153214,
