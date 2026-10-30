@@ -1,39 +1,25 @@
 #include "DataReceiver.h"
-
 #include "../../Shared/Protocol.h"
-
 #include "../UI/RemoteWindow.h"
-
 #include "../UI/TaskManagerWindow.h"
-
 #include "../UI/FileExplorerWindow.h"
-
+#include "../UI/ChatWindow.h"
 #include "../Media/AudioPlayer.h"
-
 #include <thread>
-
 #include <vector>
-
 #include <atomic>
-
 #include <cstring>
 
 namespace {
-
     std::atomic<bool> g_isRunning(false);
-
     std::thread g_controlThread;
-
     std::thread g_videoThread;
-
     std::thread g_audioThread;
 
     void ReceiveControlLoop(TcpClient* client) {
-
         Protocol::PacketHeader hdr;
 
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
-
             if (hdr.type == Protocol::MSG_FILE_END) {
                 FileExplorerWindow::OnFileEnd();
                 continue;
@@ -42,13 +28,10 @@ namespace {
             if (hdr.size == 0 || hdr.size > 32 * 1024 * 1024) continue;
 
             std::vector<char> buf(hdr.size);
-
             if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
 
             switch (hdr.type) {
-
                 case Protocol::MSG_SYS_INFO_RESPONSE: {
-
                     if (hdr.size < sizeof(Protocol::SysInfoPayload)) break;
                     Protocol::SysInfoPayload sys;
                     memcpy(&sys, buf.data(), sizeof(sys));
@@ -58,16 +41,13 @@ namespace {
 
                 case Protocol::MSG_PROCESS_LIST_RESPONSE: {
                     if (hdr.size < sizeof(Protocol::ProcessInfoPayload)) break;
-
                     int count = (int)(hdr.size / sizeof(Protocol::ProcessInfoPayload));
-
                     const Protocol::ProcessInfoPayload* pList = (const Protocol::ProcessInfoPayload*)buf.data();
                     TaskManagerWindow::UpdateProcessList(pList, count);
                     break;
                 }
 
                 case Protocol::MSG_DRIVE_LIST_RESPONSE: {
-
                     std::string content(buf.begin(), buf.end());
                     FileExplorerWindow::OnDriveListResponse(content);
                     break;
@@ -93,6 +73,17 @@ namespace {
                     break;
                 }
 
+                case Protocol::MSG_CHAT_MESSAGE: {
+                    if (hdr.size >= sizeof(Protocol::ChatMessagePayload)) {
+                        Protocol::ChatMessagePayload chat;
+                        memcpy(&chat, buf.data(), sizeof(chat));
+                        chat.sender[sizeof(chat.sender) - 1] = '\0';
+                        chat.message[sizeof(chat.message) - 1] = '\0';
+                        ChatWindow::OnMessageReceived(chat);
+                    }
+                    break;
+                }
+
                 default:
                     break;
             }
@@ -103,21 +94,16 @@ namespace {
         Protocol::PacketHeader hdr;
 
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
-
             if (hdr.size == 0 || hdr.size > 32 * 1024 * 1024) continue;
 
             std::vector<char> buf(hdr.size);
             if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
 
             if (hdr.type == Protocol::MSG_VIDEO_FRAME) {
-
                 if (hdr.size > sizeof(Protocol::VideoDeltaHeader)) {
-
                     Protocol::VideoDeltaHeader delta;
                     memcpy(&delta, buf.data(), sizeof(delta));
-
                     int jpgSize = (int)hdr.size - (int)sizeof(delta);
-
                     RemoteWindow::UpdateFrame(delta, buf.data() + sizeof(delta), jpgSize);
                 }
             }
@@ -130,7 +116,6 @@ namespace {
         buf.reserve(8192);
 
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
-
             if (hdr.size == 0) continue;
             if (hdr.size > 1024 * 1024) break;
 
@@ -138,7 +123,6 @@ namespace {
             if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
 
             if (hdr.type == Protocol::MSG_AUDIO_CHUNK) {
-
                 AudioPlayer::PlayChunk(buf.data(), (int)hdr.size);
             }
         }
@@ -146,15 +130,12 @@ namespace {
 }
 
 namespace DataReceiver {
-
     void Start(TcpClient* controlClient, TcpClient* videoClient, TcpClient* audioClient) {
         if (g_isRunning) return;
         g_isRunning = true;
 
         g_controlThread = std::thread(ReceiveControlLoop, controlClient);
-
         g_videoThread = std::thread(ReceiveVideoLoop, videoClient);
-
         g_audioThread = std::thread(ReceiveAudioLoop, audioClient);
     }
 
@@ -163,9 +144,7 @@ namespace DataReceiver {
         g_isRunning = false;
 
         if (g_controlThread.joinable()) g_controlThread.join();
-
         if (g_videoThread.joinable()) g_videoThread.join();
-
         if (g_audioThread.joinable()) g_audioThread.join();
     }
 }

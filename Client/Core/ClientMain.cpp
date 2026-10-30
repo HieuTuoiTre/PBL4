@@ -3,11 +3,11 @@
 #include <mmsystem.h>
 #include <timeapi.h>
 #include <thread>
+#include <gdiplus.h>
 
 #include "SessionManager.h"
 #include "TrayIcon.h"
 #include "DiscoveryResponder.h"
-
 #include "../System/InputInjector.h"
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow){
@@ -16,6 +16,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     timeBeginPeriod(1);
 
     SetProcessDPIAware();
+
+    HMODULE hComCtl = LoadLibraryA("comctl32.dll");
+    if (hComCtl) {
+        typedef void (WINAPI *INITPROC)(void);
+        INITPROC pInit = (INITPROC)GetProcAddress(hComCtl, "InitCommonControls");
+        if (pInit) pInit();
+    }
+
+    // Khởi tạo GDI+ cho toàn bộ tiến trình Client
+    ULONG_PTR gdiToken = 0;
+    Gdiplus::GdiplusStartupInput gdiInput;
+    Gdiplus::GdiplusStartup(&gdiToken, &gdiInput, NULL);
+
     // --- BẬT CƠ CHẾ CHỈ CHO PHÉP 1 TIẾN TRÌNH DUY NHẤT ---
     HANDLE hMutex = CreateMutexA(NULL, TRUE, "PBL4_RemoteDesktop_Client_Mutex");
     
@@ -25,14 +38,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             CloseHandle(hMutex);
         }
         MessageBoxW(NULL, L"Ứng dụng Client đang chạy ngầm trong khay hệ thống (System Tray)!\nHãy kiểm tra biểu tượng ở góc phải thanh Taskbar.", L"Thông báo", MB_OK | MB_ICONINFORMATION);
+        Gdiplus::GdiplusShutdown(gdiToken);
+        if (hComCtl) FreeLibrary(hComCtl);
+        timeEndPeriod(1);
         return 0; // Lập tức tắt tiến trình mới này, giữ nguyên tiến trình cũ đang chạy
     }
     // --------------------------------------------------
 
-    // 1. Khởi tạo Winsock (Gọi hàm do Dev 1 viết)
-    timeBeginPeriod(1);
+    // 1. Khởi tạo Winsock
     if (!Network::Initialize()) {
         MessageBoxW(NULL, L"Không thể khởi tạo Winsock2!", L"Lỗi nghiêm trọng", MB_OK | MB_ICONERROR);
+        Gdiplus::GdiplusShutdown(gdiToken);
+        if (hComCtl) FreeLibrary(hComCtl);
         timeEndPeriod(1);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); } // Dọn dẹp Mutex
         return 1;
@@ -46,6 +63,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         MessageBoxW(NULL, L"Không thể khởi tạo System Tray Icon!", L"Lỗi nghiêm trọng", MB_OK | MB_ICONERROR);
         DiscoveryResponder::Stop();
         Network::Cleanup();
+        Gdiplus::GdiplusShutdown(gdiToken);
+        if (hComCtl) FreeLibrary(hComCtl);
+        timeEndPeriod(1);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); } // Dọn dẹp Mutex
         return 1;
     }
@@ -75,13 +95,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     SessionManager::Stop();           // Đóng socket, tắt luồng mạng
     DiscoveryResponder::Stop();       // Dừng lắng nghe UDP và gửi thông báo DISCOVERY_BYE
     Network::Cleanup();               // Tắt Winsock
-    timeEndPeriod(1);
 
     // Giải phóng Mutex trước khi app tắt hoàn toàn
     if (hMutex) {
         ReleaseMutex(hMutex);
         CloseHandle(hMutex);
     }
+
+    Gdiplus::GdiplusShutdown(gdiToken);
+    if (hComCtl) FreeLibrary(hComCtl);
 
     // Khôi phục bộ định thời Windows
     timeEndPeriod(1);
