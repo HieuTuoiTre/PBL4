@@ -25,3 +25,5 @@ Instruction.txt
 
 graphify-out/
 .agents/
+
+tests/
