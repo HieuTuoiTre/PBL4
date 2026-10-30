@@ -37,6 +37,12 @@ namespace InputHandler {
         s_client->SendPacket(Protocol::MSG_MOUSE_EVENT, (char*)&mp, sizeof(mp));
     }
 
+    void SendMouseDirect(uint8_t action, uint8_t btn, int16_t x, int16_t y, int16_t wheel) {
+        if (!s_client || !s_isControlling) return;
+        Protocol::MousePayload mp = { action, btn, x, y, wheel };
+        s_client->SendPacket(Protocol::MSG_MOUSE_EVENT, (char*)&mp, sizeof(mp));
+    }
+
     void SendKey(WPARAM wp, uint8_t isDown) {
         if (!s_client || !s_isControlling) return;
         // Khóa phím Windows: Không gửi phím Windows (VK_LWIN, VK_RWIN) xuống Client để tránh kẹt phím

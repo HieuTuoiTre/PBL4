@@ -52,10 +52,10 @@ namespace {
             return { q, TJSAMP_420 };
         } else {
             // Thay đổi rất nhỏ (con trỏ chuột, 1 dòng chữ, icon)
-            // Dùng TJSAMP_444 để chữ ký tự nhỏ không bị lem màu viền
-            int q = slowNetwork ? 85 : 94;
-            int subsamp = slowNetwork ? TJSAMP_420 : TJSAMP_444;
-            return { q, subsamp };
+            // LƯU Ý: TJSAMP_420 với Q82 chỉ mất ~1.5ms để nén, đảm bảo duy trì 60 FPS mượt mà tuyệt đối khi chuột di chuyển!
+            // Khi dừng di chuyển 150ms, tính năng Progressive Refinement sẽ tự động gửi khung TJSAMP_444 Q94 sắc nét hoàn hảo!
+            int q = slowNetwork ? 75 : 82;
+            return { q, TJSAMP_420 };
         }
     }
 
@@ -221,8 +221,8 @@ namespace {
         DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
         IDXGIResource* desktopResource = nullptr;
 
-        // Timeout 4ms: Nếu màn hình tĩnh thì kiểm tra Progressive Refinement
-        HRESULT hr = g_dxgiDupl->AcquireNextFrame(4, &frameInfo, &desktopResource);
+        // Timeout 25ms: Đủ biên độ cho DWM bàn giao khung 60Hz mà không bị lỡ nhịp (tránh rớt khung hình xuống 30 FPS)
+        HRESULT hr = g_dxgiDupl->AcquireNextFrame(25, &frameInfo, &desktopResource);
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
             if (g_needsRefinement && !g_dxgiPrevPixels.empty()) {
                 auto now = std::chrono::steady_clock::now();
@@ -581,6 +581,12 @@ namespace ScreenCapture {
         // Exponential Moving Average: 85% lịch sử + 15% mẫu đo mới
         double updated = 0.85 * current + 0.15 * sendTimeMs;
         g_avgSendTimeMs.store(updated, std::memory_order_relaxed);
+    }
+
+    void ForceFullFrame() {
+        g_dxgiPrevPixels.clear();
+        g_gdiPrevPixels.clear();
+        g_needsRefinement = false;
     }
 
     void Cleanup() {

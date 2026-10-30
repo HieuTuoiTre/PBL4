@@ -32,6 +32,7 @@ namespace {
     // ==========================================
     void TransmitVideoLoop() {
         if (!ScreenCapture::Initialize()) return;
+        ScreenCapture::ForceFullFrame(); // Đảm bảo frame đầu tiên gửi cho Manager luôn là 100% full screen
         
         std::vector<char> frameBuffer;
         frameBuffer.reserve(512 * 1024); // Cấp phát sẵn 512KB tránh cấp phát lại
@@ -79,9 +80,8 @@ namespace {
                     std::this_thread::yield();
                 }
             } else {
-                if (now - nextFrameTime > FRAME_TARGET_TIME * 2) {
-                    nextFrameTime = now;
-                }
+                // Đã quá thời hạn chu kỳ khung hình hiện tại: Căn chỉnh ngay nextFrameTime theo now để chống drift
+                nextFrameTime = now;
             }
         }
         ScreenCapture::Cleanup();

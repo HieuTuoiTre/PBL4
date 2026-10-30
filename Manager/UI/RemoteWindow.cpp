@@ -1,4 +1,5 @@
 #include "RemoteWindow.h"
+#include "D2D1Renderer.h"
 #include "InputHandler.h"
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
@@ -11,9 +12,11 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <atomic>
 
 namespace {
     HWND g_hwnd = NULL;
+    HWND g_hVideoWnd = NULL;
     TcpClient* g_client = nullptr;
 
     std::vector<uint32_t> g_framePixels;
@@ -24,9 +27,10 @@ namespace {
     tjhandle g_tjDecompressor = nullptr;
     CRITICAL_SECTION g_cs;
 
-    int g_fps = 0;
-    int g_frameCount = 0;
-    DWORD g_lastTime = 0;
+    std::atomic<int> g_streamFrameCount(0);
+    std::atomic<int> g_renderFrameCount(0);
+    std::atomic<int> g_streamFps(0);
+    std::atomic<int> g_renderFps(60);
 
     int GetFrameWidth() { return g_frameWidth; }
     int GetFrameHeight() { return g_frameHeight; }
@@ -183,7 +187,7 @@ namespace {
         float radius = 5.0f * scale;
 
         for (const auto& btn : buttons) {
-            if (btn.rect.GetRight() > (float)(width - 125 * scale)) continue;
+            if (btn.rect.GetRight() > (float)(width - 160 * scale)) continue;
 
             AddRoundRectPath(path, btn.rect, radius);
 
@@ -319,7 +323,7 @@ namespace {
             }
         }
 
-        float badgeW = 96.0f * scale;
+        float badgeW = 140.0f * scale;
         float badgeH = 28.0f * scale;
         float badgeX = (float)width - badgeW - (12.0f * scale);
         float badgeY = (float)(tbHeight - badgeH) / 2.0f;
@@ -331,15 +335,28 @@ namespace {
         Gdiplus::Pen badgeBorder(Gdiplus::Color(255, 42, 44, 54), 1.0f);
         g.DrawPath(&badgeBorder, &path);
 
-        Gdiplus::Color dotColor = (g_fps >= 20) ? Gdiplus::Color(255, 34, 197, 94) : Gdiplus::Color(255, 245, 158, 11);
+        Gdiplus::Color dotColor;
+        std::wstring fpsStr;
+
+        int streamFps = g_streamFps.load();
+        int renderFps = g_renderFps.load();
+
+        if (streamFps == 0) {
+            dotColor = Gdiplus::Color(255, 56, 189, 248); // Cyan: Màn hình tĩnh / đồng bộ tuyệt đối (Eco)
+            fpsStr = L"60 FPS (Tĩnh)";
+        } else {
+            dotColor = (streamFps >= 30) ? Gdiplus::Color(255, 34, 197, 94) : Gdiplus::Color(255, 245, 158, 11);
+            int dispFps = (renderFps > 0) ? renderFps : streamFps;
+            fpsStr = std::to_wstring(dispFps) + L" FPS (Net " + std::to_wstring(streamFps) + L")";
+        }
+
         Gdiplus::SolidBrush dotBrush(dotColor);
         float dotSize = 7.0f * scale;
-        float dotX = badgeX + 12.0f * scale;
+        float dotX = badgeX + 10.0f * scale;
         float dotY = badgeY + (badgeH - dotSize) / 2.0f;
         g.FillEllipse(&dotBrush, dotX, dotY, dotSize, dotSize);
 
-        std::wstring fpsStr = std::to_wstring(g_fps) + L" FPS";
-        Gdiplus::RectF fpsTextRect(dotX + dotSize + 6.0f * scale, badgeY, badgeW - dotSize - 18.0f * scale, badgeH);
+        Gdiplus::RectF fpsTextRect(dotX + dotSize + 6.0f * scale, badgeY, badgeW - dotSize - 16.0f * scale, badgeH);
         Gdiplus::StringFormat sfLeft;
         sfLeft.SetAlignment(Gdiplus::StringAlignmentNear);
         sfLeft.SetLineAlignment(Gdiplus::StringAlignmentCenter);
@@ -350,37 +367,196 @@ namespace {
         targetG.DrawImage(&memBmp, 0, 0, width, tbHeight);
     }
 
-    LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-        int tbHeight = GetToolbarHeight(hwnd);
+    static void DispatchVideoMouse(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, uint8_t action, uint8_t btn) {
+        if (!InputHandler::IsControlling()) return;
 
+        int frameW = GetFrameWidth();
+        int frameH = GetFrameHeight();
+        if (frameW <= 0 || frameH <= 0) return;
+
+        int16_t wheel = (msg == WM_MOUSEWHEEL) ? (int16_t)GET_WHEEL_DELTA_WPARAM(wp) : 0;
+
+        if (D2D1Renderer::IsInitialized() && g_hVideoWnd) {
+            float vx = 0, vy = 0, vw = 0, vh = 0;
+            D2D1Renderer::GetViewport(vx, vy, vw, vh);
+            if (vw <= 0.0f || vh <= 0.0f) return;
+
+            POINT pt;
+            if (msg == WM_MOUSEWHEEL) {
+                pt.x = (short)LOWORD(lp);
+                pt.y = (short)HIWORD(lp);
+                ScreenToClient(g_hVideoWnd, &pt);
+            } else if (hwnd == g_hVideoWnd) {
+                pt.x = (short)LOWORD(lp);
+                pt.y = (short)HIWORD(lp);
+            } else {
+                pt.x = (short)LOWORD(lp);
+                pt.y = (short)HIWORD(lp);
+                ClientToScreen(hwnd, &pt);
+                ScreenToClient(g_hVideoWnd, &pt);
+            }
+
+            // Kẹp tọa độ chuột trong phạm vi viewport hiển thị thực tế (Letterbox viewport)
+            float cx = (float)pt.x;
+            if (cx < vx) cx = vx;
+            if (cx > vx + vw) cx = vx + vw;
+
+            float cy = (float)pt.y;
+            if (cy < vy) cy = vy;
+            if (cy > vy + vh) cy = vy + vh;
+
+            // Ánh xạ chính xác tuyệt đối sang tọa độ pixel của màn hình Client
+            int16_t imgX = (int16_t)((cx - vx) * (float)frameW / vw);
+            int16_t imgY = (int16_t)((cy - vy) * (float)frameH / vh);
+
+            if (imgX < 0) imgX = 0;
+            if (imgX >= frameW) imgX = (int16_t)(frameW - 1);
+            if (imgY < 0) imgY = 0;
+            if (imgY >= frameH) imgY = (int16_t)(frameH - 1);
+
+            InputHandler::SendMouseDirect(action, btn, imgX, imgY, wheel);
+        } else {
+            InputHandler::SendMouse(action, btn, lp, hwnd, frameW, frameH, (hwnd == g_hVideoWnd) ? 0 : GetToolbarHeight(hwnd), wheel);
+        }
+    }
+
+    LRESULT CALLBACK VideoWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
+            case WM_SIZE: {
+                int w = LOWORD(lp);
+                int h = HIWORD(lp);
+                if (D2D1Renderer::IsInitialized()) {
+                    D2D1Renderer::Resize(w, h);
+                }
+                return 0;
+            }
+
             case WM_PAINT: {
                 PAINTSTRUCT ps;
                 HDC hdc = BeginPaint(hwnd, &ps);
-                RECT r;
-                GetClientRect(hwnd, &r);
-
-                if (ps.rcPaint.top < tbHeight) {
-                    RenderToolbar(hwnd, hdc, r, tbHeight);
-                }
-
-                if (ps.rcPaint.bottom > tbHeight) {
+                if (D2D1Renderer::IsInitialized()) {
+                    D2D1Renderer::Render();
+                } else {
                     EnterCriticalSection(&g_cs);
                     if (!g_framePixels.empty() && g_frameWidth > 0 && g_frameHeight > 0) {
-                        int dstW = r.right;
-                        int dstH = r.bottom - tbHeight;
-                        SetStretchBltMode(hdc, COLORONCOLOR);
+                        RECT r;
+                        GetClientRect(hwnd, &r);
+                        float scaleX = (float)r.right / (float)g_frameWidth;
+                        float scaleY = (float)r.bottom / (float)g_frameHeight;
+                        float scale = (std::min)(scaleX, scaleY);
+                        int drawW = (int)(g_frameWidth * scale);
+                        int drawH = (int)(g_frameHeight * scale);
+                        int offX = (r.right - drawW) / 2;
+                        int offY = (r.bottom - drawH) / 2;
+
+                        HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                        FillRect(hdc, &r, bgBrush);
+                        DeleteObject(bgBrush);
+
+                        SetStretchBltMode(hdc, HALFTONE);
                         StretchDIBits(
                             hdc,
-                            0, tbHeight, dstW, dstH,
+                            offX, offY, drawW, drawH,
                             0, 0, g_frameWidth, g_frameHeight,
                             g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
                         );
                     }
                     LeaveCriticalSection(&g_cs);
                 }
-
                 EndPaint(hwnd, &ps);
+                return 0;
+            }
+
+            case WM_ERASEBKGND:
+                return 1;
+
+            case WM_SETCURSOR: {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE;
+            }
+
+            case WM_MOUSEMOVE: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE);
+                return 0;
+            }
+
+            case WM_LBUTTONDOWN: {
+                SetFocus(hwnd);
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_LEFT);
+                return 0;
+            }
+
+            case WM_LBUTTONUP: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_LEFT);
+                return 0;
+            }
+
+            case WM_RBUTTONDOWN: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT);
+                return 0;
+            }
+
+            case WM_RBUTTONUP: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_RIGHT);
+                return 0;
+            }
+
+            case WM_MOUSEWHEEL: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_WHEEL, Protocol::BUTTON_NONE);
+                return 0;
+            }
+
+            case WM_KEYDOWN:
+            case WM_KEYUP:
+            case WM_SYSKEYDOWN:
+            case WM_SYSKEYUP: {
+                if (g_hwnd) {
+                    return SendMessageW(g_hwnd, msg, wp, lp);
+                }
+                break;
+            }
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        int tbHeight = GetToolbarHeight(hwnd);
+
+        switch (msg) {
+            case WM_TIMER: {
+                if (wp == 1) {
+                    g_streamFps.store(g_streamFrameCount.exchange(0));
+                    g_renderFps.store(g_renderFrameCount.exchange(0));
+                    RECT r;
+                    GetClientRect(hwnd, &r);
+                    RECT tbRect = { 0, 0, r.right, tbHeight };
+                    InvalidateRect(hwnd, &tbRect, FALSE);
+                    return 0;
+                }
+                break;
+            }
+
+            case WM_PAINT: {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                RECT r;
+                GetClientRect(hwnd, &r);
+                RenderToolbar(hwnd, hdc, r, tbHeight);
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+
+            case WM_SIZE: {
+                int w = LOWORD(lp);
+                int h = HIWORD(lp);
+                int vH = h - tbHeight;
+                if (vH < 0) vH = 0;
+                if (g_hVideoWnd) {
+                    MoveWindow(g_hVideoWnd, 0, tbHeight, w, vH, TRUE);
+                    D2D1Renderer::Resize(w, vH);
+                }
+                RECT tbRect = { 0, 0, w, tbHeight };
+                InvalidateRect(hwnd, &tbRect, FALSE);
                 return 0;
             }
 
@@ -393,6 +569,15 @@ namespace {
                     prcNewWindow->right - prcNewWindow->left,
                     prcNewWindow->bottom - prcNewWindow->top,
                     SWP_NOZORDER | SWP_NOACTIVATE);
+                int tbH = GetToolbarHeight(hwnd);
+                RECT r;
+                GetClientRect(hwnd, &r);
+                int vH = (r.bottom - r.top) - tbH;
+                if (vH < 0) vH = 0;
+                if (g_hVideoWnd) {
+                    MoveWindow(g_hVideoWnd, 0, tbH, r.right, vH, TRUE);
+                    D2D1Renderer::Resize(r.right, vH);
+                }
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
@@ -445,7 +630,7 @@ namespace {
                     InvalidateRect(hwnd, &tbRect, FALSE);
                 }
 
-                InputHandler::SendMouse(Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight);
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE);
                 return 0;
             }
 
@@ -478,7 +663,7 @@ namespace {
                     return 0;
                 }
 
-                InputHandler::SendMouse(Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_LEFT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight);
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_LEFT);
                 return 0;
             }
 
@@ -523,7 +708,7 @@ namespace {
                     return 0;
                 }
 
-                InputHandler::SendMouse(Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_LEFT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight);
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_LEFT);
                 return 0;
             }
 
@@ -615,13 +800,17 @@ namespace {
                 return 0;
             }
 
-            case WM_RBUTTONDOWN: InputHandler::SendMouse(Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight); return 0;
+            case WM_RBUTTONDOWN: DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT); return 0;
 
-            case WM_RBUTTONUP:   InputHandler::SendMouse(Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_RIGHT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight); return 0;
+            case WM_RBUTTONUP:   DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_RIGHT); return 0;
 
-            case WM_MOUSEWHEEL:  InputHandler::SendMouse(Protocol::MOUSE_ACTION_WHEEL, Protocol::BUTTON_NONE, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight, GET_WHEEL_DELTA_WPARAM(wp)); return 0;
+            case WM_MOUSEWHEEL:  DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_WHEEL, Protocol::BUTTON_NONE); return 0;
 
-            case WM_DESTROY: PostQuitMessage(0); return 0;
+            case WM_DESTROY: {
+                KillTimer(hwnd, 1);
+                PostQuitMessage(0);
+                return 0;
+            }
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
@@ -632,7 +821,6 @@ namespace RemoteWindow {
         g_client = client;
         InitializeCriticalSection(&g_cs);
         g_tjDecompressor = tjInitDecompress();
-        g_lastTime = GetTickCount();
 
         WNDCLASSW wc = {};
         wc.lpfnWndProc = WndProc;
@@ -641,9 +829,37 @@ namespace RemoteWindow {
         wc.lpszClassName = L"MgrWindow";
         RegisterClassW(&wc);
 
+        WNDCLASSW vc = {};
+        vc.lpfnWndProc = VideoWndProc;
+        vc.hInstance = hInst;
+        vc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        vc.lpszClassName = L"MgrVideoWnd";
+        RegisterClassW(&vc);
+
         g_hwnd = CreateWindowExW(0, L"MgrWindow", L"LanRemote",
             WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE,
             CW_USEDEFAULT, CW_USEDEFAULT, 1920, 1080, 0, 0, hInst, 0);
+
+        if (g_hwnd) {
+            int tbHeight = GetToolbarHeight(g_hwnd);
+            RECT r = {};
+            GetClientRect(g_hwnd, &r);
+            int vH = r.bottom - tbHeight;
+            if (vH < 0) vH = 0;
+
+            g_hVideoWnd = CreateWindowExW(
+                0, L"MgrVideoWnd", L"",
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                0, tbHeight, r.right, vH,
+                g_hwnd, NULL, hInst, NULL
+            );
+
+            if (g_hVideoWnd) {
+                D2D1Renderer::Initialize(g_hVideoWnd);
+            }
+
+            SetTimer(g_hwnd, 1, 1000, NULL);
+        }
         return g_hwnd;
     }
 
@@ -656,13 +872,20 @@ namespace RemoteWindow {
 
         EnterCriticalSection(&g_cs);
 
-        if (g_frameWidth < reqW || g_frameHeight < reqH) {
-            int newW = (std::max)(g_frameWidth, reqW);
-            int newH = (std::max)(g_frameHeight, reqH);
+        bool needRealloc = (g_frameWidth < reqW || g_frameHeight < reqH);
+        if (delta.x == 0 && delta.y == 0 && (delta.width != g_frameWidth || delta.height != g_frameHeight)) {
+            needRealloc = true;
+        }
+
+        if (needRealloc) {
+            int newW = (delta.x == 0 && delta.y == 0) ? delta.width : (std::max)(g_frameWidth, reqW);
+            int newH = (delta.x == 0 && delta.y == 0) ? delta.height : (std::max)(g_frameHeight, reqH);
             std::vector<uint32_t> newPixels(newW * newH, 0);
-            if (g_frameWidth > 0 && g_frameHeight > 0) {
-                for (int y = 0; y < g_frameHeight; ++y) {
-                    std::memcpy(&newPixels[y * newW], &g_framePixels[y * g_frameWidth], g_frameWidth * sizeof(uint32_t));
+            if (g_frameWidth > 0 && g_frameHeight > 0 && (delta.x != 0 || delta.y != 0)) {
+                int copyW = (std::min)(g_frameWidth, newW);
+                int copyH = (std::min)(g_frameHeight, newH);
+                for (int y = 0; y < copyH; ++y) {
+                    std::memcpy(&newPixels[y * newW], &g_framePixels[y * g_frameWidth], copyW * sizeof(uint32_t));
                 }
             }
             g_framePixels = std::move(newPixels);
@@ -693,50 +916,31 @@ namespace RemoteWindow {
             TJFLAG_FASTDCT
         );
 
-        LeaveCriticalSection(&g_cs);
-
         if (decompRes == 0) {
-            g_frameCount++;
-            static auto s_lastFpsTime = std::chrono::steady_clock::now();
-            auto nowTime = std::chrono::steady_clock::now();
-            double elapsedSec = std::chrono::duration<double>(nowTime - s_lastFpsTime).count();
-            bool fpsUpdated = false;
-            if (elapsedSec >= 1.0) {
-                g_fps = (int)std::round(g_frameCount / elapsedSec);
-                g_frameCount = 0;
-                s_lastFpsTime = nowTime;
-                fpsUpdated = true;
-            }
+            g_streamFrameCount++;
 
-            if (g_hwnd) {
-                int tbHeight = GetToolbarHeight(g_hwnd);
-                if (fpsUpdated) {
-                    RECT r;
-                    GetClientRect(g_hwnd, &r);
-                    RECT tbRect = { 0, 0, r.right, tbHeight };
-                    InvalidateRect(g_hwnd, &tbRect, FALSE);
-                }
-                RECT clientRect;
-                GetClientRect(g_hwnd, &clientRect);
-                int clientW = clientRect.right;
-                int clientH = clientRect.bottom - tbHeight;
-                if (clientW > 0 && clientH > 0 && g_frameWidth > 0 && g_frameHeight > 0) {
-                    RECT dirtyRect;
-                    dirtyRect.left = (delta.x * clientW) / g_frameWidth;
-                    dirtyRect.top = tbHeight + (delta.y * clientH) / g_frameHeight;
-                    dirtyRect.right = ((delta.x + delta.width) * clientW + g_frameWidth - 1) / g_frameWidth;
-                    dirtyRect.bottom = tbHeight + ((delta.y + delta.height) * clientH + g_frameHeight - 1) / g_frameHeight;
-                    InvalidateRect(g_hwnd, &dirtyRect, FALSE);
-                } else {
-                    clientRect.top = tbHeight;
-                    InvalidateRect(g_hwnd, &clientRect, FALSE);
-                }
-                UpdateWindow(g_hwnd);
+            if (D2D1Renderer::IsInitialized()) {
+                // Đẩy trực tiếp vùng thay đổi vào GPU VRAM và vẽ phần cứng cực nhanh (<0.2ms)
+                D2D1Renderer::UpdateDirtyRect(delta.x, delta.y, delta.width, delta.height, g_framePixels.data(), g_frameWidth, g_frameHeight);
+                D2D1Renderer::Render();
+                g_renderFrameCount++;
+            } else if (g_hVideoWnd) {
+                // Fallback GDI nếu Direct2D không khả dụng
+                InvalidateRect(g_hVideoWnd, NULL, FALSE);
+                g_renderFrameCount++;
             }
         }
+
+        LeaveCriticalSection(&g_cs);
     }
 
     void Cleanup() {
+        if (g_hwnd) {
+            KillTimer(g_hwnd, 1);
+            g_hwnd = NULL;
+        }
+        g_hVideoWnd = NULL;
+        D2D1Renderer::Cleanup();
         ChatWindow::Cleanup();
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();

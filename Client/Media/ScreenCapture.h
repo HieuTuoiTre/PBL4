@@ -16,4 +16,7 @@ namespace ScreenCapture {
 
     // 4. Báo cáo thời gian gửi qua socket để tự động đo tốc độ mạng thời gian thực
     void ReportSendTime(double sendTimeMs);
+
+    // 5. Yêu cầu gửi toàn bộ màn hình (Full-Frame) ở khung kế tiếp (khi Manager mới kết nối)
+    void ForceFullFrame();
 }
