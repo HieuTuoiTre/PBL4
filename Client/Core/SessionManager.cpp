@@ -9,6 +9,7 @@
 #include "StatusOverlay.h"
 #include "ConnectionAlert.h"
 #include "DiscoveryResponder.h"
+#include "ClientChatWindow.h"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -198,6 +199,23 @@ namespace {
                     }
                     break;
                 }
+
+                case Protocol::MSG_CHAT_MESSAGE: {
+                    if (header.size == sizeof(Protocol::ChatMessagePayload)) {
+                        Protocol::ChatMessagePayload chat;
+                        if (g_controlServer.ReceiveExact((char*)&chat, sizeof(chat))) {
+                            chat.sender[sizeof(chat.sender) - 1] = '\0';
+                            chat.message[sizeof(chat.message) - 1] = '\0';
+                            ClientChatWindow::OnMessageReceived(chat);
+                        } else {
+                            g_isConnected = false;
+                        }
+                    } else if (header.size > 0) {
+                        std::vector<char> dump(header.size);
+                        g_controlServer.ReceiveExact(dump.data(), header.size);
+                    }
+                    break;
+                }
                 
                 default: {
                     if (header.size > 0) {
@@ -262,6 +280,9 @@ namespace SessionManager {
             g_overlay.SetVisible(true);
             g_overlay.SetState(OverlayState::ConnectedViewing);
 
+            // 3. Khởi tạo cửa sổ chat cho máy khách
+            ClientChatWindow::Initialize(&g_controlServer);
+
             // Bắt đầu thu âm và gửi trực tiếp qua cổng Audio (8082)
             AudioCapture::Start([](const char* buffer, int size) {
                 if (g_isConnected) {
@@ -286,8 +307,9 @@ namespace SessionManager {
             // Mất kết nối hoặc app dừng: Dọn dẹp phiên hiện tại
             g_isConnected = false;
             DiscoveryResponder::SetBusy(false);
-        InputInjector::ReleaseAllModifiers();
+            InputInjector::ReleaseAllModifiers();
             AudioCapture::Stop();
+            ClientChatWindow::Close();
             g_controlServer.CloseClient();
             g_videoServer.CloseClient();
             g_audioServer.CloseClient();
@@ -304,6 +326,7 @@ namespace SessionManager {
         g_videoServer.Close();
         g_audioServer.Close();
         g_overlay.Destroy();
+        ClientChatWindow::Close();
     }
 
     void Stop() {
@@ -312,6 +335,7 @@ namespace SessionManager {
         DiscoveryResponder::SetBusy(false);
         InputInjector::ReleaseAllModifiers();
         AudioCapture::Stop();
+        ClientChatWindow::Close();
         g_controlServer.Close();
         g_videoServer.Close();
         g_audioServer.Close();

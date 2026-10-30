@@ -48,7 +48,10 @@ namespace Protocol
         MSG_FILE_DOWNLOAD_REQ,
         MSG_FILE_INFO,        //name, size of file
         MSG_FILE_CHUNK,
-        MSG_FILE_END
+        MSG_FILE_END,
+
+        //in-session chat
+        MSG_CHAT_MESSAGE
     };
 
     enum MouseEventType : uint8_t {
@@ -116,6 +119,12 @@ namespace Protocol
         int32_t y;
         int32_t width;
         int32_t height;
+    };
+
+    struct ChatMessagePayload {
+        char sender[32];      // "Quản lý" (Manager) hoặc "Máy khách" (Client)
+        char message[1024];   // Nội dung tin nhắn UTF-8
+        uint64_t timestamp;   // Thời gian gửi (Unix ms hoặc tick)
     };
     
     #pragma pack(pop)

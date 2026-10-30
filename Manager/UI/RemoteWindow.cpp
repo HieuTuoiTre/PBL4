@@ -2,6 +2,7 @@
 #include "InputHandler.h"
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
+#include "ChatWindow.h"
 #include "../Media/AudioPlayer.h"
 #include <gdiplus.h>
 #include <turbojpeg.h>
@@ -58,7 +59,8 @@ namespace {
         BTN_VOL_DOWN,
         BTN_VOL_UP,
         BTN_TASK_MGR,
-        BTN_FILE_EXP
+        BTN_FILE_EXP,
+        BTN_CHAT
     };
 
     struct ToolbarButton {
@@ -126,6 +128,14 @@ namespace {
         float btnFileW = (float)std::round(124.0f * scale);
         buttons.push_back({ BTN_FILE_EXP, Gdiplus::RectF(curX, btnY, btnFileW, btnHeight), L"File Explorer", L"Ctrl+E", false });
         curX += btnFileW + gap;
+
+        int unread = ChatWindow::GetUnreadCount();
+        std::wstring chatText = (unread > 0) ? (L"Trò chuyện (" + std::to_wstring(unread) + L")") : L"Trò chuyện";
+        std::wstring chatHint = L"Ctrl+T";
+        float btnChatW = (float)std::round((unread > 0 ? 128.0f : 106.0f) * scale);
+        bool isChatActive = (unread > 0 || ChatWindow::IsOpen());
+        buttons.push_back({ BTN_CHAT, Gdiplus::RectF(curX, btnY, btnChatW, btnHeight), chatText, chatHint, isChatActive });
+        curX += btnChatW + gap;
 
         return buttons;
     }
@@ -205,6 +215,10 @@ namespace {
                 fillColor = isPressed ? Gdiplus::Color(255, 60, 20, 20) : (isHovered ? Gdiplus::Color(255, 80, 28, 28) : Gdiplus::Color(255, 68, 24, 24));
                 borderColor = Gdiplus::Color(255, 239, 68, 68);
                 textColor = Gdiplus::Color(255, 252, 165, 165);
+            } else if (btn.id == BTN_CHAT && btn.isSpecial) {
+                fillColor = isPressed ? Gdiplus::Color(255, 30, 58, 138) : (isHovered ? Gdiplus::Color(255, 37, 99, 235) : Gdiplus::Color(255, 29, 78, 216));
+                borderColor = Gdiplus::Color(255, 96, 165, 250);
+                textColor = Gdiplus::Color(255, 255, 255, 255);
             } else {
                 fillColor = isPressed ? Gdiplus::Color(255, 28, 30, 36) : (isHovered ? Gdiplus::Color(255, 52, 55, 66) : Gdiplus::Color(255, 38, 40, 48));
                 borderColor = isHovered ? Gdiplus::Color(255, 85, 90, 108) : Gdiplus::Color(255, 58, 61, 74);
@@ -276,6 +290,26 @@ namespace {
                 Gdiplus::SolidBrush folderBrush(textColor);
                 g.FillRectangle(&folderBrush, iconX, iconY, 5.0f * scale, 3.0f * scale);
                 g.FillRectangle(&folderBrush, iconX, iconY + 2.0f * scale, 12.0f * scale, 8.0f * scale);
+                Gdiplus::RectF textRect = btn.rect;
+                textRect.X += (iconW + 4.0f * scale);
+                textRect.Width -= (iconW + 4.0f * scale);
+                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
+            } else if (btn.id == BTN_CHAT) {
+                float iconW = 12.0f * scale;
+                float iconX = btn.rect.X + 10.0f * scale;
+                float iconY = btn.rect.Y + (btn.rect.Height - 10.0f * scale) / 2.0f;
+                Gdiplus::SolidBrush chatBrush(textColor);
+                Gdiplus::RectF bubbleRect(iconX, iconY, 11.0f * scale, 7.5f * scale);
+                Gdiplus::GraphicsPath bubblePath;
+                AddRoundRectPath(bubblePath, bubbleRect, 2.0f * scale);
+                g.FillPath(&chatBrush, &bubblePath);
+                Gdiplus::PointF tailPts[3] = {
+                    Gdiplus::PointF(iconX + 2.0f * scale, iconY + 6.0f * scale),
+                    Gdiplus::PointF(iconX - 0.5f * scale, iconY + 10.0f * scale),
+                    Gdiplus::PointF(iconX + 5.5f * scale, iconY + 6.0f * scale)
+                };
+                g.FillPolygon(&chatBrush, tailPts, 3);
+
                 Gdiplus::RectF textRect = btn.rect;
                 textRect.X += (iconW + 4.0f * scale);
                 textRect.Width -= (iconW + 4.0f * scale);
@@ -476,6 +510,9 @@ namespace {
                             case BTN_FILE_EXP:
                                 FileExplorerWindow::Show(hwnd, g_client);
                                 break;
+                            case BTN_CHAT:
+                                ChatWindow::Toggle(hwnd, g_client);
+                                break;
                             default:
                                 break;
                         }
@@ -509,6 +546,14 @@ namespace {
 
                 if (wp == 'E' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
                     FileExplorerWindow::Show(hwnd, g_client);
+                    return 0;
+                }
+
+                if (wp == 'T' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                    ChatWindow::Toggle(hwnd, g_client);
+                    RECT r; GetClientRect(hwnd, &r);
+                    RECT toolbarRect = {0, 0, r.right, tbHeight};
+                    InvalidateRect(hwnd, &toolbarRect, FALSE);
                     return 0;
                 }
 
@@ -692,6 +737,7 @@ namespace RemoteWindow {
     }
 
     void Cleanup() {
+        ChatWindow::Cleanup();
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();
         g_frameWidth = 0;
