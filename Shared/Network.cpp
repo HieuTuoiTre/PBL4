@@ -1,6 +1,42 @@
 #include "Network.h"
 #include "Protocol.h"
 #include <iostream>
+#include <mstcpip.h>
+
+namespace {
+    // Hàm tối ưu hóa Socket nâng cao theo đúng thiết kế mục 7.2
+    void ApplySocketOptimizations(SOCKET sock, int port) {
+        if (sock == INVALID_SOCKET) return;
+
+        // 1. Vô hiệu hóa thuật toán Nagle (TCP_NODELAY) để truyền sự kiện tức thời 0ms
+        BOOL nodelay = TRUE;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+
+        // 2. Phân cấp kích thước bộ đệm SO_SNDBUF & SO_RCVBUF theo từng kênh:
+        //    - Kênh Video (8081): 1MB (1024 * 1024) chống nghẽn buffer khi khung hình JPEG lớn ở 60 FPS
+        //    - Kênh Audio (8082): 64KB (64 * 1024) phát tiếng tức thì, tránh trễ tiếng so với hình
+        //    - Kênh Control (8080) & khác: 256KB (256 * 1024) đủ lớn cho file transfer và tối ưu chuột/phím
+        int bufSize = 256 * 1024;
+        if (port == Protocol::PORT_VIDEO) {
+            bufSize = 1024 * 1024;
+        } else if (port == Protocol::PORT_AUDIO) {
+            bufSize = 64 * 1024;
+        }
+        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
+
+        // 3. Giữ kết nối & phát hiện đứt mạng ngầm (SO_KEEPALIVE & SIO_KEEPALIVE_VALS)
+        BOOL keepAlive = TRUE;
+        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepAlive, sizeof(keepAlive));
+
+        tcp_keepalive aliveSettings = {};
+        aliveSettings.onoff = 1;
+        aliveSettings.keepalivetime = 5000;     // 5s không có dữ liệu -> bắt đầu gửi probe
+        aliveSettings.keepaliveinterval = 1000; // Gửi lại mỗi 1s nếu chưa có phản hồi
+        DWORD bytesReturned = 0;
+        WSAIoctl(sock, SIO_KEEPALIVE_VALS, &aliveSettings, sizeof(aliveSettings), NULL, 0, &bytesReturned, NULL, NULL);
+    }
+}
 
 //Network
 bool Network::Initialize(){ 
@@ -21,6 +57,7 @@ TcpServer::~TcpServer() {
 }
 
 bool TcpServer::Start(int port){
+    boundPort = port;
     listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSocket == INVALID_SOCKET){
         return false;
@@ -68,11 +105,9 @@ bool TcpServer::AcceptConnection(int timeoutMs){
     if (clientSocket == INVALID_SOCKET){
         return false;
     }
-    BOOL nodelay = TRUE;
-    setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
-    int bufSize = 512 * 1024; // 512KB socket buffer giúp đẩy FPS tối đa
-    setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
-    setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
+
+    // Áp dụng bộ cấu hình tối ưu socket chuyên biệt theo từng kênh
+    ApplySocketOptimizations(clientSocket, boundPort);
     return true;
 }
 
@@ -87,6 +122,7 @@ void TcpServer::Close(){
         closesocket(listenSocket);
         listenSocket = INVALID_SOCKET;
     }
+    boundPort = 0;
 }
 
 void TcpServer::CloseClient(){
@@ -165,6 +201,7 @@ TcpClient::~TcpClient(){
 }
 
 bool TcpClient::Connect(const std::string& ip, int port){
+    connectedPort = port;
     connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
     if (connectSocket == INVALID_SOCKET){
@@ -216,11 +253,8 @@ bool TcpClient::Connect(const std::string& ip, int port){
     u_long blocking = 0;
     ioctlsocket(connectSocket, FIONBIO, &blocking);
 
-    BOOL nodelay = TRUE;
-    setsockopt(connectSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
-    int bufSize = 512 * 1024; // 512KB socket buffer giúp nhận gói video tức thì
-    setsockopt(connectSocket, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
-    setsockopt(connectSocket, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
+    // Áp dụng bộ cấu hình tối ưu socket chuyên biệt theo từng kênh
+    ApplySocketOptimizations(connectSocket, port);
 
     return true;
 }
@@ -231,6 +265,7 @@ void TcpClient::Close(){
         closesocket(connectSocket);
         connectSocket = INVALID_SOCKET;
     }
+    connectedPort = 0;
 }
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
