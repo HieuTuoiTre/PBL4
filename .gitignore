@@ -22,3 +22,6 @@ Thumbs.db
 
 .vscode/
 Instruction.txt
+
+graphify-out/
+.agents/
