@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {
+      "id": "readme_pbl4",
+      "label": "PBL4 Remote Device Control Project",
+      "file_type": "document",
+      "source_file": "C:\\Users\\hieu8\\OneDrive\\Documents\\Github\\PBL4\\README.md",
+      "source_location": 1,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    }
+  ],
+  "edges": [],
+  "hyperedges": [],
+  "input_tokens": 150,
+  "output_tokens": 80
+}
