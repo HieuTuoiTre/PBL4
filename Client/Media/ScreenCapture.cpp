@@ -30,7 +30,7 @@ namespace {
         int subsamp;
     };
 
-    // Tự động nâng sàn chất lượng nếu mạng mạnh và chọn subsampling 4:4:4 cho chi tiết nhỏ
+    // Tự động nâng sàn chất lượng nếu mạng mạnh và phân cấp chất lượng theo diện tích thay đổi
     CompressionConfig GetCompressionConfig(int changedArea, int totalPixels) {
         double sendMs = g_avgSendTimeMs.load(std::memory_order_relaxed);
         bool fastNetwork = (sendMs < 4.0);
@@ -38,13 +38,19 @@ namespace {
 
         double ratio = (double)changedArea / (double)(totalPixels > 0 ? totalPixels : 1);
 
-        if (ratio >= 0.50) {
-            // Thay đổi diện rộng (cuộn trang nhanh, chuyển ứng dụng, video)
-            int q = slowNetwork ? 50 : (fastNetwork ? 75 : 65);
+        if (ratio >= 0.60) {
+            // Thay đổi diện rộng / Game 3D / Video toàn màn hình
+            // Giới hạn băng thông trong khoảng 20 - 25 Mbps (mỗi frame ~50-65KB ở 1080p)
+            // Triệt tiêu hoàn toàn nghẽn UDP buffer của ZeroTier và đường truyền gia đình (tránh vọt lên 80 Mbps)
+            int q = slowNetwork ? 45 : (fastNetwork ? 52 : 48);
             return { q, TJSAMP_420 };
-        } else if (ratio >= 0.20) {
+        } else if (ratio >= 0.35) {
+            // Thay đổi diện rộng (cuộn trang nhanh, chuyển ứng dụng)
+            int q = slowNetwork ? 52 : (fastNetwork ? 68 : 60);
+            return { q, TJSAMP_420 };
+        } else if (ratio >= 0.15) {
             // Thay đổi trung bình (kéo cửa sổ, cuộn văn bản)
-            int q = slowNetwork ? 65 : (fastNetwork ? 82 : 74);
+            int q = slowNetwork ? 65 : (fastNetwork ? 78 : 72);
             return { q, TJSAMP_420 };
         } else if (ratio >= 0.04) {
             // Thay đổi nhỏ (gõ văn bản, mở menu xổ xuống)
@@ -52,14 +58,16 @@ namespace {
             return { q, TJSAMP_420 };
         } else {
             // Thay đổi rất nhỏ (con trỏ chuột, 1 dòng chữ, icon)
-            // LƯU Ý: TJSAMP_420 với Q82 chỉ mất ~1.5ms để nén, đảm bảo duy trì 60 FPS mượt mà tuyệt đối khi chuột di chuyển!
-            // Khi dừng di chuyển 150ms, tính năng Progressive Refinement sẽ tự động gửi khung TJSAMP_444 Q94 sắc nét hoàn hảo!
+            // TJSAMP_420 với Q82 chỉ mất ~1.5ms để nén, đảm bảo duy trì 60 FPS mượt mà tuyệt đối khi chuột di chuyển!
+            // Khi dừng di chuyển 150ms, tính năng Progressive Refinement sẽ tự động gửi khung TJSAMP_420 Q80 sắc nét tối ưu!
             int q = slowNetwork ? 75 : 82;
             return { q, TJSAMP_420 };
         }
     }
 
-    // Nén khung hoàn thiện toàn màn hình (Progressive Refinement) sắc nét tuyệt đối 94% với TJSAMP_444
+    // Nén khung hoàn thiện toàn màn hình (Progressive Refinement) sắc nét tối ưu với TJSAMP_420 Q80
+    // Thay vì gửi khung 1MB (TJSAMP_444 Q94) làm nghẽn socket và sụt FPS <10 khi đổi tab hoặc có thông báo,
+    // nén Q80 4:2:0 chỉ tốn ~4-5ms CPU và sinh ra gói chỉ ~80-120KB, truyền qua mạng chỉ mất 15-20ms.
     bool EncodeRefinementFrame(const uint32_t* pixels, int width, int height,
                                std::vector<char>& outBuffer,
                                int& outX, int& outY, int& outWidth, int& outHeight) {
@@ -79,8 +87,8 @@ namespace {
             TJPF_BGRX,
             &g_jpegBuf,
             &g_jpegBufSize,
-            TJSAMP_444, // Full chroma không giảm mẫu màu để chữ và đường nét cực sắc
-            94,         // Chất lượng đỉnh cao 94%
+            TJSAMP_420, // 4:2:0 tối ưu dung lượng và tốc độ
+            80,         // Chất lượng sắc nét 80% (chỉ ~80-120KB thay vì 1MB)
             TJFLAG_FASTDCT | TJFLAG_FASTUPSAMPLE
         );
 

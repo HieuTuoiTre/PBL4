@@ -26,6 +26,8 @@ namespace {
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
 
         // 3. Giữ kết nối & phát hiện đứt mạng ngầm (SO_KEEPALIVE & SIO_KEEPALIVE_VALS)
+        // TCP Keepalive tự động gửi probe ở tầng giao vận sau 5s không có dữ liệu,
+        // phát hiện đứt mạng ngầm (ZeroTier crash, rớt mạng) mà KHÔNG gây ngắt kết nối giả tạo khi màn hình tĩnh!
         BOOL keepAlive = TRUE;
         setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepAlive, sizeof(keepAlive));
 
@@ -62,6 +64,10 @@ bool TcpServer::Start(int port){
     if (listenSocket == INVALID_SOCKET){
         return false;
     }
+
+    // Cho phép tái sử dụng cổng ngay lập tức (tránh lỗi WSAEADDRINUSE khi khởi động lại Client nhanh)
+    BOOL reuse = TRUE;
+    setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;             //use ipv4
@@ -114,6 +120,7 @@ bool TcpServer::AcceptConnection(int timeoutMs){
 void TcpServer::Close(){
     std::lock_guard<std::mutex> lock(sendMutex);
     if (clientSocket != INVALID_SOCKET){
+        shutdown(clientSocket, SD_BOTH);
         closesocket(clientSocket);
         clientSocket = INVALID_SOCKET;
     }
@@ -129,6 +136,7 @@ void TcpServer::CloseClient(){
     std::lock_guard<std::mutex> lock(sendMutex);
     // Chỉ đóng socket đang giao tiếp với Manager cũ
     if (clientSocket != INVALID_SOCKET){
+        shutdown(clientSocket, SD_BOTH);
         closesocket(clientSocket);
         clientSocket = INVALID_SOCKET;
     }
@@ -262,6 +270,7 @@ bool TcpClient::Connect(const std::string& ip, int port){
 void TcpClient::Close(){
     std::lock_guard<std::mutex> lock(sendMutex);
     if (connectSocket != INVALID_SOCKET){
+        shutdown(connectSocket, SD_BOTH);
         closesocket(connectSocket);
         connectSocket = INVALID_SOCKET;
     }

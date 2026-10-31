@@ -31,6 +31,7 @@ namespace {
     std::atomic<int> g_renderFrameCount(0);
     std::atomic<int> g_streamFps(0);
     std::atomic<int> g_renderFps(60);
+    std::atomic<uint64_t> g_lastFrameTimeMs(0);
 
     int GetFrameWidth() { return g_frameWidth; }
     int GetFrameHeight() { return g_frameHeight; }
@@ -340,13 +341,27 @@ namespace {
 
         int streamFps = g_streamFps.load();
         int renderFps = g_renderFps.load();
+        uint64_t nowMs = GetTickCount64();
+        uint64_t lastFrameMs = g_lastFrameTimeMs.load(std::memory_order_relaxed);
+        uint64_t msSinceLastFrame = (lastFrameMs > 0 && nowMs >= lastFrameMs) ? (nowMs - lastFrameMs) : 0;
 
-        if (streamFps == 0) {
+        // Nhận diện trạng thái màn hình tĩnh thông minh:
+        // Nếu trong 400ms qua không có frame mới (hoặc streamFps == 0), coi là màn hình tĩnh (Eco Mode).
+        // Tránh hiện tượng nhấp nháy đèn cam hoặc báo ảo "2-3 FPS" khi người dùng vừa dừng tay.
+        bool isStaticScreen = (streamFps == 0) || (streamFps <= 6 && msSinceLastFrame >= 350) || (msSinceLastFrame >= 500);
+
+        if (isStaticScreen) {
             dotColor = Gdiplus::Color(255, 56, 189, 248); // Cyan: Màn hình tĩnh / đồng bộ tuyệt đối (Eco)
             fpsStr = L"60 FPS (Tĩnh)";
         } else {
-            dotColor = (streamFps >= 30) ? Gdiplus::Color(255, 34, 197, 94) : Gdiplus::Color(255, 245, 158, 11);
             int dispFps = (renderFps > 0) ? renderFps : streamFps;
+            if (streamFps >= 25) {
+                dotColor = Gdiplus::Color(255, 34, 197, 94); // Xanh lá: Mượt mà 60 FPS
+            } else if (streamFps >= 12) {
+                dotColor = Gdiplus::Color(255, 245, 158, 11); // Vàng cam: Mạng trung bình
+            } else {
+                dotColor = Gdiplus::Color(255, 239, 68, 68); // Đỏ: Nghẽn mạng khi đang chuyển động
+            }
             fpsStr = std::to_wstring(dispFps) + L" FPS (Net " + std::to_wstring(streamFps) + L")";
         }
 
@@ -859,6 +874,7 @@ namespace RemoteWindow {
             }
 
             SetTimer(g_hwnd, 1, 1000, NULL);
+            g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
         }
         return g_hwnd;
     }
@@ -918,6 +934,7 @@ namespace RemoteWindow {
 
         if (decompRes == 0) {
             g_streamFrameCount++;
+            g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
 
             if (D2D1Renderer::IsInitialized()) {
                 // Đẩy trực tiếp vùng thay đổi vào GPU VRAM và vẽ phần cứng cực nhanh (<0.2ms)
