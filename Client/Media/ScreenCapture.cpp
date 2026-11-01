@@ -24,6 +24,7 @@ namespace {
     std::atomic<double> g_avgSendTimeMs(2.0); // Giả định ban đầu mạng rất tốt (<4ms)
     std::atomic<uint8_t> g_qualityPreset(Protocol::QUALITY_AUTO);
     std::atomic<uint8_t> g_targetFps(60);
+    std::atomic<bool> g_forceFullFrame(false);
     bool g_needsRefinement = false;
     std::chrono::steady_clock::time_point g_lastMotionTime = std::chrono::steady_clock::now();
 
@@ -89,6 +90,8 @@ namespace {
         outWidth = width;
         outHeight = height;
 
+        CompressionConfig cfg = GetCompressionConfig(width * height, width * height);
+
         int compressRes = tjCompress2(
             g_tjCompressor,
             (const unsigned char*)pixels,
@@ -98,8 +101,8 @@ namespace {
             TJPF_BGRX,
             &g_jpegBuf,
             &g_jpegBufSize,
-            TJSAMP_420, // 4:2:0 tối ưu dung lượng và tốc độ
-            80,         // Chất lượng sắc nét 80% (chỉ ~80-120KB thay vì 1MB)
+            cfg.subsamp,
+            cfg.quality,
             TJFLAG_FASTDCT | TJFLAG_FASTUPSAMPLE
         );
 
@@ -238,6 +241,46 @@ namespace {
         return true;
     }
 
+        bool GrabGdiInitialSnapshot(std::vector<uint32_t>& outPixels, int width, int height) {
+        if (width <= 0 || height <= 0) return false;
+        HDC hScreenDC = GetDC(NULL);
+        if (!hScreenDC) return false;
+
+        HDC hMemDC = CreateCompatibleDC(hScreenDC);
+        if (!hMemDC) {
+            ReleaseDC(NULL, hScreenDC);
+            return false;
+        }
+
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* dibBits = nullptr;
+        HBITMAP hBmp = CreateDIBSection(hMemDC, &bmi, DIB_RGB_COLORS, &dibBits, NULL, 0);
+        if (!hBmp || !dibBits) {
+            DeleteDC(hMemDC);
+            ReleaseDC(NULL, hScreenDC);
+            return false;
+        }
+
+        HGDIOBJ oldBmp = SelectObject(hMemDC, hBmp);
+        BitBlt(hMemDC, 0, 0, width, height, hScreenDC, 0, 0, SRCCOPY);
+
+        outPixels.resize(width * height);
+        std::memcpy(outPixels.data(), dibBits, width * height * sizeof(uint32_t));
+
+        SelectObject(hMemDC, oldBmp);
+        DeleteObject(hBmp);
+        DeleteDC(hMemDC);
+        ReleaseDC(NULL, hScreenDC);
+        return true;
+    }
+
     bool CaptureDxgiFrame(std::vector<char>& outBuffer, int& outX, int& outY, int& outWidth, int& outHeight) {
         if (!g_dxgiDupl || !g_stagingTexture || !g_tjCompressor) {
             // Thử tái khởi tạo DXGI định kỳ mỗi 500ms nếu trước đó bị mất quyền truy cập (UAC / Lock Screen)
@@ -255,6 +298,20 @@ namespace {
         // Timeout 25ms: Đủ biên độ cho DWM bàn giao khung 60Hz mà không bị lỡ nhịp (tránh rớt khung hình xuống 30 FPS)
         HRESULT hr = g_dxgiDupl->AcquireNextFrame(25, &frameInfo, &desktopResource);
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+            // Khi vừa kết nối hoặc màn hình tĩnh tuyệt đối, chủ động chụp 1 frame ban đầu để Manager không bị trắng màn hình
+            if (g_dxgiPrevPixels.empty()) {
+                g_forceFullFrame.store(false, std::memory_order_relaxed);
+                if (GrabGdiInitialSnapshot(g_dxgiPrevPixels, g_dxgiWidth, g_dxgiHeight)) {
+                    g_needsRefinement = false;
+                    return EncodeRefinementFrame(g_dxgiPrevPixels.data(), g_dxgiWidth, g_dxgiHeight, outBuffer, outX, outY, outWidth, outHeight);
+                }
+            }
+            if (g_forceFullFrame.exchange(false, std::memory_order_acq_rel)) {
+                if (!g_dxgiPrevPixels.empty()) {
+                    g_needsRefinement = false;
+                    return EncodeRefinementFrame(g_dxgiPrevPixels.data(), g_dxgiWidth, g_dxgiHeight, outBuffer, outX, outY, outWidth, outHeight);
+                }
+            }
             if (g_needsRefinement && !g_dxgiPrevPixels.empty()) {
                 auto now = std::chrono::steady_clock::now();
                 auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastMotionTime).count();
@@ -315,7 +372,8 @@ namespace {
         const uint32_t* curPixels = (const uint32_t*)mapped.pData;
         int rowPitchElements = mapped.RowPitch / sizeof(uint32_t);
 
-        if (g_dxgiPrevPixels.size() != (size_t)pixelsCount) {
+        bool forceFull = g_forceFullFrame.exchange(false, std::memory_order_acq_rel);
+        if (forceFull || g_dxgiPrevPixels.size() != (size_t)pixelsCount) {
             g_dxgiPrevPixels.clear();
             g_dxgiPrevPixels.resize(pixelsCount);
             for (int y = 0; y < g_dxgiHeight; ++y) {
@@ -498,7 +556,8 @@ namespace {
         int pixelsCount = g_gdiWidth * g_gdiHeight;
         int minX = g_gdiWidth, minY = g_gdiHeight, maxX = -1, maxY = -1;
 
-        if (g_gdiPrevPixels.empty()) {
+        bool forceFull = g_forceFullFrame.exchange(false, std::memory_order_acq_rel);
+        if (forceFull || g_gdiPrevPixels.empty()) {
             g_gdiPrevPixels.assign(g_dibPixels, g_dibPixels + pixelsCount);
             minX = 0; minY = 0;
             maxX = g_gdiWidth - 1; maxY = g_gdiHeight - 1;
@@ -631,9 +690,7 @@ namespace ScreenCapture {
     }
 
     void ForceFullFrame() {
-        g_dxgiPrevPixels.clear();
-        g_gdiPrevPixels.clear();
-        g_needsRefinement = false;
+        g_forceFullFrame.store(true, std::memory_order_release);
     }
 
     void Cleanup() {

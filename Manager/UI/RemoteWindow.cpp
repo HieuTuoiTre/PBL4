@@ -562,14 +562,19 @@ namespace {
                     }
                     DeleteObject(bgBrush);
 
-                    SetStretchBltMode(hdc, HALFTONE);
-                    SetBrushOrgEx(hdc, 0, 0, NULL);
+                    if (drawW == g_frameWidth && drawH == g_frameHeight) {
+                        SetStretchBltMode(hdc, COLORONCOLOR);
+                    } else {
+                        SetStretchBltMode(hdc, HALFTONE);
+                        SetBrushOrgEx(hdc, 0, 0, NULL);
+                    }
                     StretchDIBits(
                         hdc,
                         offX, offY, drawW, drawH,
                         0, 0, g_frameWidth, g_frameHeight,
                         g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
                     );
+                    g_renderFrameCount++;
                 } else {
                     RECT r;
                     GetClientRect(hwnd, &r);
@@ -790,6 +795,7 @@ namespace {
                 int mouseY = (short)HIWORD(lp);
 
                 if (mouseY < tbHeight) {
+                    SetFocus(hwnd);
                     RECT r;
                     GetClientRect(hwnd, &r);
                     ToolbarButtonId hit = HitTestToolbar(hwnd, mouseX, mouseY, r.right, tbHeight);
@@ -1030,10 +1036,13 @@ namespace RemoteWindow {
         InitializeCriticalSection(&g_cs);
         g_tjDecompressor = tjInitDecompress();
 
+        HBRUSH hDarkBrush = CreateSolidBrush(RGB(18, 19, 23));
+
         WNDCLASSW wc = {};
         wc.lpfnWndProc = WndProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = hDarkBrush;
         wc.lpszClassName = L"MgrWindow";
         RegisterClassW(&wc);
 
@@ -1041,11 +1050,12 @@ namespace RemoteWindow {
         vc.lpfnWndProc = VideoWndProc;
         vc.hInstance = hInst;
         vc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        vc.hbrBackground = hDarkBrush;
         vc.lpszClassName = L"MgrVideoWnd";
         RegisterClassW(&vc);
 
         g_hwnd = CreateWindowExW(0, L"MgrWindow", L"LanRemote",
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE,
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE | WS_CLIPCHILDREN,
             CW_USEDEFAULT, CW_USEDEFAULT, 1920, 1080, 0, 0, hInst, 0);
 
         if (g_hwnd) {
@@ -1063,6 +1073,11 @@ namespace RemoteWindow {
                 0, tbHeight, r.right, vH,
                 g_hwnd, NULL, hInst, NULL
             );
+
+            ShowWindow(g_hwnd, SW_SHOWMAXIMIZED);
+            UpdateWindow(g_hwnd);
+            ShowWindow(g_hVideoWnd, SW_SHOW);
+            UpdateWindow(g_hVideoWnd);
 
             SetTimer(g_hwnd, 1, 1000, NULL);
             g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
@@ -1130,7 +1145,7 @@ namespace RemoteWindow {
 
             if (g_hVideoWnd) {
                 InvalidateRect(g_hVideoWnd, NULL, FALSE);
-                g_renderFrameCount++;
+                UpdateWindow(g_hVideoWnd);
             }
         }
 

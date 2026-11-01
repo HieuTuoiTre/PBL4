@@ -37,8 +37,22 @@ namespace InputHandler {
         s_client->SendPacket(Protocol::MSG_MOUSE_EVENT, (char*)&mp, sizeof(mp));
     }
 
+    static int16_t s_lastSentX = -1;
+    static int16_t s_lastSentY = -1;
+    static uint64_t s_lastMoveTime = 0;
+
     void SendMouseDirect(uint8_t action, uint8_t btn, int16_t x, int16_t y, int16_t wheel) {
         if (!s_client || !s_isControlling) return;
+
+        if (action == Protocol::MOUSE_ACTION_MOVE) {
+            if (x == s_lastSentX && y == s_lastSentY) return;
+            uint64_t now = GetTickCount64();
+            if (now - s_lastMoveTime < 8) return; // Giới hạn tối đa 125 Hz cho mouse move để chống nghẽn queue
+            s_lastMoveTime = now;
+            s_lastSentX = x;
+            s_lastSentY = y;
+        }
+
         Protocol::MousePayload mp = { action, btn, x, y, wheel };
         s_client->SendPacket(Protocol::MSG_MOUSE_EVENT, (char*)&mp, sizeof(mp));
     }

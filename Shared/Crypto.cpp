@@ -13,15 +13,18 @@ namespace Crypto {
 
     void GenerateRandomBytes(uint8_t* out, size_t len) {
         if (!out || len == 0) return;
-        std::random_device rd;
+        thread_local std::mt19937_64 rng([]() {
+            std::random_device rd;
+            return ((uint64_t)rd() << 32) ^ rd();
+        }());
         size_t i = 0;
-        while (i + sizeof(uint32_t) <= len) {
-            uint32_t val = rd();
-            std::memcpy(out + i, &val, sizeof(uint32_t));
-            i += sizeof(uint32_t);
+        while (i + sizeof(uint64_t) <= len) {
+            uint64_t val = rng();
+            std::memcpy(out + i, &val, sizeof(uint64_t));
+            i += sizeof(uint64_t);
         }
         if (i < len) {
-            uint32_t val = rd();
+            uint64_t val = rng();
             std::memcpy(out + i, &val, len - i);
         }
     }
