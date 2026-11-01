@@ -108,7 +108,14 @@ namespace {
 
                 float mInterp = (float)((1.0 - frac) * m0 + frac * m1);
 
-                int16_t sample = (int16_t)std::clamp(mInterp * 32767.0f, -32768.0f, 32767.0f);
+                // 2. Resample sang 24.000 Hz, tự động khuếch đại (Auto-Boost 2.5x + Soft Limiter) và chuyển sang int16
+                float boosted = mInterp * 2.5f;
+                if (boosted > 0.95f) {
+                    boosted = 0.95f + 0.05f * std::tanh((boosted - 0.95f) / 0.05f);
+                } else if (boosted < -0.95f) {
+                    boosted = -0.95f - 0.05f * std::tanh((-boosted - 0.95f) / 0.05f);
+                }
+                int16_t sample = (int16_t)std::clamp(boosted * 32767.0f, -32768.0f, 32767.0f);
                 outPcm16.push_back(sample);
 
                 resamplePos += resampleRatio;
@@ -230,8 +237,29 @@ namespace AudioCapture {
 
             std::vector<int16_t> accumPcm;
             accumPcm.reserve(960 * 4);
+            auto lastCheckDeviceTime = std::chrono::steady_clock::now();
 
             while (isRecording) {
+                // Tự động phát hiện cắm/rút tai nghe: nếu người dùng chuyển thiết bị mặc định (Loa <-> Tai nghe), tái khởi tạo ngay!
+                auto nowCheck = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(nowCheck - lastCheckDeviceTime).count() >= 500) {
+                    lastCheckDeviceTime = nowCheck;
+                    IMMDevice* pCurDefault = NULL;
+                    if (SUCCEEDED(pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pCurDefault)) && pCurDefault) {
+                        LPWSTR curId = NULL;
+                        LPWSTR activeId = NULL;
+                        pCurDefault->GetId(&curId);
+                        pDevice->GetId(&activeId);
+                        bool isDeviceChanged = (curId && activeId && wcscmp(curId, activeId) != 0);
+                        if (curId) CoTaskMemFree(curId);
+                        if (activeId) CoTaskMemFree(activeId);
+                        pCurDefault->Release();
+                        if (isDeviceChanged) {
+                            break; // Thiết bị âm thanh đã chuyển đổi, thoát vòng lặp để capture ngay từ tai nghe mới
+                        }
+                    }
+                }
+
                 // Tiếp tục bơm silence vào render stream để giữ xung nhịp phần cứng WASAPI luôn hoạt động
                 if (pSilentRenderService && pSilentRenderClient && silentBufferFrameCount > 0) {
                     UINT32 padding = 0;

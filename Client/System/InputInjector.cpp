@@ -10,6 +10,7 @@ namespace InputInjector {
         for (int i = 0; i < 11; i++) {
             inputs[i].type = INPUT_KEYBOARD;
             inputs[i].ki.wVk = keys[i];
+            inputs[i].ki.wScan = (WORD)MapVirtualKeyW(keys[i], MAPVK_VK_TO_VSC);
             inputs[i].ki.dwFlags = KEYEVENTF_KEYUP;
             if (keys[i] == VK_LWIN || keys[i] == VK_RWIN || keys[i] == VK_RCONTROL || keys[i] == VK_RMENU) {
                 inputs[i].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
@@ -69,6 +70,8 @@ namespace InputInjector {
         INPUT input = { 0 };
         input.type = INPUT_KEYBOARD;
         input.ki.wVk = (WORD)payload.vkCode;
+        // Ánh xạ Virtual Key code sang Hardware Scan Code cho Game, DirectX (DirectInput), Giả lập và Máy ảo
+        input.ki.wScan = (WORD)MapVirtualKeyW((UINT)payload.vkCode, MAPVK_VK_TO_VSC);
 
         DWORD flags = 0;
         if (payload.isDown == 0) {
@@ -80,6 +83,7 @@ namespace InputInjector {
             case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
             case VK_PRIOR: case VK_NEXT: case VK_END: case VK_HOME:
             case VK_INSERT: case VK_DELETE:
+            case VK_DIVIDE: case VK_NUMLOCK:
             case VK_RCONTROL: case VK_RMENU:
             case VK_LWIN: case VK_RWIN:
                 flags |= KEYEVENTF_EXTENDEDKEY;

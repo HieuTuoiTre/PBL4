@@ -30,7 +30,7 @@ namespace {
         int subsamp;
     };
 
-    // Tự động nâng sàn chất lượng nếu mạng mạnh và chọn subsampling 4:4:4 cho chi tiết nhỏ
+    // Tự động nâng sàn chất lượng nếu mạng mạnh và phân cấp chất lượng theo diện tích thay đổi
     CompressionConfig GetCompressionConfig(int changedArea, int totalPixels) {
         double sendMs = g_avgSendTimeMs.load(std::memory_order_relaxed);
         bool fastNetwork = (sendMs < 4.0);
@@ -39,27 +39,35 @@ namespace {
         double ratio = (double)changedArea / (double)(totalPixels > 0 ? totalPixels : 1);
 
         if (ratio >= 0.50) {
-            // Thay đổi diện rộng (cuộn trang nhanh, chuyển ứng dụng, video)
-            int q = slowNetwork ? 50 : (fastNetwork ? 75 : 65);
+            // Thay đổi diện rộng / Game 3D toàn cảnh / Video toàn màn hình
+            // Giới hạn băng thông trong khoảng 20 - 25 Mbps (mỗi frame ~50-65KB ở 1080p)
+            int q = slowNetwork ? 45 : (fastNetwork ? 52 : 48);
             return { q, TJSAMP_420 };
-        } else if (ratio >= 0.20) {
+        } else if (ratio >= 0.25) {
+            // Vùng 3D của game có HUD/minimap cố định (thường chiếm 25% - 50% diện tích)
+            // Giới hạn băng thông ổn định dưới 20 - 25 Mbps
+            int q = slowNetwork ? 48 : (fastNetwork ? 56 : 52);
+            return { q, TJSAMP_420 };
+        } else if (ratio >= 0.10) {
             // Thay đổi trung bình (kéo cửa sổ, cuộn văn bản)
-            int q = slowNetwork ? 65 : (fastNetwork ? 82 : 74);
+            int q = slowNetwork ? 65 : (fastNetwork ? 76 : 70);
             return { q, TJSAMP_420 };
-        } else if (ratio >= 0.04) {
+        } else if (ratio >= 0.03) {
             // Thay đổi nhỏ (gõ văn bản, mở menu xổ xuống)
-            int q = slowNetwork ? 78 : (fastNetwork ? 88 : 84);
+            int q = slowNetwork ? 78 : (fastNetwork ? 86 : 82);
             return { q, TJSAMP_420 };
         } else {
             // Thay đổi rất nhỏ (con trỏ chuột, 1 dòng chữ, icon)
-            // Dùng TJSAMP_444 để chữ ký tự nhỏ không bị lem màu viền
-            int q = slowNetwork ? 85 : 94;
-            int subsamp = slowNetwork ? TJSAMP_420 : TJSAMP_444;
-            return { q, subsamp };
+            // TJSAMP_420 với Q82 chỉ mất ~1.5ms để nén, đảm bảo duy trì 60 FPS mượt mà tuyệt đối khi chuột di chuyển!
+            // Khi dừng di chuyển 150ms, tính năng Progressive Refinement sẽ tự động gửi khung TJSAMP_420 Q80 sắc nét tối ưu!
+            int q = slowNetwork ? 75 : 82;
+            return { q, TJSAMP_420 };
         }
     }
 
-    // Nén khung hoàn thiện toàn màn hình (Progressive Refinement) sắc nét tuyệt đối 94% với TJSAMP_444
+    // Nén khung hoàn thiện toàn màn hình (Progressive Refinement) sắc nét tối ưu với TJSAMP_420 Q80
+    // Thay vì gửi khung 1MB (TJSAMP_444 Q94) làm nghẽn socket và sụt FPS <10 khi đổi tab hoặc có thông báo,
+    // nén Q80 4:2:0 chỉ tốn ~4-5ms CPU và sinh ra gói chỉ ~80-120KB, truyền qua mạng chỉ mất 15-20ms.
     bool EncodeRefinementFrame(const uint32_t* pixels, int width, int height,
                                std::vector<char>& outBuffer,
                                int& outX, int& outY, int& outWidth, int& outHeight) {
@@ -79,8 +87,8 @@ namespace {
             TJPF_BGRX,
             &g_jpegBuf,
             &g_jpegBufSize,
-            TJSAMP_444, // Full chroma không giảm mẫu màu để chữ và đường nét cực sắc
-            94,         // Chất lượng đỉnh cao 94%
+            TJSAMP_420, // 4:2:0 tối ưu dung lượng và tốc độ
+            80,         // Chất lượng sắc nét 80% (chỉ ~80-120KB thay vì 1MB)
             TJFLAG_FASTDCT | TJFLAG_FASTUPSAMPLE
         );
 
@@ -105,6 +113,7 @@ namespace {
     int g_dxgiWidth = 0;
     int g_dxgiHeight = 0;
     std::vector<uint32_t> g_dxgiPrevPixels;
+    std::chrono::steady_clock::time_point g_lastDxgiRetryTime = std::chrono::steady_clock::now();
 
     void CleanupDxgi() {
         g_dxgiPrevPixels.clear();
@@ -192,7 +201,10 @@ namespace {
         // 3. Khởi tạo Desktop Duplication
         hr = dxgiOutput1->DuplicateOutput(g_d3dDevice, &g_dxgiDupl);
         dxgiOutput1->Release();
-        if (FAILED(hr) || !g_dxgiDupl) return false;
+        if (FAILED(hr) || !g_dxgiDupl) {
+            CleanupDxgi();
+            return false;
+        }
 
         // 4. Tạo Staging Texture (CPU readable)
         D3D11_TEXTURE2D_DESC desc = {};
@@ -216,13 +228,21 @@ namespace {
     }
 
     bool CaptureDxgiFrame(std::vector<char>& outBuffer, int& outX, int& outY, int& outWidth, int& outHeight) {
-        if (!g_dxgiDupl || !g_stagingTexture || !g_tjCompressor) return false;
+        if (!g_dxgiDupl || !g_stagingTexture || !g_tjCompressor) {
+            // Thử tái khởi tạo DXGI định kỳ mỗi 500ms nếu trước đó bị mất quyền truy cập (UAC / Lock Screen)
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastDxgiRetryTime).count() >= 500) {
+                g_lastDxgiRetryTime = now;
+                InitDxgi();
+            }
+            return false;
+        }
 
         DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
         IDXGIResource* desktopResource = nullptr;
 
-        // Timeout 4ms: Nếu màn hình tĩnh thì kiểm tra Progressive Refinement
-        HRESULT hr = g_dxgiDupl->AcquireNextFrame(4, &frameInfo, &desktopResource);
+        // Timeout 25ms: Đủ biên độ cho DWM bàn giao khung 60Hz mà không bị lỡ nhịp (tránh rớt khung hình xuống 30 FPS)
+        HRESULT hr = g_dxgiDupl->AcquireNextFrame(25, &frameInfo, &desktopResource);
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
             if (g_needsRefinement && !g_dxgiPrevPixels.empty()) {
                 auto now = std::chrono::steady_clock::now();
@@ -235,9 +255,13 @@ namespace {
             return false;
         }
 
-        if (hr == DXGI_ERROR_ACCESS_LOST) {
-            // Khi UAC xuất hiện hoặc thay đổi độ phân giải màn hình
-            InitDxgi();
+        if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL ||
+            hr == DXGI_ERROR_ACCESS_DENIED || hr == DXGI_ERROR_SESSION_DISCONNECTED ||
+            hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET ||
+            hr == (HRESULT)0x80070005L /* E_ACCESSDENIED */ || hr == (HRESULT)0x887A0026 || hr == (HRESULT)0x887A0027) {
+            // Khi UAC xuất hiện, lock screen, Task Manager admin, hoặc thay đổi độ phân giải màn hình
+            CleanupDxgi();
+            g_lastDxgiRetryTime = std::chrono::steady_clock::now();
             return false;
         }
 
@@ -254,6 +278,17 @@ namespace {
             return false;
         }
 
+        // KIỂM TRA KÍCH THƯỚC VÀ ĐỊNH DẠNG AN TOÀN TRƯỚC KHI COPY (Chống crash khi UAC xuất hiện hoặc đổi resolution)
+        D3D11_TEXTURE2D_DESC srcDesc = {};
+        desktopTexture->GetDesc(&srcDesc);
+        if (srcDesc.Width != (UINT)g_dxgiWidth || srcDesc.Height != (UINT)g_dxgiHeight || srcDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+            desktopTexture->Release();
+            g_dxgiDupl->ReleaseFrame();
+            CleanupDxgi();
+            g_lastDxgiRetryTime = std::chrono::steady_clock::now();
+            return false;
+        }
+
         // Copy từ VRAM sang Staging Texture (GPU copy cực nhanh < 0.5ms)
         g_d3dContext->CopyResource(g_stagingTexture, desktopTexture);
         desktopTexture->Release();
@@ -262,14 +297,15 @@ namespace {
         // Map bộ đệm sang CPU để nén
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         hr = g_d3dContext->Map(g_stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr) || !mapped.pData) return false;
 
         int pixelsCount = g_dxgiWidth * g_dxgiHeight;
         int minX = g_dxgiWidth, minY = g_dxgiHeight, maxX = -1, maxY = -1;
         const uint32_t* curPixels = (const uint32_t*)mapped.pData;
         int rowPitchElements = mapped.RowPitch / sizeof(uint32_t);
 
-        if (g_dxgiPrevPixels.empty()) {
+        if (g_dxgiPrevPixels.size() != (size_t)pixelsCount) {
+            g_dxgiPrevPixels.clear();
             g_dxgiPrevPixels.resize(pixelsCount);
             for (int y = 0; y < g_dxgiHeight; ++y) {
                 std::memcpy(&g_dxgiPrevPixels[y * g_dxgiWidth],
@@ -581,6 +617,12 @@ namespace ScreenCapture {
         // Exponential Moving Average: 85% lịch sử + 15% mẫu đo mới
         double updated = 0.85 * current + 0.15 * sendTimeMs;
         g_avgSendTimeMs.store(updated, std::memory_order_relaxed);
+    }
+
+    void ForceFullFrame() {
+        g_dxgiPrevPixels.clear();
+        g_gdiPrevPixels.clear();
+        g_needsRefinement = false;
     }
 
     void Cleanup() {

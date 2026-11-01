@@ -23,6 +23,7 @@ Thumbs.db
 .vscode/
 Instruction.txt
 
+graphify-out/
 
 tests/
 graphify-out/
