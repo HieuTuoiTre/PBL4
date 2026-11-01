@@ -20,6 +20,7 @@ class TcpServer{
         //invalid socket so it doesnt set the value to be a random value
         SOCKET listenSocket = INVALID_SOCKET;   //forward to clientSocket
         SOCKET clientSocket = INVALID_SOCKET;   //actual socket used by the client
+        int serverPort = 0;
         std::mutex sendMutex; // THÊM KHÓA CHO SERVER
 
     public:
@@ -39,6 +40,9 @@ class TcpServer{
         bool SendPacket(Protocol::MessageType type, const char* payload, int payloadSize);
         bool ReceiveExact(char* buffer, int length);
         bool CanSendWithoutBlocking();
+
+        SOCKET GetClientSocket() const { return clientSocket; }
+        int GetPort() const { return serverPort; }
 };
 
 //the client (control the machine)
@@ -59,4 +63,6 @@ class TcpClient{
         
         bool SendPacket(Protocol::MessageType type, const char* payload, int payloadSize);
         bool ReceiveExact(char* buffer, int length);
+
+        SOCKET GetConnectSocket() const { return connectSocket; }
 };

@@ -13,13 +13,13 @@ namespace {
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
 
         // 2. Phân cấp kích thước bộ đệm SO_SNDBUF & SO_RCVBUF theo từng kênh:
-        //    - Kênh Video (8081): 1MB (1024 * 1024) chống nghẽn buffer khi khung hình JPEG lớn ở 60 FPS
-        //    - Kênh Audio (8082): 64KB (64 * 1024) phát tiếng tức thì, tránh trễ tiếng so với hình
-        //    - Kênh Control (8080) & khác: 256KB (256 * 1024) đủ lớn cho file transfer và tối ưu chuột/phím
+        //    - Kênh Video (8081, 18081): 1MB (1024 * 1024) chống nghẽn buffer khi khung hình JPEG lớn ở 60 FPS
+        //    - Kênh Audio (8082, 18082): 64KB (64 * 1024) phát tiếng tức thì, tránh trễ tiếng so với hình
+        //    - Kênh Control (8080, 18080) & khác: 256KB (256 * 1024) đủ lớn cho file transfer và tối ưu chuột/phím
         int bufSize = 256 * 1024;
-        if (port == Protocol::PORT_VIDEO) {
+        if (port == Protocol::PORT_VIDEO || port == 18081) {
             bufSize = 1024 * 1024;
-        } else if (port == Protocol::PORT_AUDIO) {
+        } else if (port == Protocol::PORT_AUDIO || port == 18082) {
             bufSize = 64 * 1024;
         }
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
@@ -35,6 +35,20 @@ namespace {
         aliveSettings.keepaliveinterval = 1000; // Gửi lại mỗi 1s nếu chưa có phản hồi
         DWORD bytesReturned = 0;
         WSAIoctl(sock, SIO_KEEPALIVE_VALS, &aliveSettings, sizeof(aliveSettings), NULL, 0, &bytesReturned, NULL, NULL);
+    }
+
+    // Helper gửi đủ chính xác số bytes được yêu cầu, chống mất gói và chống vòng lặp vô hạn
+    bool SendExact(SOCKET sock, const char* data, int length) {
+        if (sock == INVALID_SOCKET || !data || length <= 0) return (length == 0);
+        int byteSent = 0;
+        while (byteSent < length) {
+            int result = send(sock, data + byteSent, length - byteSent, 0);
+            if (result <= 0) {
+                return false;
+            }
+            byteSent += result;
+        }
+        return true;
     }
 }
 
@@ -57,6 +71,8 @@ TcpServer::~TcpServer() {
 }
 
 bool TcpServer::Start(int port){
+    Close();
+    serverPort = port;
     listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSocket == INVALID_SOCKET){
         return false;
@@ -81,6 +97,7 @@ bool TcpServer::Start(int port){
     //SOMAXCONN allow multiple connection at the same time (view/audio/control)    
     int result = listen(listenSocket, SOMAXCONN);
     if (result == SOCKET_ERROR) {
+        Close();
         return false;
     }
     return true;
@@ -104,40 +121,43 @@ bool TcpServer::AcceptConnection(int timeoutMs){
         }
     }
 
+    if (clientSocket != INVALID_SOCKET) {
+        CloseClient();
+    }
+
     clientSocket = accept(listenSocket, NULL, NULL);
     if (clientSocket == INVALID_SOCKET){
         return false;
     }
-    BOOL nodelay = TRUE;
-    setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
-    int bufSize = 512 * 1024; // 512KB socket buffer giúp đẩy FPS tối đa
-    setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
-    setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
+
+    // Áp dụng bộ tham số tối ưu socket nâng cao (TCP_NODELAY, buffer kênh riêng, Keep-Alive)
+    ApplySocketOptimizations(clientSocket, serverPort);
     return true;
 }
 
 void TcpServer::Close(){
+    SOCKET sClient = clientSocket;
+    SOCKET sListen = listenSocket;
+    if (sClient != INVALID_SOCKET){
+        shutdown(sClient, SD_BOTH);
+        closesocket(sClient);
+    }
+    if (sListen != INVALID_SOCKET){
+        closesocket(sListen);
+    }
     std::lock_guard<std::mutex> lock(sendMutex);
-    if (clientSocket != INVALID_SOCKET){
-        shutdown(clientSocket, SD_BOTH);
-        closesocket(clientSocket);
-        clientSocket = INVALID_SOCKET;
-    }
-
-    if (listenSocket != INVALID_SOCKET){
-        closesocket(listenSocket);
-        listenSocket = INVALID_SOCKET;
-    }
+    clientSocket = INVALID_SOCKET;
+    listenSocket = INVALID_SOCKET;
 }
 
 void TcpServer::CloseClient(){
-    std::lock_guard<std::mutex> lock(sendMutex);
-    // Chỉ đóng socket đang giao tiếp với Manager cũ
-    if (clientSocket != INVALID_SOCKET){
-        shutdown(clientSocket, SD_BOTH);
-        closesocket(clientSocket);
-        clientSocket = INVALID_SOCKET;
+    SOCKET sClient = clientSocket;
+    if (sClient != INVALID_SOCKET){
+        shutdown(sClient, SD_BOTH);
+        closesocket(sClient);
     }
+    std::lock_guard<std::mutex> lock(sendMutex);
+    clientSocket = INVALID_SOCKET;
 }
 
 bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
@@ -152,18 +172,13 @@ bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int 
     header.type = type;
     header.size = payloadSize;
 
-    if (send(clientSocket, (const char*)&header, sizeof(Protocol::PacketHeader), 0) == SOCKET_ERROR){
+    if (!SendExact(clientSocket, (const char*)&header, sizeof(Protocol::PacketHeader))) {
         return false;
     }
 
-    if (payloadSize > 0){
-        int byteSent = 0;
-        while (byteSent < payloadSize) {
-            int result = send(clientSocket, payload + byteSent, payloadSize - byteSent, 0);
-            if (result == SOCKET_ERROR){
-                return false;
-            }
-            byteSent += result;
+    if (payloadSize > 0 && payload != nullptr){
+        if (!SendExact(clientSocket, payload, payloadSize)) {
+            return false;
         }
     }
 
@@ -207,8 +222,9 @@ TcpClient::~TcpClient(){
 }
 
 bool TcpClient::Connect(const std::string& ip, int port){
-    connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    Close();
 
+    connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (connectSocket == INVALID_SOCKET){
         return false;
     }
@@ -258,22 +274,20 @@ bool TcpClient::Connect(const std::string& ip, int port){
     u_long blocking = 0;
     ioctlsocket(connectSocket, FIONBIO, &blocking);
 
-    BOOL nodelay = TRUE;
-    setsockopt(connectSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
-    int bufSize = 512 * 1024; // 512KB socket buffer giúp nhận gói video tức thì
-    setsockopt(connectSocket, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
-    setsockopt(connectSocket, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
+    // Áp dụng bộ tham số tối ưu socket nâng cao (TCP_NODELAY, buffer kênh riêng, Keep-Alive)
+    ApplySocketOptimizations(connectSocket, port);
 
     return true;
 }
 
 void TcpClient::Close(){
-    std::lock_guard<std::mutex> lock(sendMutex);
-    if (connectSocket != INVALID_SOCKET){
-        shutdown(connectSocket, SD_BOTH);
-        closesocket(connectSocket);
-        connectSocket = INVALID_SOCKET;
+    SOCKET s = connectSocket;
+    if (s != INVALID_SOCKET){
+        shutdown(s, SD_BOTH);
+        closesocket(s);
     }
+    std::lock_guard<std::mutex> lock(sendMutex);
+    connectSocket = INVALID_SOCKET;
 }
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
@@ -288,17 +302,14 @@ bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int 
     header.type = type;
     header.size = payloadSize;
 
-    if (send(connectSocket, (const char*)&header, sizeof(Protocol::PacketHeader), 0) == SOCKET_ERROR) {
+    if (!SendExact(connectSocket, (const char*)&header, sizeof(Protocol::PacketHeader))) {
         return false;
     }
 
-    int byteSent = 0;
-    while (byteSent < payloadSize){
-        int result = send(connectSocket, payload + byteSent, payloadSize - byteSent, 0);
-        if (result == SOCKET_ERROR){
+    if (payloadSize > 0 && payload != nullptr){
+        if (!SendExact(connectSocket, payload, payloadSize)) {
             return false;
         }
-        byteSent += result;
     }
 
     return true;

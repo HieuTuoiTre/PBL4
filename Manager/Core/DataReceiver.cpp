@@ -18,16 +18,22 @@ namespace {
 
     void ReceiveControlLoop(TcpClient* client) {
         Protocol::PacketHeader hdr;
+        std::vector<char> buf;
+        buf.reserve(64 * 1024);
 
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
             if (hdr.type == Protocol::MSG_FILE_END) {
                 FileExplorerWindow::OnFileEnd();
                 continue;
             }
+            if (hdr.type == Protocol::MSG_PONG) {
+                continue;
+            }
 
-            if (hdr.size == 0 || hdr.size > 32 * 1024 * 1024) continue;
+            if (hdr.size > 32 * 1024 * 1024) break;
+            if (hdr.size == 0) continue;
 
-            std::vector<char> buf(hdr.size);
+            buf.resize(hdr.size);
             if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
 
             switch (hdr.type) {
@@ -92,11 +98,14 @@ namespace {
 
     void ReceiveVideoLoop(TcpClient* client) {
         Protocol::PacketHeader hdr;
+        std::vector<char> buf;
+        buf.reserve(256 * 1024);
 
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
-            if (hdr.size == 0 || hdr.size > 32 * 1024 * 1024) continue;
+            if (hdr.size > 32 * 1024 * 1024) break;
+            if (hdr.size == 0) continue;
 
-            std::vector<char> buf(hdr.size);
+            buf.resize(hdr.size);
             if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
 
             if (hdr.type == Protocol::MSG_VIDEO_FRAME) {
