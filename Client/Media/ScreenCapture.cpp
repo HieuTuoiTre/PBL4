@@ -38,23 +38,23 @@ namespace {
 
         double ratio = (double)changedArea / (double)(totalPixels > 0 ? totalPixels : 1);
 
-        if (ratio >= 0.60) {
-            // Thay đổi diện rộng / Game 3D / Video toàn màn hình
+        if (ratio >= 0.50) {
+            // Thay đổi diện rộng / Game 3D toàn cảnh / Video toàn màn hình
             // Giới hạn băng thông trong khoảng 20 - 25 Mbps (mỗi frame ~50-65KB ở 1080p)
-            // Triệt tiêu hoàn toàn nghẽn UDP buffer của ZeroTier và đường truyền gia đình (tránh vọt lên 80 Mbps)
             int q = slowNetwork ? 45 : (fastNetwork ? 52 : 48);
             return { q, TJSAMP_420 };
-        } else if (ratio >= 0.35) {
-            // Thay đổi diện rộng (cuộn trang nhanh, chuyển ứng dụng)
-            int q = slowNetwork ? 52 : (fastNetwork ? 68 : 60);
+        } else if (ratio >= 0.25) {
+            // Vùng 3D của game có HUD/minimap cố định (thường chiếm 25% - 50% diện tích)
+            // Giới hạn băng thông ổn định dưới 20 - 25 Mbps
+            int q = slowNetwork ? 48 : (fastNetwork ? 56 : 52);
             return { q, TJSAMP_420 };
-        } else if (ratio >= 0.15) {
+        } else if (ratio >= 0.10) {
             // Thay đổi trung bình (kéo cửa sổ, cuộn văn bản)
-            int q = slowNetwork ? 65 : (fastNetwork ? 78 : 72);
+            int q = slowNetwork ? 65 : (fastNetwork ? 76 : 70);
             return { q, TJSAMP_420 };
-        } else if (ratio >= 0.04) {
+        } else if (ratio >= 0.03) {
             // Thay đổi nhỏ (gõ văn bản, mở menu xổ xuống)
-            int q = slowNetwork ? 78 : (fastNetwork ? 88 : 84);
+            int q = slowNetwork ? 78 : (fastNetwork ? 86 : 82);
             return { q, TJSAMP_420 };
         } else {
             // Thay đổi rất nhỏ (con trỏ chuột, 1 dòng chữ, icon)
@@ -200,7 +200,10 @@ namespace {
         // 3. Khởi tạo Desktop Duplication
         hr = dxgiOutput1->DuplicateOutput(g_d3dDevice, &g_dxgiDupl);
         dxgiOutput1->Release();
-        if (FAILED(hr) || !g_dxgiDupl) return false;
+        if (FAILED(hr) || !g_dxgiDupl) {
+            CleanupDxgi();
+            return false;
+        }
 
         // 4. Tạo Staging Texture (CPU readable)
         D3D11_TEXTURE2D_DESC desc = {};
@@ -224,7 +227,16 @@ namespace {
     }
 
     bool CaptureDxgiFrame(std::vector<char>& outBuffer, int& outX, int& outY, int& outWidth, int& outHeight) {
-        if (!g_dxgiDupl || !g_stagingTexture || !g_tjCompressor) return false;
+        if (!g_dxgiDupl || !g_stagingTexture || !g_tjCompressor) {
+            // Thử tái khởi tạo DXGI định kỳ mỗi 500ms nếu trước đó bị mất quyền truy cập (UAC / Lock Screen)
+            static auto lastRetryTime = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRetryTime).count() >= 500) {
+                lastRetryTime = now;
+                InitDxgi();
+            }
+            return false;
+        }
 
         DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
         IDXGIResource* desktopResource = nullptr;
@@ -243,8 +255,9 @@ namespace {
             return false;
         }
 
-        if (hr == DXGI_ERROR_ACCESS_LOST) {
+        if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
             // Khi UAC xuất hiện hoặc thay đổi độ phân giải màn hình
+            CleanupDxgi();
             InitDxgi();
             return false;
         }
@@ -262,6 +275,17 @@ namespace {
             return false;
         }
 
+        // KIỂM TRA KÍCH THƯỚC VÀ ĐỊNH DẠNG AN TOÀN TRƯỚC KHI COPY (Chống crash khi UAC xuất hiện hoặc đổi resolution)
+        D3D11_TEXTURE2D_DESC srcDesc = {};
+        desktopTexture->GetDesc(&srcDesc);
+        if (srcDesc.Width != (UINT)g_dxgiWidth || srcDesc.Height != (UINT)g_dxgiHeight || srcDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+            desktopTexture->Release();
+            g_dxgiDupl->ReleaseFrame();
+            CleanupDxgi();
+            InitDxgi();
+            return false;
+        }
+
         // Copy từ VRAM sang Staging Texture (GPU copy cực nhanh < 0.5ms)
         g_d3dContext->CopyResource(g_stagingTexture, desktopTexture);
         desktopTexture->Release();
@@ -270,14 +294,15 @@ namespace {
         // Map bộ đệm sang CPU để nén
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         hr = g_d3dContext->Map(g_stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr) || !mapped.pData) return false;
 
         int pixelsCount = g_dxgiWidth * g_dxgiHeight;
         int minX = g_dxgiWidth, minY = g_dxgiHeight, maxX = -1, maxY = -1;
         const uint32_t* curPixels = (const uint32_t*)mapped.pData;
         int rowPitchElements = mapped.RowPitch / sizeof(uint32_t);
 
-        if (g_dxgiPrevPixels.empty()) {
+        if (g_dxgiPrevPixels.size() != (size_t)pixelsCount) {
+            g_dxgiPrevPixels.clear();
             g_dxgiPrevPixels.resize(pixelsCount);
             for (int y = 0; y < g_dxgiHeight; ++y) {
                 std::memcpy(&g_dxgiPrevPixels[y * g_dxgiWidth],

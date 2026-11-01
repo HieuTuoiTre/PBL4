@@ -48,7 +48,7 @@ namespace {
 
     bool g_prebuffering = true;
 
-    float g_volume = 1.0f;
+    float g_volume = 1.5f;
 
     CRITICAL_SECTION g_audioCs;
 

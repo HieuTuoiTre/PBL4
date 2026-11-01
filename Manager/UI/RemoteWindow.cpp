@@ -521,6 +521,29 @@ namespace {
                 return 0;
             }
 
+            case WM_ACTIVATE:
+            case WM_SETFOCUS: {
+                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                if (InputHandler::IsControlling()) {
+                    InputHandler::ReleaseModifiers();
+                }
+                return 0;
+            }
+
+            case WM_KILLFOCUS: {
+                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                InputHandler::ReleaseModifiers();
+                return 0;
+            }
+
             case WM_KEYDOWN:
             case WM_KEYUP:
             case WM_SYSKEYDOWN:
@@ -727,6 +750,29 @@ namespace {
                 return 0;
             }
 
+            case WM_ACTIVATE:
+            case WM_SETFOCUS: {
+                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                if (InputHandler::IsControlling()) {
+                    InputHandler::ReleaseModifiers();
+                }
+                return 0;
+            }
+
+            case WM_KILLFOCUS: {
+                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                InputHandler::ReleaseModifiers();
+                return 0;
+            }
+
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN: {
                 if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000)) {
@@ -809,10 +855,6 @@ namespace {
                     return 0;
                 }
                 break;
-            }
-            case WM_KILLFOCUS: {
-                InputHandler::ReleaseModifiers();
-                return 0;
             }
 
             case WM_RBUTTONDOWN: DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT); return 0;
