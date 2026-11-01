@@ -26,8 +26,6 @@ namespace {
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
 
         // 3. Giữ kết nối & phát hiện đứt mạng ngầm (SO_KEEPALIVE & SIO_KEEPALIVE_VALS)
-        // TCP Keepalive tự động gửi probe ở tầng giao vận sau 5s không có dữ liệu,
-        // phát hiện đứt mạng ngầm (ZeroTier crash, rớt mạng) mà KHÔNG gây ngắt kết nối giả tạo khi màn hình tĩnh!
         BOOL keepAlive = TRUE;
         setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepAlive, sizeof(keepAlive));
 
@@ -59,7 +57,6 @@ TcpServer::~TcpServer() {
 }
 
 bool TcpServer::Start(int port){
-    boundPort = port;
     listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSocket == INVALID_SOCKET){
         return false;
@@ -111,9 +108,11 @@ bool TcpServer::AcceptConnection(int timeoutMs){
     if (clientSocket == INVALID_SOCKET){
         return false;
     }
-
-    // Áp dụng bộ cấu hình tối ưu socket chuyên biệt theo từng kênh
-    ApplySocketOptimizations(clientSocket, boundPort);
+    BOOL nodelay = TRUE;
+    setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+    int bufSize = 512 * 1024; // 512KB socket buffer giúp đẩy FPS tối đa
+    setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
+    setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
     return true;
 }
 
@@ -129,7 +128,6 @@ void TcpServer::Close(){
         closesocket(listenSocket);
         listenSocket = INVALID_SOCKET;
     }
-    boundPort = 0;
 }
 
 void TcpServer::CloseClient(){
@@ -209,7 +207,6 @@ TcpClient::~TcpClient(){
 }
 
 bool TcpClient::Connect(const std::string& ip, int port){
-    connectedPort = port;
     connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
     if (connectSocket == INVALID_SOCKET){
@@ -261,8 +258,11 @@ bool TcpClient::Connect(const std::string& ip, int port){
     u_long blocking = 0;
     ioctlsocket(connectSocket, FIONBIO, &blocking);
 
-    // Áp dụng bộ cấu hình tối ưu socket chuyên biệt theo từng kênh
-    ApplySocketOptimizations(connectSocket, port);
+    BOOL nodelay = TRUE;
+    setsockopt(connectSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+    int bufSize = 512 * 1024; // 512KB socket buffer giúp nhận gói video tức thì
+    setsockopt(connectSocket, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
+    setsockopt(connectSocket, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
 
     return true;
 }
@@ -274,7 +274,6 @@ void TcpClient::Close(){
         closesocket(connectSocket);
         connectSocket = INVALID_SOCKET;
     }
-    connectedPort = 0;
 }
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
