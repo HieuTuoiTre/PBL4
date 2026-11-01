@@ -940,22 +940,23 @@ namespace RemoteWindow {
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
         if (jpegSize <= 0 || !jpegData || !g_tjDecompressor) return;
 
+        // 1. Kiểm tra an toàn biên: tọa độ và kích thước không âm, không vượt giới hạn thực tế
+        if (delta.x < 0 || delta.y < 0 || delta.width <= 0 || delta.height <= 0) return;
         int reqW = delta.x + delta.width;
         int reqH = delta.y + delta.height;
-        if (reqW <= 0 || reqH <= 0 || delta.width <= 0 || delta.height <= 0) return;
+        if (reqW > 16384 || reqH > 16384) return;
 
         EnterCriticalSection(&g_cs);
 
+        // 2. Chỉ cấp phát mở rộng buffer khi kích thước yêu cầu vượt quá kích thước hiện tại
+        // Tuyệt đối không thu nhỏ canvas khi nhận partial delta ở (0, 0) để tránh hủy hoại bộ đệm màn hình
         bool needRealloc = (g_frameWidth < reqW || g_frameHeight < reqH);
-        if (delta.x == 0 && delta.y == 0 && (delta.width != g_frameWidth || delta.height != g_frameHeight)) {
-            needRealloc = true;
-        }
 
         if (needRealloc) {
-            int newW = (delta.x == 0 && delta.y == 0) ? delta.width : (std::max)(g_frameWidth, reqW);
-            int newH = (delta.x == 0 && delta.y == 0) ? delta.height : (std::max)(g_frameHeight, reqH);
+            int newW = (std::max)(g_frameWidth, reqW);
+            int newH = (std::max)(g_frameHeight, reqH);
             std::vector<uint32_t> newPixels(newW * newH, 0);
-            if (g_frameWidth > 0 && g_frameHeight > 0 && (delta.x != 0 || delta.y != 0)) {
+            if (g_frameWidth > 0 && g_frameHeight > 0) {
                 int copyW = (std::min)(g_frameWidth, newW);
                 int copyH = (std::min)(g_frameHeight, newH);
                 for (int y = 0; y < copyH; ++y) {

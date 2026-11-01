@@ -113,6 +113,7 @@ namespace {
     int g_dxgiWidth = 0;
     int g_dxgiHeight = 0;
     std::vector<uint32_t> g_dxgiPrevPixels;
+    std::chrono::steady_clock::time_point g_lastDxgiRetryTime = std::chrono::steady_clock::now();
 
     void CleanupDxgi() {
         g_dxgiPrevPixels.clear();
@@ -229,10 +230,9 @@ namespace {
     bool CaptureDxgiFrame(std::vector<char>& outBuffer, int& outX, int& outY, int& outWidth, int& outHeight) {
         if (!g_dxgiDupl || !g_stagingTexture || !g_tjCompressor) {
             // Thử tái khởi tạo DXGI định kỳ mỗi 500ms nếu trước đó bị mất quyền truy cập (UAC / Lock Screen)
-            static auto lastRetryTime = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRetryTime).count() >= 500) {
-                lastRetryTime = now;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastDxgiRetryTime).count() >= 500) {
+                g_lastDxgiRetryTime = now;
                 InitDxgi();
             }
             return false;
@@ -261,7 +261,7 @@ namespace {
             hr == (HRESULT)0x80070005L /* E_ACCESSDENIED */ || hr == (HRESULT)0x887A0026 || hr == (HRESULT)0x887A0027) {
             // Khi UAC xuất hiện, lock screen, Task Manager admin, hoặc thay đổi độ phân giải màn hình
             CleanupDxgi();
-            InitDxgi();
+            g_lastDxgiRetryTime = std::chrono::steady_clock::now();
             return false;
         }
 
@@ -285,7 +285,7 @@ namespace {
             desktopTexture->Release();
             g_dxgiDupl->ReleaseFrame();
             CleanupDxgi();
-            InitDxgi();
+            g_lastDxgiRetryTime = std::chrono::steady_clock::now();
             return false;
         }
 

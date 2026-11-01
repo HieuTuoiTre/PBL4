@@ -136,8 +136,8 @@ bool TcpServer::AcceptConnection(int timeoutMs){
 }
 
 void TcpServer::Close(){
-    SOCKET sClient = clientSocket;
-    SOCKET sListen = listenSocket;
+    SOCKET sClient = clientSocket.exchange(INVALID_SOCKET);
+    SOCKET sListen = listenSocket.exchange(INVALID_SOCKET);
     if (sClient != INVALID_SOCKET){
         shutdown(sClient, SD_BOTH);
         closesocket(sClient);
@@ -146,18 +146,15 @@ void TcpServer::Close(){
         closesocket(sListen);
     }
     std::lock_guard<std::mutex> lock(sendMutex);
-    clientSocket = INVALID_SOCKET;
-    listenSocket = INVALID_SOCKET;
 }
 
 void TcpServer::CloseClient(){
-    SOCKET sClient = clientSocket;
+    SOCKET sClient = clientSocket.exchange(INVALID_SOCKET);
     if (sClient != INVALID_SOCKET){
         shutdown(sClient, SD_BOTH);
         closesocket(sClient);
     }
     std::lock_guard<std::mutex> lock(sendMutex);
-    clientSocket = INVALID_SOCKET;
 }
 
 bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
@@ -281,13 +278,12 @@ bool TcpClient::Connect(const std::string& ip, int port){
 }
 
 void TcpClient::Close(){
-    SOCKET s = connectSocket;
+    SOCKET s = connectSocket.exchange(INVALID_SOCKET);
     if (s != INVALID_SOCKET){
         shutdown(s, SD_BOTH);
         closesocket(s);
     }
     std::lock_guard<std::mutex> lock(sendMutex);
-    connectSocket = INVALID_SOCKET;
 }
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
