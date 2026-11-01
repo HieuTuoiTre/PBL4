@@ -27,6 +27,9 @@ namespace {
     tjhandle g_tjDecompressor = nullptr;
     CRITICAL_SECTION g_cs;
 
+    constexpr UINT WM_USER_NEW_FRAME = WM_USER + 101;
+    static std::atomic<bool> g_paintPending(false);
+
     std::atomic<int> g_streamFrameCount(0);
     std::atomic<int> g_renderFrameCount(0);
     std::atomic<int> g_streamFps(0);
@@ -526,6 +529,12 @@ namespace {
 
     LRESULT CALLBACK VideoWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
+            case WM_USER_NEW_FRAME: {
+                g_paintPending.store(false, std::memory_order_release);
+                UpdateWindow(hwnd);
+                return 0;
+            }
+
             case WM_SIZE: {
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
@@ -546,36 +555,34 @@ namespace {
                     int offX = (r.right - drawW) / 2;
                     int offY = (r.bottom - drawH) / 2;
 
-                    // Tô đen viền letterbox xung quanh khung hình nếu có khoảng trống
-                    HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                    // Tô đen viền letterbox xung quanh khung hình nếu có khoảng trống (dùng static brush chống churn GDI handle)
+                    static HBRUSH s_bgBrush = CreateSolidBrush(RGB(18, 19, 23));
                     if (offX > 0) {
                         RECT rLeft = { 0, 0, offX, r.bottom };
                         RECT rRight = { offX + drawW, 0, r.right, r.bottom };
-                        FillRect(hdc, &rLeft, bgBrush);
-                        FillRect(hdc, &rRight, bgBrush);
+                        FillRect(hdc, &rLeft, s_bgBrush);
+                        FillRect(hdc, &rRight, s_bgBrush);
                     }
                     if (offY > 0) {
                         RECT rTop = { 0, 0, r.right, offY };
                         RECT rBottom = { 0, offY + drawH, r.right, r.bottom };
-                        FillRect(hdc, &rTop, bgBrush);
-                        FillRect(hdc, &rBottom, bgBrush);
+                        FillRect(hdc, &rTop, s_bgBrush);
+                        FillRect(hdc, &rBottom, s_bgBrush);
                     }
-                    DeleteObject(bgBrush);
 
-                    SetStretchBltMode(hdc, HALFTONE);
-                    SetBrushOrgEx(hdc, 0, 0, NULL);
+                    SetStretchBltMode(hdc, COLORONCOLOR);
                     StretchDIBits(
                         hdc,
                         offX, offY, drawW, drawH,
                         0, 0, g_frameWidth, g_frameHeight,
                         g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
                     );
+                    g_renderFrameCount++;
                 } else {
                     RECT r;
                     GetClientRect(hwnd, &r);
-                    HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
-                    FillRect(hdc, &r, bgBrush);
-                    DeleteObject(bgBrush);
+                    static HBRUSH s_bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                    FillRect(hdc, &r, s_bgBrush);
                 }
                 LeaveCriticalSection(&g_cs);
                 EndPaint(hwnd, &ps);
@@ -790,6 +797,7 @@ namespace {
                 int mouseY = (short)HIWORD(lp);
 
                 if (mouseY < tbHeight) {
+                    SetFocus(hwnd);
                     RECT r;
                     GetClientRect(hwnd, &r);
                     ToolbarButtonId hit = HitTestToolbar(hwnd, mouseX, mouseY, r.right, tbHeight);
@@ -1030,10 +1038,13 @@ namespace RemoteWindow {
         InitializeCriticalSection(&g_cs);
         g_tjDecompressor = tjInitDecompress();
 
+        HBRUSH hDarkBrush = CreateSolidBrush(RGB(18, 19, 23));
+
         WNDCLASSW wc = {};
         wc.lpfnWndProc = WndProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = hDarkBrush;
         wc.lpszClassName = L"MgrWindow";
         RegisterClassW(&wc);
 
@@ -1041,11 +1052,12 @@ namespace RemoteWindow {
         vc.lpfnWndProc = VideoWndProc;
         vc.hInstance = hInst;
         vc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        vc.hbrBackground = hDarkBrush;
         vc.lpszClassName = L"MgrVideoWnd";
         RegisterClassW(&vc);
 
         g_hwnd = CreateWindowExW(0, L"MgrWindow", L"LanRemote",
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE,
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE | WS_CLIPCHILDREN,
             CW_USEDEFAULT, CW_USEDEFAULT, 1920, 1080, 0, 0, hInst, 0);
 
         if (g_hwnd) {
@@ -1063,6 +1075,11 @@ namespace RemoteWindow {
                 0, tbHeight, r.right, vH,
                 g_hwnd, NULL, hInst, NULL
             );
+
+            ShowWindow(g_hwnd, SW_SHOWMAXIMIZED);
+            UpdateWindow(g_hwnd);
+            ShowWindow(g_hVideoWnd, SW_SHOW);
+            UpdateWindow(g_hVideoWnd);
 
             SetTimer(g_hwnd, 1, 1000, NULL);
             g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
@@ -1127,17 +1144,22 @@ namespace RemoteWindow {
         if (decompRes == 0) {
             g_streamFrameCount++;
             g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
-
-            if (g_hVideoWnd) {
-                InvalidateRect(g_hVideoWnd, NULL, FALSE);
-                g_renderFrameCount++;
-            }
         }
 
         LeaveCriticalSection(&g_cs);
+
+        // Luôn giải phóng critical section trước khi phát tín hiệu cho GUI thread để chống Deadlock 100%
+        if (decompRes == 0 && g_hVideoWnd) {
+            InvalidateRect(g_hVideoWnd, NULL, FALSE);
+            bool expected = false;
+            if (g_paintPending.compare_exchange_strong(expected, true)) {
+                PostMessageW(g_hVideoWnd, WM_USER_NEW_FRAME, 0, 0);
+            }
+        }
     }
 
     void Cleanup() {
+        g_paintPending.store(false, std::memory_order_relaxed);
         if (g_hwnd) {
             ClipboardManager::Cleanup(g_hwnd);
             KillTimer(g_hwnd, 1);
