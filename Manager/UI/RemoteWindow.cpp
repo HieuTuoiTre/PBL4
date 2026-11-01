@@ -1,5 +1,4 @@
 #include "RemoteWindow.h"
-#include "D2D1Renderer.h"
 #include "InputHandler.h"
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
@@ -391,9 +390,19 @@ namespace {
 
         int16_t wheel = (msg == WM_MOUSEWHEEL) ? (int16_t)GET_WHEEL_DELTA_WPARAM(wp) : 0;
 
-        if (D2D1Renderer::IsInitialized() && g_hVideoWnd) {
-            float vx = 0, vy = 0, vw = 0, vh = 0;
-            D2D1Renderer::GetViewport(vx, vy, vw, vh);
+        if (g_hVideoWnd) {
+            RECT r;
+            GetClientRect(g_hVideoWnd, &r);
+            if (r.right <= 0 || r.bottom <= 0) return;
+
+            float scaleX = (float)r.right / (float)frameW;
+            float scaleY = (float)r.bottom / (float)frameH;
+            float scale = (std::min)(scaleX, scaleY);
+            float vw = (float)frameW * scale;
+            float vh = (float)frameH * scale;
+            float vx = (float)(r.right - (int)vw) / 2.0f;
+            float vy = (float)(r.bottom - (int)vh) / 2.0f;
+
             if (vw <= 0.0f || vh <= 0.0f) return;
 
             POINT pt;
@@ -438,46 +447,57 @@ namespace {
     LRESULT CALLBACK VideoWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
             case WM_SIZE: {
-                int w = LOWORD(lp);
-                int h = HIWORD(lp);
-                if (D2D1Renderer::IsInitialized()) {
-                    D2D1Renderer::Resize(w, h);
-                }
+                InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
 
             case WM_PAINT: {
                 PAINTSTRUCT ps;
                 HDC hdc = BeginPaint(hwnd, &ps);
-                if (D2D1Renderer::IsInitialized()) {
-                    D2D1Renderer::Render();
-                } else {
-                    EnterCriticalSection(&g_cs);
-                    if (!g_framePixels.empty() && g_frameWidth > 0 && g_frameHeight > 0) {
-                        RECT r;
-                        GetClientRect(hwnd, &r);
-                        float scaleX = (float)r.right / (float)g_frameWidth;
-                        float scaleY = (float)r.bottom / (float)g_frameHeight;
-                        float scale = (std::min)(scaleX, scaleY);
-                        int drawW = (int)(g_frameWidth * scale);
-                        int drawH = (int)(g_frameHeight * scale);
-                        int offX = (r.right - drawW) / 2;
-                        int offY = (r.bottom - drawH) / 2;
+                EnterCriticalSection(&g_cs);
+                if (!g_framePixels.empty() && g_frameWidth > 0 && g_frameHeight > 0) {
+                    RECT r;
+                    GetClientRect(hwnd, &r);
+                    float scaleX = (float)r.right / (float)g_frameWidth;
+                    float scaleY = (float)r.bottom / (float)g_frameHeight;
+                    float scale = (std::min)(scaleX, scaleY);
+                    int drawW = (int)(g_frameWidth * scale);
+                    int drawH = (int)(g_frameHeight * scale);
+                    int offX = (r.right - drawW) / 2;
+                    int offY = (r.bottom - drawH) / 2;
 
-                        HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
-                        FillRect(hdc, &r, bgBrush);
-                        DeleteObject(bgBrush);
-
-                        SetStretchBltMode(hdc, HALFTONE);
-                        StretchDIBits(
-                            hdc,
-                            offX, offY, drawW, drawH,
-                            0, 0, g_frameWidth, g_frameHeight,
-                            g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
-                        );
+                    // Tô đen viền letterbox xung quanh khung hình nếu có khoảng trống
+                    HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                    if (offX > 0) {
+                        RECT rLeft = { 0, 0, offX, r.bottom };
+                        RECT rRight = { offX + drawW, 0, r.right, r.bottom };
+                        FillRect(hdc, &rLeft, bgBrush);
+                        FillRect(hdc, &rRight, bgBrush);
                     }
-                    LeaveCriticalSection(&g_cs);
+                    if (offY > 0) {
+                        RECT rTop = { 0, 0, r.right, offY };
+                        RECT rBottom = { 0, offY + drawH, r.right, r.bottom };
+                        FillRect(hdc, &rTop, bgBrush);
+                        FillRect(hdc, &rBottom, bgBrush);
+                    }
+                    DeleteObject(bgBrush);
+
+                    SetStretchBltMode(hdc, HALFTONE);
+                    SetBrushOrgEx(hdc, 0, 0, NULL);
+                    StretchDIBits(
+                        hdc,
+                        offX, offY, drawW, drawH,
+                        0, 0, g_frameWidth, g_frameHeight,
+                        g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
+                    );
+                } else {
+                    RECT r;
+                    GetClientRect(hwnd, &r);
+                    HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                    FillRect(hdc, &r, bgBrush);
+                    DeleteObject(bgBrush);
                 }
+                LeaveCriticalSection(&g_cs);
                 EndPaint(hwnd, &ps);
                 return 0;
             }
@@ -591,7 +611,7 @@ namespace {
                 if (vH < 0) vH = 0;
                 if (g_hVideoWnd) {
                     MoveWindow(g_hVideoWnd, 0, tbHeight, w, vH, TRUE);
-                    D2D1Renderer::Resize(w, vH);
+                    InvalidateRect(g_hVideoWnd, NULL, FALSE);
                 }
                 RECT tbRect = { 0, 0, w, tbHeight };
                 InvalidateRect(hwnd, &tbRect, FALSE);
@@ -614,7 +634,7 @@ namespace {
                 if (vH < 0) vH = 0;
                 if (g_hVideoWnd) {
                     MoveWindow(g_hVideoWnd, 0, tbH, r.right, vH, TRUE);
-                    D2D1Renderer::Resize(r.right, vH);
+                    InvalidateRect(g_hVideoWnd, NULL, FALSE);
                 }
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
@@ -911,10 +931,6 @@ namespace RemoteWindow {
                 g_hwnd, NULL, hInst, NULL
             );
 
-            if (g_hVideoWnd) {
-                D2D1Renderer::Initialize(g_hVideoWnd);
-            }
-
             SetTimer(g_hwnd, 1, 1000, NULL);
             g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
         }
@@ -978,13 +994,7 @@ namespace RemoteWindow {
             g_streamFrameCount++;
             g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
 
-            if (D2D1Renderer::IsInitialized()) {
-                // Đẩy trực tiếp vùng thay đổi vào GPU VRAM và vẽ phần cứng cực nhanh (<0.2ms)
-                D2D1Renderer::UpdateDirtyRect(delta.x, delta.y, delta.width, delta.height, g_framePixels.data(), g_frameWidth, g_frameHeight);
-                D2D1Renderer::Render();
-                g_renderFrameCount++;
-            } else if (g_hVideoWnd) {
-                // Fallback GDI nếu Direct2D không khả dụng
+            if (g_hVideoWnd) {
                 InvalidateRect(g_hVideoWnd, NULL, FALSE);
                 g_renderFrameCount++;
             }
@@ -999,7 +1009,6 @@ namespace RemoteWindow {
             g_hwnd = NULL;
         }
         g_hVideoWnd = NULL;
-        D2D1Renderer::Cleanup();
         ChatWindow::Cleanup();
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();

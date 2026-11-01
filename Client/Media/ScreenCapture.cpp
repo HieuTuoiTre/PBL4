@@ -255,8 +255,11 @@ namespace {
             return false;
         }
 
-        if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
-            // Khi UAC xuất hiện hoặc thay đổi độ phân giải màn hình
+        if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL ||
+            hr == DXGI_ERROR_ACCESS_DENIED || hr == DXGI_ERROR_SESSION_DISCONNECTED ||
+            hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET ||
+            hr == (HRESULT)0x80070005L /* E_ACCESSDENIED */ || hr == (HRESULT)0x887A0026 || hr == (HRESULT)0x887A0027) {
+            // Khi UAC xuất hiện, lock screen, Task Manager admin, hoặc thay đổi độ phân giải màn hình
             CleanupDxgi();
             InitDxgi();
             return false;
