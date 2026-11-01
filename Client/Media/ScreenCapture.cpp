@@ -22,6 +22,8 @@ namespace {
     // ĐO TỐC ĐỘ MẠNG THỜI GIAN THỰC & PROGRESSIVE REFINEMENT
     // ==========================================
     std::atomic<double> g_avgSendTimeMs(2.0); // Giả định ban đầu mạng rất tốt (<4ms)
+    std::atomic<uint8_t> g_qualityPreset(Protocol::QUALITY_AUTO);
+    std::atomic<uint8_t> g_targetFps(60);
     bool g_needsRefinement = false;
     std::chrono::steady_clock::time_point g_lastMotionTime = std::chrono::steady_clock::now();
 
@@ -32,6 +34,15 @@ namespace {
 
     // Tự động nâng sàn chất lượng nếu mạng mạnh và phân cấp chất lượng theo diện tích thay đổi
     CompressionConfig GetCompressionConfig(int changedArea, int totalPixels) {
+        uint8_t preset = g_qualityPreset.load(std::memory_order_relaxed);
+        if (preset == Protocol::QUALITY_LOW) {
+            return { 30, TJSAMP_420 };
+        } else if (preset == Protocol::QUALITY_BALANCED) {
+            return { 60, TJSAMP_420 };
+        } else if (preset == Protocol::QUALITY_HIGH) {
+            return { 85, TJSAMP_420 };
+        }
+
         double sendMs = g_avgSendTimeMs.load(std::memory_order_relaxed);
         bool fastNetwork = (sendMs < 4.0);
         bool slowNetwork = (sendMs > 12.0);
@@ -648,5 +659,23 @@ namespace ScreenCapture {
         }
 
         g_isInitialized = false;
+    }
+
+    void SetVideoConfig(uint8_t qualityPreset, uint8_t targetFps) {
+        if (qualityPreset <= Protocol::QUALITY_HIGH) {
+            g_qualityPreset.store(qualityPreset, std::memory_order_relaxed);
+        }
+        if (targetFps == 30 || targetFps == 60) {
+            g_targetFps.store(targetFps, std::memory_order_relaxed);
+        }
+        ForceFullFrame();
+    }
+
+    uint8_t GetQualityPreset() {
+        return g_qualityPreset.load(std::memory_order_relaxed);
+    }
+
+    uint8_t GetTargetFps() {
+        return g_targetFps.load(std::memory_order_relaxed);
     }
 }

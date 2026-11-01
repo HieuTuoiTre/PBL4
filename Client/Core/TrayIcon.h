@@ -5,4 +5,5 @@ namespace TrayIcon {
     // Khai báo hàm để ClientMain.cpp có thể nhìn thấy
     bool Initialize(HINSTANCE hInstance);
     void Cleanup();
+    HWND GetHwnd();
 }

@@ -1,4 +1,6 @@
 #include "../../Shared/Network.h"
+#include "../../Shared/Crypto.h"
+#include "../../Shared/ControlEnvelope.h"
 
 #include "DataReceiver.h"
 
@@ -26,8 +28,19 @@ TcpClient g_videoClient;
 
 TcpClient g_audioClient;
 
+std::string g_managerSessionToken = Protocol::DEFAULT_AUTH_TOKEN;
+
+void SetManagerSessionToken(const std::string& token) {
+    g_managerSessionToken = token;
+}
+
+std::string GetManagerSessionToken() {
+    return g_managerSessionToken;
+}
+
 bool ConnectAll(const std::string& ip, std::string& outError) {
 
+    // 1. Kết nối kênh Điều khiển (Port 8080)
     if (!g_controlClient.Connect(ip, Protocol::PORT_CONTROL)) {
         outError = "Không thể kết nối tới kênh Điều khiển (Port " + std::to_string(Protocol::PORT_CONTROL) + ") tại " + ip + "!\n\n"
                    "Nguyên nhân thường gặp:\n"
@@ -37,13 +50,75 @@ bool ConnectAll(const std::string& ip, std::string& outError) {
         return false;
     }
 
+    // 2. Thực hiện Handshake xác thực phiên ngay trên Port 8080
+    Protocol::AuthRequestPayload authReq = {0};
+    strncpy_s(authReq.sessionToken, g_managerSessionToken.c_str(), sizeof(authReq.sessionToken) - 1);
+    authReq.clientVersion = Protocol::PROTOCOL_VERSION;
+
+    if (!g_controlClient.SendPacket(Protocol::MSG_AUTH_REQUEST, (const char*)&authReq, sizeof(authReq))) {
+        g_controlClient.Close();
+        outError = "Kết nối bị từ chối: Không thể gửi yêu cầu xác thực phiên (MSG_AUTH_REQUEST) tới Client!";
+        return false;
+    }
+
+    // Chờ phản hồi MSG_AUTH_RESPONSE với timeout 4s bằng select()
+    SOCKET ctrlSock = g_controlClient.GetConnectSocket();
+    fd_set readFds;
+    FD_ZERO(&readFds);
+    FD_SET(ctrlSock, &readFds);
+    timeval tv = { 4, 0 }; // 4s timeout
+
+    int selRet = select(0, &readFds, NULL, NULL, &tv);
+    if (selRet <= 0) {
+        g_controlClient.Close();
+        outError = "Kết nối bị từ chối: Quá thời gian chờ phản hồi xác thực phiên từ Client (Timeout 4s)!";
+        return false;
+    }
+
+    Protocol::PacketHeader respHeader = { (Protocol::MessageType)0, 0 };
+    if (!g_controlClient.ReceiveExact((char*)&respHeader, sizeof(respHeader))) {
+        g_controlClient.Close();
+        outError = "Kết nối bị từ chối: Kênh điều khiển bị đóng trong quá trình xác thực phiên!";
+        return false;
+    }
+
+    if (respHeader.type != Protocol::MSG_AUTH_RESPONSE || respHeader.size != sizeof(Protocol::AuthResponsePayload)) {
+        g_controlClient.Close();
+        outError = "Kết nối bị từ chối: Gói tin phản hồi xác thực phiên từ Client không đúng định dạng!";
+        return false;
+    }
+
+    Protocol::AuthResponsePayload authResp = {0};
+    if (!g_controlClient.ReceiveExact((char*)&authResp, sizeof(authResp))) {
+        g_controlClient.Close();
+        outError = "Kết nối bị từ chối: Lỗi đọc dữ liệu phản hồi xác thực phiên từ Client!";
+        return false;
+    }
+
+    authResp.message[sizeof(authResp.message) - 1] = '\0';
+    if (authResp.status != Protocol::AUTH_SUCCESS) {
+        g_controlClient.Close();
+        std::string detail = (authResp.message[0] != '\0') ? authResp.message : "Mã Token không hợp lệ";
+        outError = "Kết nối bị từ chối: Xác thực phiên thất bại!\n\n"
+                   "Chi tiết từ Client: " + detail + "\n\n"
+                   "Vui lòng kiểm tra lại mã Token xác thực giữa Manager và Client.";
+        return false;
+    }
+
+    // 2.5. Sinh khóa đối xứng và kích hoạt mã hóa phiên cho socket điều khiển
+    uint8_t sessionKey[Crypto::KEY_SIZE];
+    Crypto::DeriveKey(g_managerSessionToken, nullptr, 0, sessionKey);
+    g_controlClient.SetSessionKey(sessionKey);
+
+    // 3. Đã xác thực thành công -> Kết nối tiếp kênh Hình ảnh (Port 8081)
     if (!g_videoClient.Connect(ip, Protocol::PORT_VIDEO)) {
         g_controlClient.Close();
-        outError = "Đã kết nối kênh Điều khiển nhưng thất bại ở kênh Hình ảnh (Port " + std::to_string(Protocol::PORT_VIDEO) + ")!\n\n"
+        outError = "Đã xác thực thành công nhưng thất bại ở kênh Hình ảnh (Port " + std::to_string(Protocol::PORT_VIDEO) + ")!\n\n"
                    "Vui lòng kiểm tra lại cấu hình tường lửa (Firewall) hoặc khởi động lại Client.";
         return false;
     }
 
+    // 4. Kết nối kênh Âm thanh (Port 8082)
     if (!g_audioClient.Connect(ip, Protocol::PORT_AUDIO)) {
         g_controlClient.Close();
         g_videoClient.Close();

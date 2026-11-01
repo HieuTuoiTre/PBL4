@@ -51,7 +51,24 @@ namespace Protocol
         MSG_FILE_END,
 
         //in-session chat
-        MSG_CHAT_MESSAGE
+        MSG_CHAT_MESSAGE = 21,
+
+        // Authentication (M1)
+        MSG_AUTH_REQUEST = 22,
+        MSG_AUTH_RESPONSE = 23,
+
+        // Encryption Wrapper (M1)
+        MSG_ENCRYPTED_CONTROL = 24,
+
+        // Extensions (M2, M3, M4)
+        MSG_CLIPBOARD_TEXT = 25,
+        MSG_FILE_UPLOAD_REQ = 26,
+        MSG_FILE_BATCH_START = 27,
+        MSG_FILE_BATCH_END = 28,
+        MSG_FILE_CANCEL = 29,
+        MSG_FILE_ERROR = 30,
+        MSG_SPECIAL_ACTION = 31,
+        MSG_VIDEO_CONFIG = 32
     };
 
     enum MouseEventType : uint8_t {
@@ -69,6 +86,82 @@ namespace Protocol
     };
 
     #pragma pack(push, 1)
+
+    constexpr uint32_t PROTOCOL_VERSION = 1;
+    constexpr const char* DEFAULT_AUTH_TOKEN = "PBL4_REMOTE_DESKTOP_SECRET_2026";
+
+    enum AuthStatus : uint8_t {
+        AUTH_SUCCESS = 0,
+        AUTH_INVALID_TOKEN = 1,
+        AUTH_REJECTED = 2,
+        AUTH_TIMEOUT = 3,
+        AUTH_VERSION_MISMATCH = 4
+    };
+
+    struct AuthRequestPayload {
+        char sessionToken[64]; // SHA-256 hex or pre-shared key (null-terminated)
+        uint32_t clientVersion; // Protocol version (e.g. PROTOCOL_VERSION)
+    };
+
+    struct AuthResponsePayload {
+        uint8_t status;        // AuthStatus enum (0 = Success, 1 = Invalid, etc.)
+        char message[64];      // Human-readable status/error description (null-terminated)
+    };
+
+    enum SpecialActionType : uint8_t {
+        ACTION_CTRL_ALT_DEL = 1,
+        ACTION_WIN_KEY      = 2,
+        ACTION_LOCK_SCREEN  = 3
+    };
+
+    struct SpecialActionPayload {
+        uint8_t actionType; // SpecialActionType
+    };
+
+    enum VideoQualityPreset : uint8_t {
+        QUALITY_AUTO     = 0,
+        QUALITY_LOW      = 1,
+        QUALITY_BALANCED = 2,
+        QUALITY_HIGH     = 3
+    };
+
+    struct VideoConfigPayload {
+        uint8_t qualityPreset; // VideoQualityPreset
+        uint8_t targetFps;     // 30 or 60
+    };
+
+    constexpr uint32_t FILE_CHUNK_SIZE = 64 * 1024;
+
+    enum FileTransferStatus : uint8_t {
+        FILE_STATUS_SUCCESS = 0,
+        FILE_STATUS_ERROR   = 1,
+        FILE_STATUS_CANCEL  = 2
+    };
+
+    struct FileBatchStartPayload {
+        uint32_t totalFiles;
+        uint64_t totalBytes;
+        char rootName[256];
+    };
+
+    struct FileHeaderPayload {
+        uint64_t fileSize;
+        uint32_t expectedCrc32;
+        uint32_t totalChunks;
+        uint8_t isDirectory;      // 1 = dir, 0 = file
+        char relativePath[512];   // UTF-8 relative path
+    };
+
+    struct FileChunkHeader {
+        uint32_t chunkIndex;
+        uint32_t dataLength;
+    };
+
+    struct FileEndPayload {
+        uint32_t fileIndex;
+        uint32_t finalCrc32;
+        uint8_t status;           // FileTransferStatus: 0 = Success, 1 = Error, 2 = Cancelled
+    };
 
     struct DiscoveryPacket {
         char magic[4];         // "LAND"

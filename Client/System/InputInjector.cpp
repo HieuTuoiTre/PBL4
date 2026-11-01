@@ -93,4 +93,30 @@ namespace InputInjector {
         input.ki.dwFlags = flags;
         SendInput(1, &input, sizeof(INPUT));
     }
+
+    void InjectSpecialAction(uint8_t actionType) {
+        if (actionType == Protocol::ACTION_CTRL_ALT_DEL) {
+            typedef VOID (WINAPI *PFN_SendSAS)(BOOL);
+            HMODULE hSas = LoadLibraryW(L"sas.dll");
+            bool sasSent = false;
+            if (hSas) {
+                PFN_SendSAS pfnSendSAS = (PFN_SendSAS)GetProcAddress(hSas, "SendSAS");
+                if (pfnSendSAS) {
+                    pfnSendSAS(FALSE);
+                    sasSent = true;
+                }
+                FreeLibrary(hSas);
+            }
+            if (!sasSent) {
+                // Fallback khi sas.dll không có sẵn hoặc không có quyền cấp hệ thống
+                ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOW);
+            }
+        } else if (actionType == Protocol::ACTION_WIN_KEY) {
+            // Nhấn nhả phím Windows trực tiếp
+            keybd_event(VK_LWIN, 0, 0, 0);
+            keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+        } else if (actionType == Protocol::ACTION_LOCK_SCREEN) {
+            LockWorkStation();
+        }
+    }
 }

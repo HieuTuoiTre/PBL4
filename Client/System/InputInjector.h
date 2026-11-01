@@ -7,6 +7,9 @@ namespace InputInjector {
 
     void InjectKeyboard(const Protocol::KeyboardPayload& payload);
 
+    // Xử lý các thao tác và phím tắt đặc biệt (Ctrl+Alt+Del, Windows Key, Lock)
+    void InjectSpecialAction(uint8_t actionType);
+
     // Tự động giải phóng toàn bộ phím bổ trợ (Ctrl, Alt, Shift, Win) để chống kẹt phím
     void ReleaseAllModifiers();
 }

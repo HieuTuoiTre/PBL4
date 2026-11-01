@@ -1,32 +1,44 @@
 #include "FileExplorerWindow.h"
 
 #include "../../Shared/Utils.h"
-
+#include "../../Shared/CRC32.h"
 #include "../FileTransfer/FileManager.h"
 
 #include <commctrl.h>
 #include <gdiplus.h>
-
+#include <shlobj.h>
+#include <commdlg.h>
+#include <filesystem>
+#include <thread>
+#include <atomic>
 #include <sstream>
 #include <vector>
 #include <string>
 #include <cwchar>
 #include <cmath>
+#include <fstream>
 
-#define WM_FILE_DRIVE_LIST (WM_APP + 201)
-#define WM_FILE_DIR_LIST   (WM_APP + 202)
-#define WM_FILE_START_DL   (WM_APP + 203)
-#define WM_FILE_CHUNK_DL   (WM_APP + 204)
-#define WM_FILE_END_DL     (WM_APP + 205)
+#define WM_FILE_DRIVE_LIST      (WM_APP + 201)
+#define WM_FILE_DIR_LIST        (WM_APP + 202)
+#define WM_FILE_START_DL        (WM_APP + 203)
+#define WM_FILE_CHUNK_DL        (WM_APP + 204)
+#define WM_FILE_END_DL          (WM_APP + 205)
+#define WM_FILE_BATCH_START_MSG (WM_APP + 206)
+#define WM_FILE_BATCH_END_MSG   (WM_APP + 207)
+#define WM_FILE_CANCEL_MSG      (WM_APP + 208)
+#define WM_FILE_ERROR_MSG       (WM_APP + 209)
 
-#define IDC_FILE_LIST      2001
-#define IDC_FILE_ROOT      2002
-#define IDC_FILE_UP        2003
-#define IDC_FILE_REFRESH   2004
-#define IDC_FILE_DOWNLOAD  2005
-#define IDC_FILE_ADDR      2006
-#define IDC_FILE_PROGRESS  2007
-#define IDC_FILE_STATUS    2008
+#define IDC_FILE_LIST           2001
+#define IDC_FILE_ROOT           2002
+#define IDC_FILE_UP             2003
+#define IDC_FILE_REFRESH        2004
+#define IDC_FILE_DOWNLOAD       2005
+#define IDC_FILE_ADDR           2006
+#define IDC_FILE_PROGRESS       2007
+#define IDC_FILE_STATUS         2008
+#define IDC_FILE_UPLOAD_FILE    2009
+#define IDC_FILE_UPLOAD_DIR     2010
+#define IDC_FILE_CANCEL         2011
 
 namespace {
 
@@ -36,6 +48,9 @@ namespace {
     HWND g_hBtnUp = NULL;
     HWND g_hBtnRefresh = NULL;
     HWND g_hBtnDownload = NULL;
+    HWND g_hBtnUploadFile = NULL;
+    HWND g_hBtnUploadDir = NULL;
+    HWND g_hBtnCancel = NULL;
     HWND g_hAddressEdit = NULL;
     HWND g_hProgressBar = NULL;
     HWND g_hStatusLabel = NULL;
@@ -51,6 +66,18 @@ namespace {
     std::string g_downloadingFile = "";
     uint64_t g_totalFileSize = 0;
     uint64_t g_downloadedBytes = 0;
+
+    std::atomic<bool> g_transferActive(false);
+    std::atomic<bool> g_transferCancelled(false);
+    std::string g_batchRootName = "";
+    uint32_t g_batchTotalFiles = 0;
+    uint32_t g_batchCurrentFileIdx = 0;
+    uint64_t g_batchTotalBytes = 0;
+    uint64_t g_batchTransferredBytes = 0;
+    uint64_t g_transferStartTimeMs = 0;
+    uint32_t g_lastFinalCrc = 0;
+    bool g_lastCrcValid = true;
+    std::string g_lastErrorMessage = "";
 
     CRITICAL_SECTION g_fileCs;
     bool g_csInit = false;
@@ -90,10 +117,67 @@ namespace {
         path.CloseFigure();
     }
 
-    LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-        if (uMsg == WM_ERASEBKGND) {
-            return 1;
+    std::wstring FormatBytes(uint64_t bytes) {
+        wchar_t buf[64];
+        if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
+            swprintf(buf, 64, L"%.2f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+        } else if (bytes >= 1024ULL * 1024ULL) {
+            swprintf(buf, 64, L"%.2f MB", (double)bytes / (1024.0 * 1024.0));
+        } else if (bytes >= 1024ULL) {
+            swprintf(buf, 64, L"%.1f KB", (double)bytes / 1024.0);
+        } else {
+            swprintf(buf, 64, L"%llu B", bytes);
         }
+        return buf;
+    }
+
+    std::wstring FormatSpeed(double bytesPerSec) {
+        wchar_t buf[64];
+        if (bytesPerSec >= 1024.0 * 1024.0) {
+            swprintf(buf, 64, L"%.2f MB/s", bytesPerSec / (1024.0 * 1024.0));
+        } else if (bytesPerSec >= 1024.0) {
+            swprintf(buf, 64, L"%.1f KB/s", bytesPerSec / 1024.0);
+        } else {
+            swprintf(buf, 64, L"%.0f B/s", bytesPerSec);
+        }
+        return buf;
+    }
+
+    std::wstring PickFile(HWND hParent) {
+        wchar_t szFile[MAX_PATH] = { 0 };
+        OPENFILENAMEW ofn = { 0 };
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hParent;
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t);
+        ofn.lpstrFilter = L"Mọi tệp tin (*.*)\0*.*\0";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+        if (GetOpenFileNameW(&ofn)) {
+            return szFile;
+        }
+        return L"";
+    }
+
+    std::wstring PickFolder(HWND hParent) {
+        std::wstring folderPath;
+        BROWSEINFOW bi = { 0 };
+        bi.hwndOwner = hParent;
+        bi.lpszTitle = L"Chọn thư mục để tải lên máy từ xa:";
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+        PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+        if (pidl) {
+            wchar_t path[MAX_PATH];
+            if (SHGetPathFromIDListW(pidl, path)) {
+                folderPath = path;
+            }
+            CoTaskMemFree(pidl);
+        }
+        return folderPath;
+    }
+
+    LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        if (uMsg == WM_ERASEBKGND) return 1;
 
         if (uMsg == WM_PAINT) {
             PAINTSTRUCT ps;
@@ -156,20 +240,6 @@ namespace {
         return CallWindowProcW(g_oldHeaderProc, hWnd, uMsg, wParam, lParam);
     }
 
-    std::wstring FormatBytes(uint64_t bytes) {
-        wchar_t buf[64];
-        if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
-            swprintf(buf, 64, L"%.2f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
-        } else if (bytes >= 1024ULL * 1024ULL) {
-            swprintf(buf, 64, L"%.2f MB", (double)bytes / (1024.0 * 1024.0));
-        } else if (bytes >= 1024ULL) {
-            swprintf(buf, 64, L"%.1f KB", (double)bytes / 1024.0);
-        } else {
-            swprintf(buf, 64, L"%llu B", bytes);
-        }
-        return buf;
-    }
-
     void InsertFileRow(int index, const std::wstring& name, const std::wstring& type, const std::wstring& size) {
         LVITEMW lvi = {};
         lvi.mask = LVIF_TEXT;
@@ -203,12 +273,11 @@ namespace {
         } else {
             g_prevPath = g_curPath;
 
-            if (g_curPath.back() == '\\') g_curPath.pop_back();
+            if (g_curPath.back() == '\\' || g_curPath.back() == '/') g_curPath.pop_back();
 
             size_t pos = g_curPath.find_last_of("\\/");
             if (pos != std::string::npos) {
                 g_curPath = g_curPath.substr(0, pos);
-
                 if (g_curPath.length() == 2 && g_curPath[1] == ':') g_curPath += "\\";
             }
             if (g_hAddressEdit) SetWindowTextW(g_hAddressEdit, Utils::Utf8ToWide(g_curPath).c_str());
@@ -252,16 +321,16 @@ namespace {
             g_client->SendPacket(Protocol::MSG_DIR_REQUEST, g_curPath.c_str(), (int)g_curPath.size());
         } else if (itemType == L"[THƯ MỤC]") {
             g_prevPath = g_curPath;
-            if (!g_curPath.empty() && g_curPath.back() != '\\') g_curPath += "\\";
+            if (!g_curPath.empty() && g_curPath.back() != '\\' && g_curPath.back() != '/') g_curPath += "\\";
             g_curPath += itemName;
             if (g_hAddressEdit) SetWindowTextW(g_hAddressEdit, Utils::Utf8ToWide(g_curPath).c_str());
             SetWindowTextW(hwnd, (L"LanRemote - Trình duyệt tệp (" + Utils::Utf8ToWide(g_curPath) + L")").c_str());
             g_client->SendPacket(Protocol::MSG_DIR_REQUEST, g_curPath.c_str(), (int)g_curPath.size());
         } else {
-            std::wstring confirmMsg = L"Bạn có muốn tải file '" + std::wstring(nameBuf) + L"' về máy không?";
-            if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận tải file", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            std::wstring confirmMsg = L"Bạn có muốn tải tệp '" + std::wstring(nameBuf) + L"' về máy không?";
+            if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận tải tệp", MB_YESNO | MB_ICONQUESTION) == IDYES) {
                 std::string fullPath = g_curPath;
-                if (!fullPath.empty() && fullPath.back() != '\\') fullPath += "\\";
+                if (!fullPath.empty() && fullPath.back() != '\\' && fullPath.back() != '/') fullPath += "\\";
                 fullPath += itemName;
                 g_client->SendPacket(Protocol::MSG_FILE_DOWNLOAD_REQ, fullPath.c_str(), (int)fullPath.size());
             }
@@ -272,7 +341,7 @@ namespace {
         if (!g_hFileList || !g_client) return;
         int sel = (int)SendMessageW(g_hFileList, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
         if (sel == -1) {
-            MessageBoxW(hwnd, L"Vui lòng chọn một tệp tin trong danh sách trước khi bấm tải về!", L"Thông báo", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(hwnd, L"Vui lòng chọn một tệp tin hoặc thư mục trong danh sách trước khi bấm tải về!", L"Thông báo", MB_OK | MB_ICONINFORMATION);
             return;
         }
 
@@ -283,16 +352,284 @@ namespace {
         lvi.iSubItem = 1; lvi.pszText = typeBuf; lvi.cchTextMax = 128;
         SendMessageW(g_hFileList, LVM_GETITEMTEXTW, sel, (LPARAM)&lvi);
 
-        if (wcscmp(typeBuf, L"[TẬP TIN]") == 0) {
-            std::wstring confirmMsg = L"Bạn có muốn tải file '" + std::wstring(nameBuf) + L"' về máy không?";
-            if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận tải file", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        if (wcscmp(typeBuf, L"[TẬP TIN]") == 0 || wcscmp(typeBuf, L"[THƯ MỤC]") == 0) {
+            std::wstring itemKind = (wcscmp(typeBuf, L"[THƯ MỤC]") == 0) ? L"thư mục" : L"tệp tin";
+            std::wstring confirmMsg = L"Bạn có muốn tải " + itemKind + L" '" + std::wstring(nameBuf) + L"' về máy không?";
+            if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận tải về", MB_YESNO | MB_ICONQUESTION) == IDYES) {
                 std::string fullPath = g_curPath;
-                if (!fullPath.empty() && fullPath.back() != '\\') fullPath += "\\";
+                if (!fullPath.empty() && fullPath.back() != '\\' && fullPath.back() != '/') fullPath += "\\";
                 fullPath += Utils::WideToUtf8(nameBuf);
                 g_client->SendPacket(Protocol::MSG_FILE_DOWNLOAD_REQ, fullPath.c_str(), (int)fullPath.size());
             }
         } else {
-            MessageBoxW(hwnd, L"Mục được chọn là thư mục hoặc ổ đĩa. Vui lòng chọn một tệp tin để tải về!", L"Thông báo", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(hwnd, L"Mục được chọn là ổ đĩa. Vui lòng chọn một tệp tin hoặc thư mục cụ thể!", L"Thông báo", MB_OK | MB_ICONINFORMATION);
+        }
+    }
+
+    void UploadSingleFile(const std::wstring& localPathW, const std::string& remoteDir) {
+        if (!g_client) return;
+        g_transferActive = true;
+        g_transferCancelled = false;
+
+        std::string localPath = Utils::WideToUtf8(localPathW);
+        std::filesystem::path p = std::filesystem::u8path(localPath);
+        std::string fileName = p.filename().u8string();
+        uint64_t fSize = 0;
+        try {
+            std::error_code ec;
+            fSize = std::filesystem::file_size(p, ec);
+        } catch (...) {}
+
+        // Calculate CRC32 of file
+        uint32_t fileCrc = 0;
+        {
+            std::ifstream in(localPathW.c_str(), std::ios::binary);
+            if (in.is_open()) {
+                std::vector<char> buf(Protocol::FILE_CHUNK_SIZE);
+                while (in.good()) {
+                    in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+                    std::streamsize bytes = in.gcount();
+                    if (bytes > 0) {
+                        fileCrc = CRC32::Update(fileCrc, buf.data(), static_cast<size_t>(bytes));
+                    }
+                }
+            }
+        }
+
+        EnterCriticalSection(&g_fileCs);
+        g_downloadingFile = fileName;
+        g_totalFileSize = fSize;
+        g_downloadedBytes = 0;
+        g_transferStartTimeMs = GetTickCount64();
+        LeaveCriticalSection(&g_fileCs);
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_START_DL, 0, 0);
+
+        // Send file header
+        Protocol::FileHeaderPayload header = { 0 };
+        header.fileSize = fSize;
+        header.expectedCrc32 = fileCrc;
+        header.totalChunks = static_cast<uint32_t>((fSize + Protocol::FILE_CHUNK_SIZE - 1) / Protocol::FILE_CHUNK_SIZE);
+        header.isDirectory = 0;
+        strncpy_s(header.relativePath, fileName.c_str(), sizeof(header.relativePath) - 1);
+
+        if (!g_client->SendPacket(Protocol::MSG_FILE_INFO, (const char*)&header, sizeof(header))) {
+            g_transferActive = false;
+            return;
+        }
+
+        std::ifstream fileStream(localPathW.c_str(), std::ios::binary);
+        if (!fileStream.is_open()) {
+            g_transferActive = false;
+            return;
+        }
+
+        std::vector<char> chunkBuf(Protocol::FILE_CHUNK_SIZE + sizeof(Protocol::FileChunkHeader));
+        Protocol::FileChunkHeader* chkHdr = (Protocol::FileChunkHeader*)chunkBuf.data();
+        char* dataPtr = chunkBuf.data() + sizeof(Protocol::FileChunkHeader);
+
+        uint32_t chunkIdx = 0;
+        uint32_t runningCrc = 0;
+
+        while (fileStream.good() && !g_transferCancelled) {
+            fileStream.read(dataPtr, Protocol::FILE_CHUNK_SIZE);
+            std::streamsize bytesRead = fileStream.gcount();
+            if (bytesRead > 0) {
+                chkHdr->chunkIndex = chunkIdx++;
+                chkHdr->dataLength = static_cast<uint32_t>(bytesRead);
+                runningCrc = CRC32::Update(runningCrc, dataPtr, static_cast<size_t>(bytesRead));
+
+                int pktLen = (int)(sizeof(Protocol::FileChunkHeader) + bytesRead);
+                if (!g_client->SendPacket(Protocol::MSG_FILE_CHUNK, chunkBuf.data(), pktLen)) {
+                    break;
+                }
+
+                EnterCriticalSection(&g_fileCs);
+                g_downloadedBytes += static_cast<uint64_t>(bytesRead);
+                LeaveCriticalSection(&g_fileCs);
+
+                if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_CHUNK_DL, 0, 0);
+            }
+        }
+        fileStream.close();
+
+        if (g_transferCancelled) {
+            Protocol::FileEndPayload endP = { 0, runningCrc, Protocol::FILE_STATUS_CANCEL };
+            g_client->SendPacket(Protocol::MSG_FILE_END, (const char*)&endP, sizeof(endP));
+            g_transferActive = false;
+            return;
+        }
+
+        Protocol::FileEndPayload endP = { 0, runningCrc, Protocol::FILE_STATUS_SUCCESS };
+        g_client->SendPacket(Protocol::MSG_FILE_END, (const char*)&endP, sizeof(endP));
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_END_DL, (WPARAM)1, 0);
+        g_transferActive = false;
+
+        // Refresh remote file list so the uploaded file shows up
+        if (g_client) {
+            if (remoteDir.empty()) {
+                g_client->SendPacket(Protocol::MSG_DRIVE_LIST_REQUEST, nullptr, 0);
+            } else {
+                g_client->SendPacket(Protocol::MSG_DIR_REQUEST, remoteDir.c_str(), (int)remoteDir.size());
+            }
+        }
+    }
+
+    void UploadFolder(const std::wstring& localFolderW, const std::string& remoteDir) {
+        if (!g_client) return;
+        g_transferActive = true;
+        g_transferCancelled = false;
+
+        std::string localRoot = Utils::WideToUtf8(localFolderW);
+        std::filesystem::path rootP = std::filesystem::u8path(localRoot);
+        std::string folderName = rootP.filename().u8string();
+
+        struct LocalItem {
+            std::string relPath;
+            std::wstring fullPathW;
+            uint64_t size;
+            uint32_t crc;
+            bool isDir;
+        };
+
+        std::vector<LocalItem> items;
+        uint64_t totalBytes = 0;
+        uint32_t totalFiles = 0;
+
+        try {
+            std::filesystem::path canonicalRoot = std::filesystem::canonical(rootP);
+
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(canonicalRoot, std::filesystem::directory_options::skip_permission_denied)) {
+                try {
+                    auto rel = std::filesystem::relative(entry.path(), canonicalRoot);
+                    std::string relStr = rel.u8string();
+                    for (char& c : relStr) {
+                        if (c == '\\') c = '/';
+                    }
+
+                    LocalItem item;
+                    item.relPath = folderName + "/" + relStr;
+                    item.fullPathW = entry.path().wstring();
+                    if (entry.is_directory()) {
+                        item.isDir = true;
+                        item.size = 0;
+                        item.crc = 0;
+                    } else if (entry.is_regular_file()) {
+                        item.isDir = false;
+                        std::error_code ec;
+                        item.size = std::filesystem::file_size(entry.path(), ec);
+                        totalBytes += item.size;
+                        totalFiles++;
+
+                        uint32_t fcrc = 0;
+                        std::ifstream in(item.fullPathW.c_str(), std::ios::binary);
+                        if (in.is_open()) {
+                            std::vector<char> b(Protocol::FILE_CHUNK_SIZE);
+                            while (in.good()) {
+                                in.read(b.data(), static_cast<std::streamsize>(b.size()));
+                                std::streamsize cnt = in.gcount();
+                                if (cnt > 0) fcrc = CRC32::Update(fcrc, b.data(), static_cast<size_t>(cnt));
+                            }
+                        }
+                        item.crc = fcrc;
+                    } else {
+                        continue;
+                    }
+                    items.push_back(item);
+                } catch (...) {}
+            }
+        } catch (...) {}
+
+        EnterCriticalSection(&g_fileCs);
+        g_downloadingFile = folderName + " (Thư mục)";
+        g_totalFileSize = totalBytes;
+        g_downloadedBytes = 0;
+        g_batchTotalFiles = totalFiles;
+        g_batchTotalBytes = totalBytes;
+        g_batchTransferredBytes = 0;
+        g_transferStartTimeMs = GetTickCount64();
+        LeaveCriticalSection(&g_fileCs);
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_START_DL, 0, 0);
+
+        // Send batch start
+        Protocol::FileBatchStartPayload batch = { 0 };
+        batch.totalFiles = totalFiles;
+        batch.totalBytes = totalBytes;
+        strncpy_s(batch.rootName, folderName.c_str(), sizeof(batch.rootName) - 1);
+        g_client->SendPacket(Protocol::MSG_FILE_BATCH_START, (const char*)&batch, sizeof(batch));
+
+        uint32_t fileIdx = 0;
+        for (const auto& item : items) {
+            if (g_transferCancelled) break;
+
+            Protocol::FileHeaderPayload header = { 0 };
+            header.fileSize = item.size;
+            header.expectedCrc32 = item.crc;
+            header.totalChunks = static_cast<uint32_t>((item.size + Protocol::FILE_CHUNK_SIZE - 1) / Protocol::FILE_CHUNK_SIZE);
+            header.isDirectory = item.isDir ? 1 : 0;
+            strncpy_s(header.relativePath, item.relPath.c_str(), sizeof(header.relativePath) - 1);
+
+            if (!g_client->SendPacket(Protocol::MSG_FILE_INFO, (const char*)&header, sizeof(header))) break;
+
+            if (item.isDir) continue;
+
+            std::ifstream fileStream(item.fullPathW.c_str(), std::ios::binary);
+            if (!fileStream.is_open()) continue;
+
+            std::vector<char> chunkBuf(Protocol::FILE_CHUNK_SIZE + sizeof(Protocol::FileChunkHeader));
+            Protocol::FileChunkHeader* chkHdr = (Protocol::FileChunkHeader*)chunkBuf.data();
+            char* dataPtr = chunkBuf.data() + sizeof(Protocol::FileChunkHeader);
+
+            uint32_t chunkIdx = 0;
+            uint32_t runningCrc = 0;
+
+            while (fileStream.good() && !g_transferCancelled) {
+                fileStream.read(dataPtr, Protocol::FILE_CHUNK_SIZE);
+                std::streamsize bytesRead = fileStream.gcount();
+                if (bytesRead > 0) {
+                    chkHdr->chunkIndex = chunkIdx++;
+                    chkHdr->dataLength = static_cast<uint32_t>(bytesRead);
+                    runningCrc = CRC32::Update(runningCrc, dataPtr, static_cast<size_t>(bytesRead));
+
+                    int pktLen = (int)(sizeof(Protocol::FileChunkHeader) + bytesRead);
+                    if (!g_client->SendPacket(Protocol::MSG_FILE_CHUNK, chunkBuf.data(), pktLen)) break;
+
+                    EnterCriticalSection(&g_fileCs);
+                    g_downloadedBytes += static_cast<uint64_t>(bytesRead);
+                    g_batchTransferredBytes += static_cast<uint64_t>(bytesRead);
+                    LeaveCriticalSection(&g_fileCs);
+
+                    if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_CHUNK_DL, 0, 0);
+                }
+            }
+            fileStream.close();
+
+            if (g_transferCancelled) {
+                Protocol::FileEndPayload endP = { fileIdx, runningCrc, Protocol::FILE_STATUS_CANCEL };
+                g_client->SendPacket(Protocol::MSG_FILE_END, (const char*)&endP, sizeof(endP));
+                break;
+            }
+
+            Protocol::FileEndPayload endP = { fileIdx, runningCrc, Protocol::FILE_STATUS_SUCCESS };
+            g_client->SendPacket(Protocol::MSG_FILE_END, (const char*)&endP, sizeof(endP));
+            fileIdx++;
+        }
+
+        if (!g_transferCancelled) {
+            g_client->SendPacket(Protocol::MSG_FILE_BATCH_END, nullptr, 0);
+            if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_END_DL, (WPARAM)1, 0);
+        }
+        g_transferActive = false;
+
+        // Refresh remote directory
+        if (g_client) {
+            if (remoteDir.empty()) {
+                g_client->SendPacket(Protocol::MSG_DRIVE_LIST_REQUEST, nullptr, 0);
+            } else {
+                g_client->SendPacket(Protocol::MSG_DIR_REQUEST, remoteDir.c_str(), (int)remoteDir.size());
+            }
         }
     }
 
@@ -320,9 +657,21 @@ namespace {
                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_ADDR, GetModuleHandle(NULL), NULL);
 
-                g_hBtnDownload = CreateWindowExW(0, L"BUTTON", L"⬇ Tải file về",
+                g_hBtnDownload = CreateWindowExW(0, L"BUTTON", L"⬇ Tải về",
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_DOWNLOAD, GetModuleHandle(NULL), NULL);
+
+                g_hBtnUploadFile = CreateWindowExW(0, L"BUTTON", L"⬆ Tải lên Tệp",
+                    WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                    0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_UPLOAD_FILE, GetModuleHandle(NULL), NULL);
+
+                g_hBtnUploadDir = CreateWindowExW(0, L"BUTTON", L"📁 Tải lên Thư mục",
+                    WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                    0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_UPLOAD_DIR, GetModuleHandle(NULL), NULL);
+
+                g_hBtnCancel = CreateWindowExW(0, L"BUTTON", L"✖ Hủy",
+                    WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                    0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_CANCEL, GetModuleHandle(NULL), NULL);
 
                 g_hFileList = CreateWindowExW(0, L"SysListView32", L"",
                     WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
@@ -350,7 +699,7 @@ namespace {
                 SendMessageW(g_hProgressBar, PBM_SETRANGE32, 0, 100);
                 SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
 
-                g_hStatusLabel = CreateWindowExW(0, L"STATIC", L"Sẵn sàng  •  Nhấp đúp thư mục để duyệt, hoặc chọn tệp tin và bấm 'Tải file về'",
+                g_hStatusLabel = CreateWindowExW(0, L"STATIC", L"Sẵn sàng  •  Hỗ trợ tải tệp & cây thư mục hoàn chỉnh với kiểm tra toàn vẹn CRC32",
                     WS_CHILD | WS_VISIBLE | SS_LEFT | SS_PATHELLIPSIS,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_STATUS, GetModuleHandle(NULL), NULL);
 
@@ -397,55 +746,36 @@ namespace {
                 wchar_t text[64] = {0};
                 GetWindowTextW(pDIS->hwndItem, text, 63);
 
+                Gdiplus::FontFamily ff(L"Segoe UI");
+                Gdiplus::Font font(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                Gdiplus::StringFormat sf;
+                sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+                sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
                 if (pDIS->CtlID == IDC_FILE_DOWNLOAD) {
                     Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 29, 78, 216) : (isHover ? Gdiplus::Color(255, 37, 99, 235) : Gdiplus::Color(255, 59, 130, 246));
                     Gdiplus::SolidBrush fillBrush(fill);
                     g.FillPath(&fillBrush, &path);
-
-                    Gdiplus::FontFamily ff(L"Segoe UI");
-                    Gdiplus::Font font(&ff, 12.5f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                     Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
-                    Gdiplus::StringFormat sf;
-                    sf.SetAlignment(Gdiplus::StringAlignmentCenter);
-                    sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
                     g.DrawString(text, -1, &font, btnRect, &sf, &textBrush);
-                } else if (pDIS->CtlID == IDC_FILE_REFRESH) {
-                    Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 226, 232, 240) : (isHover ? Gdiplus::Color(255, 241, 245, 249) : Gdiplus::Color(255, 255, 255, 255));
+                } else if (pDIS->CtlID == IDC_FILE_UPLOAD_FILE) {
+                    Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 4, 120, 87) : (isHover ? Gdiplus::Color(255, 5, 150, 105) : Gdiplus::Color(255, 16, 185, 129));
                     Gdiplus::SolidBrush fillBrush(fill);
                     g.FillPath(&fillBrush, &path);
-
-                    Gdiplus::Pen borderPen(Gdiplus::Color(255, 203, 213, 225), 1.0f);
-                    g.DrawPath(&borderPen, &path);
-
-                    Gdiplus::Color iconColor = Gdiplus::Color(255, 51, 65, 85);
-                    float icX = btnRect.X + 16.0f * scale;
-                    float icY = btnRect.Y + btnRect.Height / 2.0f;
-                    float r = 5.0f * scale;
-
-                    Gdiplus::Pen arcPen(iconColor, 1.5f * scale);
-                    arcPen.SetStartCap(Gdiplus::LineCapRound);
-                    arcPen.SetEndCap(Gdiplus::LineCapRound);
-
-                    g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 215.0f, 170.0f);
-                    float ax1 = icX + r * 0.82f;
-                    float ay1 = icY - r * 0.57f;
-                    g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.0f * scale, ay1 - 2.5f * scale);
-                    g.DrawLine(&arcPen, ax1, ay1, ax1 - 3.0f * scale, ay1 + 2.5f * scale);
-
-                    g.DrawArc(&arcPen, icX - r, icY - r, r * 2.0f, r * 2.0f, 35.0f, 170.0f);
-                    float ax2 = icX - r * 0.82f;
-                    float ay2 = icY + r * 0.57f;
-                    g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.0f * scale, ay2 + 2.5f * scale);
-                    g.DrawLine(&arcPen, ax2, ay2, ax2 + 3.0f * scale, ay2 - 2.5f * scale);
-
-                    Gdiplus::FontFamily ff(L"Segoe UI");
-                    Gdiplus::Font font(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                    Gdiplus::SolidBrush textBrush(iconColor);
-                    Gdiplus::StringFormat sf;
-                    sf.SetAlignment(Gdiplus::StringAlignmentCenter);
-                    sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                    Gdiplus::RectF textRect(btnRect.X + 20.0f * scale, btnRect.Y, btnRect.Width - 20.0f * scale, btnRect.Height);
-                    g.DrawString(L"Làm mới", -1, &font, textRect, &sf, &textBrush);
+                    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
+                    g.DrawString(text, -1, &font, btnRect, &sf, &textBrush);
+                } else if (pDIS->CtlID == IDC_FILE_UPLOAD_DIR) {
+                    Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 67, 56, 202) : (isHover ? Gdiplus::Color(255, 79, 70, 229) : Gdiplus::Color(255, 99, 102, 241));
+                    Gdiplus::SolidBrush fillBrush(fill);
+                    g.FillPath(&fillBrush, &path);
+                    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
+                    g.DrawString(text, -1, &font, btnRect, &sf, &textBrush);
+                } else if (pDIS->CtlID == IDC_FILE_CANCEL) {
+                    Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 185, 28, 28) : (isHover ? Gdiplus::Color(255, 220, 38, 38) : Gdiplus::Color(255, 239, 68, 68));
+                    Gdiplus::SolidBrush fillBrush(fill);
+                    g.FillPath(&fillBrush, &path);
+                    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
+                    g.DrawString(text, -1, &font, btnRect, &sf, &textBrush);
                 } else {
                     Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 226, 232, 240) : (isHover ? Gdiplus::Color(255, 241, 245, 249) : Gdiplus::Color(255, 255, 255, 255));
                     Gdiplus::SolidBrush fillBrush(fill);
@@ -454,12 +784,7 @@ namespace {
                     Gdiplus::Pen borderPen(Gdiplus::Color(255, 203, 213, 225), 1.0f);
                     g.DrawPath(&borderPen, &path);
 
-                    Gdiplus::FontFamily ff(L"Segoe UI");
-                    Gdiplus::Font font(&ff, 9.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
                     Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 51, 65, 85));
-                    Gdiplus::StringFormat sf;
-                    sf.SetAlignment(Gdiplus::StringAlignmentCenter);
-                    sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
                     g.DrawString(text, -1, &font, btnRect, &sf, &textBrush);
                 }
                 return TRUE;
@@ -467,37 +792,51 @@ namespace {
 
             case WM_GETMINMAXINFO: {
                 MINMAXINFO* pMMI = (MINMAXINFO*)lp;
-                float scale = GetDpiScale(hwnd);
-                pMMI->ptMinTrackSize.x = (LONG)std::round(760.0f * scale);
-                pMMI->ptMinTrackSize.y = (LONG)std::round(520.0f * scale);
+                float s = GetDpiScale(hwnd);
+                pMMI->ptMinTrackSize.x = (LONG)std::round(820.0f * s);
+                pMMI->ptMinTrackSize.y = (LONG)std::round(560.0f * s);
                 return 0;
             }
 
             case WM_SIZE: {
                 int w = LOWORD(lp);
                 int h = HIWORD(lp);
-                int pad = (int)std::round(16.0f * scale);
+                int pad = (int)std::round(14.0f * scale);
                 int gap = (int)std::round(8.0f * scale);
-                int btnH = (int)std::round(32.0f * scale);
-                int navY = pad;
+                int btnH = (int)std::round(30.0f * scale);
 
-                int btnRootW = (int)std::round(80.0f * scale);
-                int btnUpW = (int)std::round(85.0f * scale);
+                // Row 1: Navigation and Address Bar
+                int navY = pad;
+                int btnRootW = (int)std::round(75.0f * scale);
+                int btnUpW = (int)std::round(80.0f * scale);
                 int btnRefW = (int)std::round(85.0f * scale);
-                int btnDlW = (int)std::round(125.0f * scale);
 
                 MoveWindow(g_hBtnRoot, pad, navY, btnRootW, btnH, TRUE);
                 MoveWindow(g_hBtnUp, pad + btnRootW + gap, navY, btnUpW, btnH, TRUE);
                 MoveWindow(g_hBtnRefresh, pad + btnRootW + gap + btnUpW + gap, navY, btnRefW, btnH, TRUE);
 
-                int leftOffset = pad + btnRootW + gap + btnUpW + gap + btnRefW + gap;
-                int rightOffset = w - pad - btnDlW;
-                int addrW = rightOffset - leftOffset - gap;
+                int addrLeft = pad + btnRootW + gap + btnUpW + gap + btnRefW + gap;
+                int addrW = w - pad - addrLeft;
                 if (addrW < 100) addrW = 100;
+                MoveWindow(g_hAddressEdit, addrLeft, navY, addrW, btnH, TRUE);
 
-                MoveWindow(g_hAddressEdit, leftOffset, navY, addrW, btnH, TRUE);
-                MoveWindow(g_hBtnDownload, rightOffset, navY, btnDlW, btnH, TRUE);
+                // Row 2: Action Toolbar (Download, Upload File, Upload Folder, Cancel)
+                int actY = navY + btnH + gap;
+                int btnDlW = (int)std::round(105.0f * scale);
+                int btnUpFileW = (int)std::round(125.0f * scale);
+                int btnUpDirW = (int)std::round(150.0f * scale);
+                int btnCancelW = (int)std::round(85.0f * scale);
 
+                int curX = pad;
+                MoveWindow(g_hBtnDownload, curX, actY, btnDlW, btnH, TRUE);
+                curX += btnDlW + gap;
+                MoveWindow(g_hBtnUploadFile, curX, actY, btnUpFileW, btnH, TRUE);
+                curX += btnUpFileW + gap;
+                MoveWindow(g_hBtnUploadDir, curX, actY, btnUpDirW, btnH, TRUE);
+                curX += btnUpDirW + gap;
+                MoveWindow(g_hBtnCancel, curX, actY, btnCancelW, btnH, TRUE);
+
+                // Bottom: Progress bar & Status label
                 int progressH = (int)std::round(8.0f * scale);
                 int statusH = (int)std::round(24.0f * scale);
                 int bottomY = h - pad - statusH - progressH;
@@ -505,7 +844,8 @@ namespace {
                 MoveWindow(g_hProgressBar, pad, bottomY, w - pad * 2, progressH, TRUE);
                 MoveWindow(g_hStatusLabel, pad, bottomY + progressH + 4, w - pad * 2, statusH, TRUE);
 
-                int listY = navY + btnH + gap + 4;
+                // ListView viewport
+                int listY = actY + btnH + gap;
                 int listH = bottomY - listY - gap;
                 if (listH < 60) listH = 60;
                 MoveWindow(g_hFileList, pad, listY, w - pad * 2, listH, TRUE);
@@ -599,9 +939,20 @@ namespace {
                 SetWindowTextW(hwnd, (L"LanRemote - Trình duyệt tệp (" + Utils::Utf8ToWide(g_curPath) + L")").c_str());
 
                 if (g_hStatusLabel) {
-                    std::wstring statusStr = L"✓ Thư mục: " + std::to_wstring(dirCount) + L"  •  Tệp tin: " + std::to_wstring(fileCount) + L"  •  Nhấp đúp hoặc chọn tệp và bấm 'Tải file về'";
+                    std::wstring statusStr = L"✓ Thư mục: " + std::to_wstring(dirCount) + L"  •  Tệp tin: " + std::to_wstring(fileCount) + L"  •  Sẵn sàng truyền tải";
                     SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 }
+                return 0;
+            }
+
+            case WM_FILE_BATCH_START_MSG: {
+                ShowWindow(g_hProgressBar, SW_SHOW);
+                SendMessageW(g_hProgressBar, PBM_SETRANGE32, 0, 100);
+                SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
+
+                std::wstring statusStr = L"⏳ Bắt đầu truyền batch: " + Utils::Utf8ToWide(g_batchRootName) +
+                                         L" (" + std::to_wstring(g_batchTotalFiles) + L" tệp, " + FormatBytes(g_batchTotalBytes) + L")";
+                if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 return 0;
             }
 
@@ -615,7 +966,7 @@ namespace {
                 SendMessageW(g_hProgressBar, PBM_SETRANGE32, 0, 100);
                 SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
 
-                std::wstring statusStr = L"⏳ Đang tải: " + Utils::Utf8ToWide(dlName) + L" (0 / " + FormatBytes(total) + L" - 0%)";
+                std::wstring statusStr = L"⏳ Đang truyền: " + Utils::Utf8ToWide(dlName) + L" (0 / " + FormatBytes(total) + L" - 0%)";
                 if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 return 0;
             }
@@ -625,25 +976,60 @@ namespace {
                 std::string dlName = g_downloadingFile;
                 uint64_t dl = g_downloadedBytes;
                 uint64_t total = g_totalFileSize;
+                uint64_t startMs = g_transferStartTimeMs;
                 LeaveCriticalSection(&g_fileCs);
 
                 int percent = total > 0 ? (int)((dl * 100) / total) : 0;
                 if (percent > 100) percent = 100;
                 SendMessageW(g_hProgressBar, PBM_SETPOS, percent, 0);
 
-                std::wstring statusStr = L"⏳ Đang tải: " + Utils::Utf8ToWide(dlName) + L" (" + FormatBytes(dl) + L" / " + FormatBytes(total) + L" - " + std::to_wstring(percent) + L"%)";
+                uint64_t elapsed = GetTickCount64() - startMs;
+                double speed = (elapsed > 0) ? ((double)dl / (double)elapsed * 1000.0) : 0.0;
+
+                std::wstring statusStr = L"⏳ Đang truyền: " + Utils::Utf8ToWide(dlName) + L" (" + FormatBytes(dl) +
+                                         L" / " + FormatBytes(total) + L" - " + std::to_wstring(percent) + L"%) • " +
+                                         FormatSpeed(speed) + L" • Đang tính CRC32...";
                 if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 return 0;
             }
 
             case WM_FILE_END_DL: {
+                bool crcOk = (wp != 0);
                 EnterCriticalSection(&g_fileCs);
                 std::string dlName = g_downloadingFile;
                 uint64_t total = g_totalFileSize;
                 LeaveCriticalSection(&g_fileCs);
 
                 SendMessageW(g_hProgressBar, PBM_SETPOS, 100, 0);
-                std::wstring statusStr = L"✓ Đã tải xong: " + Utils::Utf8ToWide(dlName) + L" (" + FormatBytes(total) + L") - Đã lưu tại thư mục app";
+
+                std::wstring statusStr;
+                if (crcOk) {
+                    statusStr = L"✓ Đã hoàn tất: " + Utils::Utf8ToWide(dlName) + L" (" + FormatBytes(total) + L") • Xác thực toàn vẹn CRC32 khớp 100%";
+                } else {
+                    statusStr = L"✖ Lỗi toàn vẹn dữ liệu: " + Utils::Utf8ToWide(dlName) + L" có mã CRC32 không khớp! Tệp tạm thời đã bị xóa an toàn.";
+                }
+                if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
+                return 0;
+            }
+
+            case WM_FILE_BATCH_END_MSG: {
+                SendMessageW(g_hProgressBar, PBM_SETPOS, 100, 0);
+                std::wstring statusStr = L"✓ Đã hoàn tất toàn bộ cây thư mục/batch: " + Utils::Utf8ToWide(g_batchRootName) +
+                                         L" • Tất cả các tệp đều đã được kiểm tra toàn vẹn CRC32 thành công";
+                if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
+                return 0;
+            }
+
+            case WM_FILE_CANCEL_MSG: {
+                SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
+                std::wstring statusStr = L"✖ Thao tác truyền tải đã được hủy an toàn. Tệp tạm thời (.part) đã bị dọn dẹp sạch sẽ.";
+                if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
+                return 0;
+            }
+
+            case WM_FILE_ERROR_MSG: {
+                SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
+                std::wstring statusStr = L"✖ Lỗi truyền tải: " + Utils::Utf8ToWide(g_lastErrorMessage);
                 if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 return 0;
             }
@@ -667,6 +1053,28 @@ namespace {
                     }
                     if (id == IDC_FILE_DOWNLOAD) {
                         TriggerDownloadSelected(hwnd);
+                        return 0;
+                    }
+                    if (id == IDC_FILE_UPLOAD_FILE) {
+                        std::wstring localFile = PickFile(hwnd);
+                        if (!localFile.empty()) {
+                            std::thread([localFile]() {
+                                UploadSingleFile(localFile, g_curPath);
+                            }).detach();
+                        }
+                        return 0;
+                    }
+                    if (id == IDC_FILE_UPLOAD_DIR) {
+                        std::wstring localFolder = PickFolder(hwnd);
+                        if (!localFolder.empty()) {
+                            std::thread([localFolder]() {
+                                UploadFolder(localFolder, g_curPath);
+                            }).detach();
+                        }
+                        return 0;
+                    }
+                    if (id == IDC_FILE_CANCEL) {
+                        FileExplorerWindow::CancelCurrentTransfer();
                         return 0;
                     }
                 }
@@ -726,6 +1134,9 @@ namespace {
                 g_hBtnUp = NULL;
                 g_hBtnRefresh = NULL;
                 g_hBtnDownload = NULL;
+                g_hBtnUploadFile = NULL;
+                g_hBtnUploadDir = NULL;
+                g_hBtnCancel = NULL;
                 g_hAddressEdit = NULL;
                 g_hProgressBar = NULL;
                 g_hStatusLabel = NULL;
@@ -766,8 +1177,8 @@ namespace FileExplorerWindow {
                 scale = (float)GetDeviceCaps(screenDc, LOGPIXELSY) / 96.0f;
                 ReleaseDC(NULL, screenDc);
             }
-            int winW = (int)std::round(820.0f * scale);
-            int winH = (int)std::round(620.0f * scale);
+            int winW = (int)std::round(860.0f * scale);
+            int winH = (int)std::round(640.0f * scale);
 
             int scrW = GetSystemMetrics(SM_CXSCREEN);
             int scrH = GetSystemMetrics(SM_CYSCREEN);
@@ -814,6 +1225,7 @@ namespace FileExplorerWindow {
         g_downloadingFile = fileName;
         g_totalFileSize = info.fileSize;
         g_downloadedBytes = 0;
+        g_transferStartTimeMs = GetTickCount64();
 
         g_fileMgr.OpenFileForWrite(g_downloadingFile);
         LeaveCriticalSection(&g_fileCs);
@@ -821,11 +1233,70 @@ namespace FileExplorerWindow {
         if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_START_DL, 0, 0);
     }
 
-    void OnFileChunk(const char* data, int size) {
+    void OnFileHeader(const Protocol::FileHeaderPayload& header) {
         if (!g_csInit) return;
         EnterCriticalSection(&g_fileCs);
-        g_fileMgr.WriteChunk(data, size);
-        g_downloadedBytes += size;
+        std::string relPath = header.relativePath;
+
+        std::string savePath = "downloads/" + relPath;
+
+        if (header.isDirectory) {
+            try {
+                std::filesystem::create_directories(std::filesystem::u8path(savePath));
+            } catch (...) {}
+            LeaveCriticalSection(&g_fileCs);
+            return;
+        }
+
+        g_downloadingFile = relPath;
+        g_totalFileSize = header.fileSize;
+        g_downloadedBytes = 0;
+        g_transferStartTimeMs = GetTickCount64();
+
+        g_fileMgr.OpenForWrite(savePath, header.fileSize, header.expectedCrc32);
+        LeaveCriticalSection(&g_fileCs);
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_START_DL, 0, 0);
+    }
+
+    void OnFileBatchStart(const Protocol::FileBatchStartPayload& batch) {
+        if (!g_csInit) return;
+        EnterCriticalSection(&g_fileCs);
+        g_batchRootName = batch.rootName;
+        g_batchTotalFiles = batch.totalFiles;
+        g_batchTotalBytes = batch.totalBytes;
+        g_batchTransferredBytes = 0;
+        g_transferActive = true;
+        g_transferCancelled = false;
+        LeaveCriticalSection(&g_fileCs);
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_BATCH_START_MSG, 0, 0);
+    }
+
+    void OnFileBatchEnd() {
+        if (!g_csInit) return;
+        g_transferActive = false;
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_BATCH_END_MSG, 0, 0);
+    }
+
+    void OnFileChunk(const char* data, int size) {
+        if (!g_csInit || !data || size <= 0) return;
+
+        const char* actualData = data;
+        int actualLen = size;
+
+        if (size > (int)sizeof(Protocol::FileChunkHeader)) {
+            const Protocol::FileChunkHeader* chk = (const Protocol::FileChunkHeader*)data;
+            if (chk->dataLength + sizeof(Protocol::FileChunkHeader) == (uint32_t)size) {
+                actualData = data + sizeof(Protocol::FileChunkHeader);
+                actualLen = (int)chk->dataLength;
+            }
+        }
+
+        EnterCriticalSection(&g_fileCs);
+        g_fileMgr.WriteChunk(actualData, actualLen);
+        g_downloadedBytes += actualLen;
+        g_batchTransferredBytes += actualLen;
         LeaveCriticalSection(&g_fileCs);
 
         if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_CHUNK_DL, 0, 0);
@@ -834,9 +1305,66 @@ namespace FileExplorerWindow {
     void OnFileEnd() {
         if (!g_csInit) return;
         EnterCriticalSection(&g_fileCs);
-        g_fileMgr.CloseFile();
+        bool crcValid = true;
+        g_fileMgr.FinalizeFile(&crcValid);
         LeaveCriticalSection(&g_fileCs);
 
-        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_END_DL, 0, 0);
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_END_DL, crcValid ? 1 : 0, 0);
+    }
+
+    void OnFileEndPayload(const Protocol::FileEndPayload& endP) {
+        if (!g_csInit) return;
+        EnterCriticalSection(&g_fileCs);
+        bool crcValid = false;
+        if (endP.status == Protocol::FILE_STATUS_CANCEL) {
+            g_fileMgr.AbortAndCleanup();
+            LeaveCriticalSection(&g_fileCs);
+            if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_CANCEL_MSG, 0, 0);
+            return;
+        }
+
+        g_fileMgr.FinalizeFile(&crcValid);
+        LeaveCriticalSection(&g_fileCs);
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_END_DL, crcValid ? 1 : 0, 0);
+    }
+
+    void OnFileCancel() {
+        if (!g_csInit) return;
+        g_transferCancelled = true;
+        g_transferActive = false;
+        EnterCriticalSection(&g_fileCs);
+        g_fileMgr.AbortAndCleanup();
+        LeaveCriticalSection(&g_fileCs);
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_CANCEL_MSG, 0, 0);
+    }
+
+    void OnFileError(const std::string& errMsg) {
+        if (!g_csInit) return;
+        g_transferActive = false;
+        EnterCriticalSection(&g_fileCs);
+        g_lastErrorMessage = errMsg;
+        g_fileMgr.AbortAndCleanup();
+        LeaveCriticalSection(&g_fileCs);
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_ERROR_MSG, 0, 0);
+    }
+
+    bool IsTransferActive() {
+        return g_transferActive.load();
+    }
+
+    void CancelCurrentTransfer() {
+        g_transferCancelled = true;
+        g_transferActive = false;
+        if (g_client) {
+            g_client->SendPacket(Protocol::MSG_FILE_CANCEL, nullptr, 0);
+        }
+        EnterCriticalSection(&g_fileCs);
+        g_fileMgr.AbortAndCleanup();
+        LeaveCriticalSection(&g_fileCs);
+
+        if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_CANCEL_MSG, 0, 0);
     }
 }

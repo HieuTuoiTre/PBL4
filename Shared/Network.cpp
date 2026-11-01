@@ -1,5 +1,6 @@
 #include "Network.h"
 #include "Protocol.h"
+#include "ControlEnvelope.h"
 #include <iostream>
 #include <mstcpip.h>
 
@@ -136,6 +137,7 @@ bool TcpServer::AcceptConnection(int timeoutMs){
 }
 
 void TcpServer::Close(){
+    ClearSessionKey();
     SOCKET sClient = clientSocket.exchange(INVALID_SOCKET);
     SOCKET sListen = listenSocket.exchange(INVALID_SOCKET);
     if (sClient != INVALID_SOCKET){
@@ -149,6 +151,7 @@ void TcpServer::Close(){
 }
 
 void TcpServer::CloseClient(){
+    ClearSessionKey();
     SOCKET sClient = clientSocket.exchange(INVALID_SOCKET);
     if (sClient != INVALID_SOCKET){
         shutdown(sClient, SD_BOTH);
@@ -158,6 +161,14 @@ void TcpServer::CloseClient(){
 }
 
 bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
+    // If session key is active, route all non-auth and non-envelope control packets through encryption
+    if (m_hasSessionKey.load() &&
+        type != Protocol::MSG_AUTH_REQUEST &&
+        type != Protocol::MSG_AUTH_RESPONSE &&
+        type != Protocol::MSG_ENCRYPTED_CONTROL) {
+        return SendEncryptedPacket(type, payload, payloadSize);
+    }
+
     // Khóa mutex trước để đảm bảo tính an toàn đa luồng, sau đó mới kiểm tra trạng thái socket
     std::lock_guard<std::mutex> lock(sendMutex);
 
@@ -180,6 +191,11 @@ bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int 
     }
 
     return true;
+}
+
+bool TcpServer::SendEncryptedPacket(Protocol::MessageType type, const char* payload, int payloadSize) {
+    if (!m_hasSessionKey.load()) return false;
+    return ControlEnvelope::SendEncryptedPacket(this, m_sessionKey, type, payload, payloadSize);
 }
 
 bool TcpServer::ReceiveExact(char* buffer, int length){
@@ -278,6 +294,7 @@ bool TcpClient::Connect(const std::string& ip, int port){
 }
 
 void TcpClient::Close(){
+    ClearSessionKey();
     SOCKET s = connectSocket.exchange(INVALID_SOCKET);
     if (s != INVALID_SOCKET){
         shutdown(s, SD_BOTH);
@@ -287,6 +304,14 @@ void TcpClient::Close(){
 }
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
+    // If session key is active, route all non-auth and non-envelope control packets through encryption
+    if (m_hasSessionKey.load() &&
+        type != Protocol::MSG_AUTH_REQUEST &&
+        type != Protocol::MSG_AUTH_RESPONSE &&
+        type != Protocol::MSG_ENCRYPTED_CONTROL) {
+        return SendEncryptedPacket(type, payload, payloadSize);
+    }
+
     // Khóa mutex trước để đảm bảo tính an toàn đa luồng, sau đó mới kiểm tra trạng thái socket
     std::lock_guard<std::mutex> lock(sendMutex);
 
@@ -309,6 +334,11 @@ bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int 
     }
 
     return true;
+}
+
+bool TcpClient::SendEncryptedPacket(Protocol::MessageType type, const char* payload, int payloadSize) {
+    if (!m_hasSessionKey.load()) return false;
+    return ControlEnvelope::SendEncryptedPacket(this, m_sessionKey, type, payload, payloadSize);
 }
 
 bool TcpClient::ReceiveExact(char* buffer, int length){
