@@ -9,6 +9,7 @@
 #include "StatusOverlay.h"
 #include "ConnectionAlert.h"
 #include "DiscoveryResponder.h"
+#include "ClientChatWindow.h"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -31,29 +32,56 @@ namespace {
     // ==========================================
     void TransmitVideoLoop() {
         if (!ScreenCapture::Initialize()) return;
+        ScreenCapture::ForceFullFrame(); // Đảm bảo frame đầu tiên gửi cho Manager luôn là 100% full screen
         
         std::vector<char> frameBuffer;
         frameBuffer.reserve(512 * 1024); // Cấp phát sẵn 512KB tránh cấp phát lại
         int x, y, w, h;
 
+        // Chu kỳ chuẩn xác cho 60.0 FPS = 16,666 microsecond (16.666 ms)
+        constexpr std::chrono::microseconds FRAME_TARGET_TIME(16666);
+        auto nextFrameTime = std::chrono::steady_clock::now();
+
         while (g_isConnected && g_isRunning) {
-            auto startTime = std::chrono::steady_clock::now();
+            nextFrameTime += FRAME_TARGET_TIME;
+
+            // Chống dồn hàng đợi (TCP Flow-Control): Nếu socket đang bận thì bỏ qua khung
+            if (!g_videoServer.CanSendWithoutBlocking()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                auto now = std::chrono::steady_clock::now();
+                if (now > nextFrameTime + FRAME_TARGET_TIME) {
+                    nextFrameTime = now;
+                }
+                continue;
+            }
 
             if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
                 // frameBuffer đã chứa sẵn [VideoDeltaHeader + JPEG Data], gửi thẳng qua socket video!
+                auto tSendStart = std::chrono::steady_clock::now();
                 if (!g_videoServer.SendPacket(Protocol::MSG_VIDEO_FRAME, frameBuffer.data(), (int)frameBuffer.size())) {
                     g_isConnected = false;
                     break;
                 }
+                auto tSendEnd = std::chrono::steady_clock::now();
+                double sendMs = std::chrono::duration<double, std::milli>(tSendEnd - tSendStart).count();
+                ScreenCapture::ReportSendTime(sendMs);
             }
 
-            // Giữ nhịp ~60 FPS thông minh: Trừ đi thời gian đã tốn để chụp & nén
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - startTime
-            ).count();
-            
-            if (elapsed < 16) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed));
+            // Bộ giữ nhịp độ chính xác cao (High-Precision Frame Pacer chuẩn 60.0 FPS)
+            auto now = std::chrono::steady_clock::now();
+            if (nextFrameTime > now) {
+                auto remainingUs = std::chrono::duration_cast<std::chrono::microseconds>(nextFrameTime - now).count();
+                // Nếu còn nhiều hơn 2.5ms, ngủ nhẹ để nhường CPU cho các luồng khác
+                if (remainingUs > 2500) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(remainingUs - 2000));
+                }
+                // Trong 2ms cuối cùng, spin-wait kết hợp yield để căn trúng đích 60.0 FPS chuẩn xác
+                while (std::chrono::steady_clock::now() < nextFrameTime) {
+                    std::this_thread::yield();
+                }
+            } else {
+                // Đã quá thời hạn chu kỳ khung hình hiện tại: Căn chỉnh ngay nextFrameTime theo now để chống drift
+                nextFrameTime = now;
             }
         }
         ScreenCapture::Cleanup();
@@ -171,6 +199,23 @@ namespace {
                     }
                     break;
                 }
+
+                case Protocol::MSG_CHAT_MESSAGE: {
+                    if (header.size == sizeof(Protocol::ChatMessagePayload)) {
+                        Protocol::ChatMessagePayload chat;
+                        if (g_controlServer.ReceiveExact((char*)&chat, sizeof(chat))) {
+                            chat.sender[sizeof(chat.sender) - 1] = '\0';
+                            chat.message[sizeof(chat.message) - 1] = '\0';
+                            ClientChatWindow::OnMessageReceived(chat);
+                        } else {
+                            g_isConnected = false;
+                        }
+                    } else if (header.size > 0) {
+                        std::vector<char> dump(header.size);
+                        g_controlServer.ReceiveExact(dump.data(), header.size);
+                    }
+                    break;
+                }
                 
                 default: {
                     if (header.size > 0) {
@@ -225,6 +270,7 @@ namespace SessionManager {
             // Cả 3 kết nối đã sẵn sàng!
             g_isConnected = true;
             DiscoveryResponder::SetBusy(true);
+            InputInjector::ReleaseAllModifiers();
             g_lastInputTimeMs = 0;
 
             // 1. Hiển thị Pop-up thông báo (tự tắt sau 5s hoặc khi click)
@@ -233,6 +279,9 @@ namespace SessionManager {
             // 2. Kích hoạt và hiện Overlay trạng thái ở góc phải trên màn hình
             g_overlay.SetVisible(true);
             g_overlay.SetState(OverlayState::ConnectedViewing);
+
+            // 3. Khởi tạo cửa sổ chat cho máy khách
+            ClientChatWindow::Initialize(&g_controlServer);
 
             // Bắt đầu thu âm và gửi trực tiếp qua cổng Audio (8082)
             AudioCapture::Start([](const char* buffer, int size) {
@@ -258,7 +307,9 @@ namespace SessionManager {
             // Mất kết nối hoặc app dừng: Dọn dẹp phiên hiện tại
             g_isConnected = false;
             DiscoveryResponder::SetBusy(false);
+            InputInjector::ReleaseAllModifiers();
             AudioCapture::Stop();
+            ClientChatWindow::Close();
             g_controlServer.CloseClient();
             g_videoServer.CloseClient();
             g_audioServer.CloseClient();
@@ -275,13 +326,16 @@ namespace SessionManager {
         g_videoServer.Close();
         g_audioServer.Close();
         g_overlay.Destroy();
+        ClientChatWindow::Close();
     }
 
     void Stop() {
         g_isRunning = false;
         g_isConnected = false;
         DiscoveryResponder::SetBusy(false);
+        InputInjector::ReleaseAllModifiers();
         AudioCapture::Stop();
+        ClientChatWindow::Close();
         g_controlServer.Close();
         g_videoServer.Close();
         g_audioServer.Close();

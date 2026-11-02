@@ -6,4 +6,7 @@ namespace InputInjector {
     void InjectMouse(const Protocol::MousePayload& payload);
 
     void InjectKeyboard(const Protocol::KeyboardPayload& payload);
+
+    // Tự động giải phóng toàn bộ phím bổ trợ (Ctrl, Alt, Shift, Win) để chống kẹt phím
+    void ReleaseAllModifiers();
 }

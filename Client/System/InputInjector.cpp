@@ -3,6 +3,22 @@
 
 namespace InputInjector {
 
+    void ReleaseAllModifiers() {
+        WORD keys[] = { VK_LWIN, VK_RWIN, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
+                        VK_MENU, VK_LMENU, VK_RMENU, VK_SHIFT, VK_LSHIFT, VK_RSHIFT };
+        INPUT inputs[11] = {};
+        for (int i = 0; i < 11; i++) {
+            inputs[i].type = INPUT_KEYBOARD;
+            inputs[i].ki.wVk = keys[i];
+            inputs[i].ki.wScan = (WORD)MapVirtualKeyW(keys[i], MAPVK_VK_TO_VSC);
+            inputs[i].ki.dwFlags = KEYEVENTF_KEYUP;
+            if (keys[i] == VK_LWIN || keys[i] == VK_RWIN || keys[i] == VK_RCONTROL || keys[i] == VK_RMENU) {
+                inputs[i].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+            }
+        }
+        SendInput(11, inputs, sizeof(INPUT));
+    }
+
     void InjectMouse(const Protocol::MousePayload& payload) {
         INPUT input = { 0 };
         input.type = INPUT_MOUSE;
@@ -43,21 +59,33 @@ namespace InputInjector {
     }
 
     void InjectKeyboard(const Protocol::KeyboardPayload& payload) {
+        // Khóa hoàn toàn phím Windows (VK_LWIN, VK_RWIN) để chống kẹt phím
+        if (payload.vkCode == VK_LWIN || payload.vkCode == VK_RWIN) {
+            // Chặn hoàn toàn lệnh nhấn xuống (keydown), chỉ cho phép lệnh nhả (keyup) nếu có
+            if (payload.isDown != 0) {
+                return;
+            }
+        }
+
         INPUT input = { 0 };
         input.type = INPUT_KEYBOARD;
         input.ki.wVk = (WORD)payload.vkCode;
+        // Ánh xạ Virtual Key code sang Hardware Scan Code cho Game, DirectX (DirectInput), Giả lập và Máy ảo
+        input.ki.wScan = (WORD)MapVirtualKeyW((UINT)payload.vkCode, MAPVK_VK_TO_VSC);
 
         DWORD flags = 0;
         if (payload.isDown == 0) {
             flags |= KEYEVENTF_KEYUP;
         }
 
-        // Bổ sung cờ KEYEVENTF_EXTENDEDKEY cho các phím điều hướng trên Windows
+        // Bổ sung cờ KEYEVENTF_EXTENDEDKEY cho các phím điều hướng và phím đặc biệt trên Windows
         switch (payload.vkCode) {
             case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
             case VK_PRIOR: case VK_NEXT: case VK_END: case VK_HOME:
             case VK_INSERT: case VK_DELETE:
+            case VK_DIVIDE: case VK_NUMLOCK:
             case VK_RCONTROL: case VK_RMENU:
+            case VK_LWIN: case VK_RWIN:
                 flags |= KEYEVENTF_EXTENDEDKEY;
                 break;
         }

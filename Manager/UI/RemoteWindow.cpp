@@ -2,6 +2,7 @@
 #include "InputHandler.h"
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
+#include "ChatWindow.h"
 #include "../Media/AudioPlayer.h"
 #include <gdiplus.h>
 #include <turbojpeg.h>
@@ -10,9 +11,11 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <atomic>
 
 namespace {
     HWND g_hwnd = NULL;
+    HWND g_hVideoWnd = NULL;
     TcpClient* g_client = nullptr;
 
     std::vector<uint32_t> g_framePixels;
@@ -23,9 +26,11 @@ namespace {
     tjhandle g_tjDecompressor = nullptr;
     CRITICAL_SECTION g_cs;
 
-    int g_fps = 0;
-    int g_frameCount = 0;
-    DWORD g_lastTime = 0;
+    std::atomic<int> g_streamFrameCount(0);
+    std::atomic<int> g_renderFrameCount(0);
+    std::atomic<int> g_streamFps(0);
+    std::atomic<int> g_renderFps(60);
+    std::atomic<uint64_t> g_lastFrameTimeMs(0);
 
     int GetFrameWidth() { return g_frameWidth; }
     int GetFrameHeight() { return g_frameHeight; }
@@ -58,7 +63,8 @@ namespace {
         BTN_VOL_DOWN,
         BTN_VOL_UP,
         BTN_TASK_MGR,
-        BTN_FILE_EXP
+        BTN_FILE_EXP,
+        BTN_CHAT
     };
 
     struct ToolbarButton {
@@ -127,6 +133,14 @@ namespace {
         buttons.push_back({ BTN_FILE_EXP, Gdiplus::RectF(curX, btnY, btnFileW, btnHeight), L"File Explorer", L"Ctrl+E", false });
         curX += btnFileW + gap;
 
+        int unread = ChatWindow::GetUnreadCount();
+        std::wstring chatText = (unread > 0) ? (L"Trò chuyện (" + std::to_wstring(unread) + L")") : L"Trò chuyện";
+        std::wstring chatHint = L"Ctrl+T";
+        float btnChatW = (float)std::round((unread > 0 ? 128.0f : 106.0f) * scale);
+        bool isChatActive = (unread > 0 || ChatWindow::IsOpen());
+        buttons.push_back({ BTN_CHAT, Gdiplus::RectF(curX, btnY, btnChatW, btnHeight), chatText, chatHint, isChatActive });
+        curX += btnChatW + gap;
+
         return buttons;
     }
 
@@ -173,7 +187,7 @@ namespace {
         float radius = 5.0f * scale;
 
         for (const auto& btn : buttons) {
-            if (btn.rect.GetRight() > (float)(width - 125 * scale)) continue;
+            if (btn.rect.GetRight() > (float)(width - 160 * scale)) continue;
 
             AddRoundRectPath(path, btn.rect, radius);
 
@@ -205,6 +219,10 @@ namespace {
                 fillColor = isPressed ? Gdiplus::Color(255, 60, 20, 20) : (isHovered ? Gdiplus::Color(255, 80, 28, 28) : Gdiplus::Color(255, 68, 24, 24));
                 borderColor = Gdiplus::Color(255, 239, 68, 68);
                 textColor = Gdiplus::Color(255, 252, 165, 165);
+            } else if (btn.id == BTN_CHAT && btn.isSpecial) {
+                fillColor = isPressed ? Gdiplus::Color(255, 30, 58, 138) : (isHovered ? Gdiplus::Color(255, 37, 99, 235) : Gdiplus::Color(255, 29, 78, 216));
+                borderColor = Gdiplus::Color(255, 96, 165, 250);
+                textColor = Gdiplus::Color(255, 255, 255, 255);
             } else {
                 fillColor = isPressed ? Gdiplus::Color(255, 28, 30, 36) : (isHovered ? Gdiplus::Color(255, 52, 55, 66) : Gdiplus::Color(255, 38, 40, 48));
                 borderColor = isHovered ? Gdiplus::Color(255, 85, 90, 108) : Gdiplus::Color(255, 58, 61, 74);
@@ -280,12 +298,32 @@ namespace {
                 textRect.X += (iconW + 4.0f * scale);
                 textRect.Width -= (iconW + 4.0f * scale);
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
+            } else if (btn.id == BTN_CHAT) {
+                float iconW = 12.0f * scale;
+                float iconX = btn.rect.X + 10.0f * scale;
+                float iconY = btn.rect.Y + (btn.rect.Height - 10.0f * scale) / 2.0f;
+                Gdiplus::SolidBrush chatBrush(textColor);
+                Gdiplus::RectF bubbleRect(iconX, iconY, 11.0f * scale, 7.5f * scale);
+                Gdiplus::GraphicsPath bubblePath;
+                AddRoundRectPath(bubblePath, bubbleRect, 2.0f * scale);
+                g.FillPath(&chatBrush, &bubblePath);
+                Gdiplus::PointF tailPts[3] = {
+                    Gdiplus::PointF(iconX + 2.0f * scale, iconY + 6.0f * scale),
+                    Gdiplus::PointF(iconX - 0.5f * scale, iconY + 10.0f * scale),
+                    Gdiplus::PointF(iconX + 5.5f * scale, iconY + 6.0f * scale)
+                };
+                g.FillPolygon(&chatBrush, tailPts, 3);
+
+                Gdiplus::RectF textRect = btn.rect;
+                textRect.X += (iconW + 4.0f * scale);
+                textRect.Width -= (iconW + 4.0f * scale);
+                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
             } else {
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, btn.rect, &sfCenter, &textBrush);
             }
         }
 
-        float badgeW = 96.0f * scale;
+        float badgeW = 140.0f * scale;
         float badgeH = 28.0f * scale;
         float badgeX = (float)width - badgeW - (12.0f * scale);
         float badgeY = (float)(tbHeight - badgeH) / 2.0f;
@@ -297,15 +335,42 @@ namespace {
         Gdiplus::Pen badgeBorder(Gdiplus::Color(255, 42, 44, 54), 1.0f);
         g.DrawPath(&badgeBorder, &path);
 
-        Gdiplus::Color dotColor = (g_fps >= 20) ? Gdiplus::Color(255, 34, 197, 94) : Gdiplus::Color(255, 245, 158, 11);
+        Gdiplus::Color dotColor;
+        std::wstring fpsStr;
+
+        int streamFps = g_streamFps.load();
+        int renderFps = g_renderFps.load();
+        uint64_t nowMs = GetTickCount64();
+        uint64_t lastFrameMs = g_lastFrameTimeMs.load(std::memory_order_relaxed);
+        uint64_t msSinceLastFrame = (lastFrameMs > 0 && nowMs >= lastFrameMs) ? (nowMs - lastFrameMs) : 0;
+
+        // Nhận diện trạng thái màn hình tĩnh thông minh:
+        // Nếu trong 400ms qua không có frame mới (hoặc streamFps == 0), coi là màn hình tĩnh (Eco Mode).
+        // Tránh hiện tượng nhấp nháy đèn cam hoặc báo ảo "2-3 FPS" khi người dùng vừa dừng tay.
+        bool isStaticScreen = (streamFps == 0) || (streamFps <= 6 && msSinceLastFrame >= 350) || (msSinceLastFrame >= 500);
+
+        if (isStaticScreen) {
+            dotColor = Gdiplus::Color(255, 56, 189, 248); // Cyan: Màn hình tĩnh / đồng bộ tuyệt đối (Eco)
+            fpsStr = L"60 FPS (Tĩnh)";
+        } else {
+            int dispFps = (renderFps > 0) ? renderFps : streamFps;
+            if (streamFps >= 25) {
+                dotColor = Gdiplus::Color(255, 34, 197, 94); // Xanh lá: Mượt mà 60 FPS
+            } else if (streamFps >= 12) {
+                dotColor = Gdiplus::Color(255, 245, 158, 11); // Vàng cam: Mạng trung bình
+            } else {
+                dotColor = Gdiplus::Color(255, 239, 68, 68); // Đỏ: Nghẽn mạng khi đang chuyển động
+            }
+            fpsStr = std::to_wstring(dispFps) + L" FPS (Net " + std::to_wstring(streamFps) + L")";
+        }
+
         Gdiplus::SolidBrush dotBrush(dotColor);
         float dotSize = 7.0f * scale;
-        float dotX = badgeX + 12.0f * scale;
+        float dotX = badgeX + 10.0f * scale;
         float dotY = badgeY + (badgeH - dotSize) / 2.0f;
         g.FillEllipse(&dotBrush, dotX, dotY, dotSize, dotSize);
 
-        std::wstring fpsStr = std::to_wstring(g_fps) + L" FPS";
-        Gdiplus::RectF fpsTextRect(dotX + dotSize + 6.0f * scale, badgeY, badgeW - dotSize - 18.0f * scale, badgeH);
+        Gdiplus::RectF fpsTextRect(dotX + dotSize + 6.0f * scale, badgeY, badgeW - dotSize - 16.0f * scale, badgeH);
         Gdiplus::StringFormat sfLeft;
         sfLeft.SetAlignment(Gdiplus::StringAlignmentNear);
         sfLeft.SetLineAlignment(Gdiplus::StringAlignmentCenter);
@@ -316,37 +381,240 @@ namespace {
         targetG.DrawImage(&memBmp, 0, 0, width, tbHeight);
     }
 
+    static void DispatchVideoMouse(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, uint8_t action, uint8_t btn) {
+        if (!InputHandler::IsControlling()) return;
+
+        int frameW = GetFrameWidth();
+        int frameH = GetFrameHeight();
+        if (frameW <= 0 || frameH <= 0) return;
+
+        int16_t wheel = (msg == WM_MOUSEWHEEL) ? (int16_t)GET_WHEEL_DELTA_WPARAM(wp) : 0;
+
+        if (g_hVideoWnd) {
+            RECT r;
+            GetClientRect(g_hVideoWnd, &r);
+            if (r.right <= 0 || r.bottom <= 0) return;
+
+            float scaleX = (float)r.right / (float)frameW;
+            float scaleY = (float)r.bottom / (float)frameH;
+            float scale = (std::min)(scaleX, scaleY);
+            float vw = (float)frameW * scale;
+            float vh = (float)frameH * scale;
+            float vx = (float)(r.right - (int)vw) / 2.0f;
+            float vy = (float)(r.bottom - (int)vh) / 2.0f;
+
+            if (vw <= 0.0f || vh <= 0.0f) return;
+
+            POINT pt;
+            if (msg == WM_MOUSEWHEEL) {
+                pt.x = (short)LOWORD(lp);
+                pt.y = (short)HIWORD(lp);
+                ScreenToClient(g_hVideoWnd, &pt);
+            } else if (hwnd == g_hVideoWnd) {
+                pt.x = (short)LOWORD(lp);
+                pt.y = (short)HIWORD(lp);
+            } else {
+                pt.x = (short)LOWORD(lp);
+                pt.y = (short)HIWORD(lp);
+                ClientToScreen(hwnd, &pt);
+                ScreenToClient(g_hVideoWnd, &pt);
+            }
+
+            // Kẹp tọa độ chuột trong phạm vi viewport hiển thị thực tế (Letterbox viewport)
+            float cx = (float)pt.x;
+            if (cx < vx) cx = vx;
+            if (cx > vx + vw) cx = vx + vw;
+
+            float cy = (float)pt.y;
+            if (cy < vy) cy = vy;
+            if (cy > vy + vh) cy = vy + vh;
+
+            // Ánh xạ chính xác tuyệt đối sang tọa độ pixel của màn hình Client
+            int16_t imgX = (int16_t)((cx - vx) * (float)frameW / vw);
+            int16_t imgY = (int16_t)((cy - vy) * (float)frameH / vh);
+
+            if (imgX < 0) imgX = 0;
+            if (imgX >= frameW) imgX = (int16_t)(frameW - 1);
+            if (imgY < 0) imgY = 0;
+            if (imgY >= frameH) imgY = (int16_t)(frameH - 1);
+
+            InputHandler::SendMouseDirect(action, btn, imgX, imgY, wheel);
+        } else {
+            InputHandler::SendMouse(action, btn, lp, hwnd, frameW, frameH, (hwnd == g_hVideoWnd) ? 0 : GetToolbarHeight(hwnd), wheel);
+        }
+    }
+
+    LRESULT CALLBACK VideoWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        switch (msg) {
+            case WM_SIZE: {
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+
+            case WM_PAINT: {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                EnterCriticalSection(&g_cs);
+                if (!g_framePixels.empty() && g_frameWidth > 0 && g_frameHeight > 0) {
+                    RECT r;
+                    GetClientRect(hwnd, &r);
+                    float scaleX = (float)r.right / (float)g_frameWidth;
+                    float scaleY = (float)r.bottom / (float)g_frameHeight;
+                    float scale = (std::min)(scaleX, scaleY);
+                    int drawW = (int)(g_frameWidth * scale);
+                    int drawH = (int)(g_frameHeight * scale);
+                    int offX = (r.right - drawW) / 2;
+                    int offY = (r.bottom - drawH) / 2;
+
+                    // Tô đen viền letterbox xung quanh khung hình nếu có khoảng trống
+                    HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                    if (offX > 0) {
+                        RECT rLeft = { 0, 0, offX, r.bottom };
+                        RECT rRight = { offX + drawW, 0, r.right, r.bottom };
+                        FillRect(hdc, &rLeft, bgBrush);
+                        FillRect(hdc, &rRight, bgBrush);
+                    }
+                    if (offY > 0) {
+                        RECT rTop = { 0, 0, r.right, offY };
+                        RECT rBottom = { 0, offY + drawH, r.right, r.bottom };
+                        FillRect(hdc, &rTop, bgBrush);
+                        FillRect(hdc, &rBottom, bgBrush);
+                    }
+                    DeleteObject(bgBrush);
+
+                    SetStretchBltMode(hdc, HALFTONE);
+                    SetBrushOrgEx(hdc, 0, 0, NULL);
+                    StretchDIBits(
+                        hdc,
+                        offX, offY, drawW, drawH,
+                        0, 0, g_frameWidth, g_frameHeight,
+                        g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
+                    );
+                } else {
+                    RECT r;
+                    GetClientRect(hwnd, &r);
+                    HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                    FillRect(hdc, &r, bgBrush);
+                    DeleteObject(bgBrush);
+                }
+                LeaveCriticalSection(&g_cs);
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+
+            case WM_ERASEBKGND:
+                return 1;
+
+            case WM_SETCURSOR: {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE;
+            }
+
+            case WM_MOUSEMOVE: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE);
+                return 0;
+            }
+
+            case WM_LBUTTONDOWN: {
+                SetFocus(hwnd);
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_LEFT);
+                return 0;
+            }
+
+            case WM_LBUTTONUP: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_LEFT);
+                return 0;
+            }
+
+            case WM_RBUTTONDOWN: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT);
+                return 0;
+            }
+
+            case WM_RBUTTONUP: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_RIGHT);
+                return 0;
+            }
+
+            case WM_MOUSEWHEEL: {
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_WHEEL, Protocol::BUTTON_NONE);
+                return 0;
+            }
+
+            case WM_ACTIVATE:
+            case WM_SETFOCUS: {
+                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                if (InputHandler::IsControlling()) {
+                    InputHandler::ReleaseModifiers();
+                }
+                return 0;
+            }
+
+            case WM_KILLFOCUS: {
+                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                InputHandler::ReleaseModifiers();
+                return 0;
+            }
+
+            case WM_KEYDOWN:
+            case WM_KEYUP:
+            case WM_SYSKEYDOWN:
+            case WM_SYSKEYUP: {
+                if (g_hwnd) {
+                    return SendMessageW(g_hwnd, msg, wp, lp);
+                }
+                break;
+            }
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int tbHeight = GetToolbarHeight(hwnd);
 
         switch (msg) {
+            case WM_TIMER: {
+                if (wp == 1) {
+                    g_streamFps.store(g_streamFrameCount.exchange(0));
+                    g_renderFps.store(g_renderFrameCount.exchange(0));
+                    RECT r;
+                    GetClientRect(hwnd, &r);
+                    RECT tbRect = { 0, 0, r.right, tbHeight };
+                    InvalidateRect(hwnd, &tbRect, FALSE);
+                    return 0;
+                }
+                break;
+            }
+
             case WM_PAINT: {
                 PAINTSTRUCT ps;
                 HDC hdc = BeginPaint(hwnd, &ps);
                 RECT r;
                 GetClientRect(hwnd, &r);
-
-                if (ps.rcPaint.top < tbHeight) {
-                    RenderToolbar(hwnd, hdc, r, tbHeight);
-                }
-
-                if (ps.rcPaint.bottom > tbHeight) {
-                    EnterCriticalSection(&g_cs);
-                    if (!g_framePixels.empty() && g_frameWidth > 0 && g_frameHeight > 0) {
-                        int dstW = r.right;
-                        int dstH = r.bottom - tbHeight;
-                        SetStretchBltMode(hdc, COLORONCOLOR);
-                        StretchDIBits(
-                            hdc,
-                            0, tbHeight, dstW, dstH,
-                            0, 0, g_frameWidth, g_frameHeight,
-                            g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
-                        );
-                    }
-                    LeaveCriticalSection(&g_cs);
-                }
-
+                RenderToolbar(hwnd, hdc, r, tbHeight);
                 EndPaint(hwnd, &ps);
+                return 0;
+            }
+
+            case WM_SIZE: {
+                int w = LOWORD(lp);
+                int h = HIWORD(lp);
+                int vH = h - tbHeight;
+                if (vH < 0) vH = 0;
+                if (g_hVideoWnd) {
+                    MoveWindow(g_hVideoWnd, 0, tbHeight, w, vH, TRUE);
+                    InvalidateRect(g_hVideoWnd, NULL, FALSE);
+                }
+                RECT tbRect = { 0, 0, w, tbHeight };
+                InvalidateRect(hwnd, &tbRect, FALSE);
                 return 0;
             }
 
@@ -359,6 +627,15 @@ namespace {
                     prcNewWindow->right - prcNewWindow->left,
                     prcNewWindow->bottom - prcNewWindow->top,
                     SWP_NOZORDER | SWP_NOACTIVATE);
+                int tbH = GetToolbarHeight(hwnd);
+                RECT r;
+                GetClientRect(hwnd, &r);
+                int vH = (r.bottom - r.top) - tbH;
+                if (vH < 0) vH = 0;
+                if (g_hVideoWnd) {
+                    MoveWindow(g_hVideoWnd, 0, tbH, r.right, vH, TRUE);
+                    InvalidateRect(g_hVideoWnd, NULL, FALSE);
+                }
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
@@ -411,7 +688,7 @@ namespace {
                     InvalidateRect(hwnd, &tbRect, FALSE);
                 }
 
-                InputHandler::SendMouse(Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight);
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE);
                 return 0;
             }
 
@@ -444,7 +721,7 @@ namespace {
                     return 0;
                 }
 
-                InputHandler::SendMouse(Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_LEFT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight);
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_LEFT);
                 return 0;
             }
 
@@ -476,6 +753,9 @@ namespace {
                             case BTN_FILE_EXP:
                                 FileExplorerWindow::Show(hwnd, g_client);
                                 break;
+                            case BTN_CHAT:
+                                ChatWindow::Toggle(hwnd, g_client);
+                                break;
                             default:
                                 break;
                         }
@@ -486,7 +766,30 @@ namespace {
                     return 0;
                 }
 
-                InputHandler::SendMouse(Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_LEFT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight);
+                DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_LEFT);
+                return 0;
+            }
+
+            case WM_ACTIVATE:
+            case WM_SETFOCUS: {
+                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                if (InputHandler::IsControlling()) {
+                    InputHandler::ReleaseModifiers();
+                }
+                return 0;
+            }
+
+            case WM_KILLFOCUS: {
+                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                InputHandler::ReleaseModifiers();
                 return 0;
             }
 
@@ -509,6 +812,14 @@ namespace {
 
                 if (wp == 'E' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
                     FileExplorerWindow::Show(hwnd, g_client);
+                    return 0;
+                }
+
+                if (wp == 'T' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                    ChatWindow::Toggle(hwnd, g_client);
+                    RECT r; GetClientRect(hwnd, &r);
+                    RECT toolbarRect = {0, 0, r.right, tbHeight};
+                    InvalidateRect(hwnd, &toolbarRect, FALSE);
                     return 0;
                 }
 
@@ -538,6 +849,11 @@ namespace {
                     return 0;
                 }
 
+                // Khóa phím Windows: Không gửi lệnh nhấn Win sang Client để chống kẹt phím
+                if (wp == VK_LWIN || wp == VK_RWIN) {
+                    return 0;
+                }
+
                 if (InputHandler::IsControlling()) {
                     InputHandler::SendKey(wp, 1);
                     return 0;
@@ -547,6 +863,13 @@ namespace {
 
             case WM_KEYUP:
             case WM_SYSKEYUP: {
+                if (wp == VK_LWIN || wp == VK_RWIN) {
+                    if (InputHandler::IsControlling()) {
+                        InputHandler::SendKey(wp, 0);
+                    }
+                    return 0;
+                }
+
                 if (InputHandler::IsControlling()) {
                     InputHandler::SendKey(wp, 0);
                     return 0;
@@ -554,13 +877,17 @@ namespace {
                 break;
             }
 
-            case WM_RBUTTONDOWN: InputHandler::SendMouse(Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight); return 0;
+            case WM_RBUTTONDOWN: DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_PRESS, Protocol::BUTTON_RIGHT); return 0;
 
-            case WM_RBUTTONUP:   InputHandler::SendMouse(Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_RIGHT, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight); return 0;
+            case WM_RBUTTONUP:   DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_RELEASE, Protocol::BUTTON_RIGHT); return 0;
 
-            case WM_MOUSEWHEEL:  InputHandler::SendMouse(Protocol::MOUSE_ACTION_WHEEL, Protocol::BUTTON_NONE, lp, hwnd, GetFrameWidth(), GetFrameHeight(), tbHeight, GET_WHEEL_DELTA_WPARAM(wp)); return 0;
+            case WM_MOUSEWHEEL:  DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_WHEEL, Protocol::BUTTON_NONE); return 0;
 
-            case WM_DESTROY: PostQuitMessage(0); return 0;
+            case WM_DESTROY: {
+                KillTimer(hwnd, 1);
+                PostQuitMessage(0);
+                return 0;
+            }
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
@@ -571,7 +898,6 @@ namespace RemoteWindow {
         g_client = client;
         InitializeCriticalSection(&g_cs);
         g_tjDecompressor = tjInitDecompress();
-        g_lastTime = GetTickCount();
 
         WNDCLASSW wc = {};
         wc.lpfnWndProc = WndProc;
@@ -580,28 +906,61 @@ namespace RemoteWindow {
         wc.lpszClassName = L"MgrWindow";
         RegisterClassW(&wc);
 
+        WNDCLASSW vc = {};
+        vc.lpfnWndProc = VideoWndProc;
+        vc.hInstance = hInst;
+        vc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        vc.lpszClassName = L"MgrVideoWnd";
+        RegisterClassW(&vc);
+
         g_hwnd = CreateWindowExW(0, L"MgrWindow", L"LanRemote",
             WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE,
             CW_USEDEFAULT, CW_USEDEFAULT, 1920, 1080, 0, 0, hInst, 0);
+
+        if (g_hwnd) {
+            int tbHeight = GetToolbarHeight(g_hwnd);
+            RECT r = {};
+            GetClientRect(g_hwnd, &r);
+            int vH = r.bottom - tbHeight;
+            if (vH < 0) vH = 0;
+
+            g_hVideoWnd = CreateWindowExW(
+                0, L"MgrVideoWnd", L"",
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                0, tbHeight, r.right, vH,
+                g_hwnd, NULL, hInst, NULL
+            );
+
+            SetTimer(g_hwnd, 1, 1000, NULL);
+            g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
+        }
         return g_hwnd;
     }
 
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
         if (jpegSize <= 0 || !jpegData || !g_tjDecompressor) return;
 
+        // 1. Kiểm tra an toàn biên: tọa độ và kích thước không âm, không vượt giới hạn thực tế
+        if (delta.x < 0 || delta.y < 0 || delta.width <= 0 || delta.height <= 0) return;
         int reqW = delta.x + delta.width;
         int reqH = delta.y + delta.height;
-        if (reqW <= 0 || reqH <= 0 || delta.width <= 0 || delta.height <= 0) return;
+        if (reqW > 16384 || reqH > 16384) return;
 
         EnterCriticalSection(&g_cs);
 
-        if (g_frameWidth < reqW || g_frameHeight < reqH) {
+        // 2. Chỉ cấp phát mở rộng buffer khi kích thước yêu cầu vượt quá kích thước hiện tại
+        // Tuyệt đối không thu nhỏ canvas khi nhận partial delta ở (0, 0) để tránh hủy hoại bộ đệm màn hình
+        bool needRealloc = (g_frameWidth < reqW || g_frameHeight < reqH);
+
+        if (needRealloc) {
             int newW = (std::max)(g_frameWidth, reqW);
             int newH = (std::max)(g_frameHeight, reqH);
             std::vector<uint32_t> newPixels(newW * newH, 0);
             if (g_frameWidth > 0 && g_frameHeight > 0) {
-                for (int y = 0; y < g_frameHeight; ++y) {
-                    std::memcpy(&newPixels[y * newW], &g_framePixels[y * g_frameWidth], g_frameWidth * sizeof(uint32_t));
+                int copyW = (std::min)(g_frameWidth, newW);
+                int copyH = (std::min)(g_frameHeight, newH);
+                for (int y = 0; y < copyH; ++y) {
+                    std::memcpy(&newPixels[y * newW], &g_framePixels[y * g_frameWidth], copyW * sizeof(uint32_t));
                 }
             }
             g_framePixels = std::move(newPixels);
@@ -632,36 +991,26 @@ namespace RemoteWindow {
             TJFLAG_FASTDCT
         );
 
-        LeaveCriticalSection(&g_cs);
-
         if (decompRes == 0) {
-            g_frameCount++;
-            DWORD currentTime = GetTickCount();
-            bool fpsUpdated = false;
-            if (currentTime - g_lastTime >= 1000) {
-                g_fps = g_frameCount;
-                g_frameCount = 0;
-                g_lastTime = currentTime;
-                fpsUpdated = true;
-            }
+            g_streamFrameCount++;
+            g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
 
-            if (g_hwnd) {
-                int tbHeight = GetToolbarHeight(g_hwnd);
-                if (fpsUpdated) {
-                    RECT r;
-                    GetClientRect(g_hwnd, &r);
-                    RECT tbRect = { 0, 0, r.right, tbHeight };
-                    InvalidateRect(g_hwnd, &tbRect, FALSE);
-                }
-                RECT clientRect;
-                GetClientRect(g_hwnd, &clientRect);
-                clientRect.top = tbHeight;
-                InvalidateRect(g_hwnd, &clientRect, FALSE);
+            if (g_hVideoWnd) {
+                InvalidateRect(g_hVideoWnd, NULL, FALSE);
+                g_renderFrameCount++;
             }
         }
+
+        LeaveCriticalSection(&g_cs);
     }
 
     void Cleanup() {
+        if (g_hwnd) {
+            KillTimer(g_hwnd, 1);
+            g_hwnd = NULL;
+        }
+        g_hVideoWnd = NULL;
+        ChatWindow::Cleanup();
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();
         g_frameWidth = 0;

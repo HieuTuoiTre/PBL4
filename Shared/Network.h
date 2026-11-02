@@ -4,6 +4,7 @@
 #include <ws2tcpip.h>
 #include <string>
 #include <mutex>
+#include <atomic>
 #include "Protocol.h"
 
 class Network{
@@ -17,9 +18,10 @@ class Network{
 //the host (controlled machine)
 class TcpServer{
     private:
-        //invalid socket so it doesnt set the value to be a random value
-        SOCKET listenSocket = INVALID_SOCKET;   //forward to clientSocket
-        SOCKET clientSocket = INVALID_SOCKET;   //actual socket used by the client
+        // Sử dụng std::atomic để chống race condition khi đóng socket đa luồng
+        std::atomic<SOCKET> listenSocket{INVALID_SOCKET};
+        std::atomic<SOCKET> clientSocket{INVALID_SOCKET};
+        int serverPort = 0;
         std::mutex sendMutex; // THÊM KHÓA CHO SERVER
 
     public:
@@ -38,12 +40,16 @@ class TcpServer{
         //pointer is for memory efficency, not forcing the cpu to clone the data
         bool SendPacket(Protocol::MessageType type, const char* payload, int payloadSize);
         bool ReceiveExact(char* buffer, int length);
+        bool CanSendWithoutBlocking();
+
+        SOCKET GetClientSocket() const { return clientSocket.load(); }
+        int GetPort() const { return serverPort; }
 };
 
 //the client (control the machine)
 class TcpClient{
     private:
-        SOCKET connectSocket = INVALID_SOCKET;
+        std::atomic<SOCKET> connectSocket{INVALID_SOCKET};
         std::mutex sendMutex; // THÊM KHÓA CHO CLIENT
 
     public:
@@ -58,4 +64,6 @@ class TcpClient{
         
         bool SendPacket(Protocol::MessageType type, const char* payload, int payloadSize);
         bool ReceiveExact(char* buffer, int length);
+
+        SOCKET GetConnectSocket() const { return connectSocket.load(); }
 };
