@@ -584,7 +584,12 @@ namespace {
                         FillRect(hdc, &rBottom, s_bgBrush);
                     }
 
-                    SetStretchBltMode(hdc, COLORONCOLOR);
+                    if (drawW == g_frameWidth && drawH == g_frameHeight) {
+                        SetStretchBltMode(hdc, COLORONCOLOR);
+                    } else {
+                        SetStretchBltMode(hdc, HALFTONE);
+                        SetBrushOrgEx(hdc, 0, 0, NULL);
+                    }
                     StretchDIBits(
                         hdc,
                         offX, offY, drawW, drawH,
@@ -1162,6 +1167,7 @@ namespace RemoteWindow {
         if (decompRes == 0) {
             g_streamFrameCount++;
             g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
+
         }
 
         LeaveCriticalSection(&g_cs);
