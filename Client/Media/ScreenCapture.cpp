@@ -117,6 +117,11 @@ namespace {
         return true;
     }
 
+    // Forward declarations for fallback engine
+    bool InitGdi();
+    void CleanupGdi();
+    bool CaptureGdiFrame(std::vector<char>& outBuffer, int& outX, int& outY, int& outWidth, int& outHeight);
+
     // ==========================================
     // 1. DIRECTX 11 DESKTOP DUPLICATION (GPU)
     // ==========================================
@@ -242,6 +247,8 @@ namespace {
     }
 
         bool GrabGdiInitialSnapshot(std::vector<uint32_t>& outPixels, int width, int height) {
+        if (width <= 0) width = GetSystemMetrics(SM_CXSCREEN);
+        if (height <= 0) height = GetSystemMetrics(SM_CYSCREEN);
         if (width <= 0 || height <= 0) return false;
         HDC hScreenDC = GetDC(NULL);
         if (!hScreenDC) return false;
@@ -287,7 +294,13 @@ namespace {
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastDxgiRetryTime).count() >= 500) {
                 g_lastDxgiRetryTime = now;
-                InitDxgi();
+                if (!InitDxgi()) {
+                    InitGdi();
+                    return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
+                }
+            } else {
+                InitGdi();
+                return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
             }
             return false;
         }
@@ -310,6 +323,9 @@ namespace {
                 if (!g_dxgiPrevPixels.empty()) {
                     g_needsRefinement = false;
                     return EncodeRefinementFrame(g_dxgiPrevPixels.data(), g_dxgiWidth, g_dxgiHeight, outBuffer, outX, outY, outWidth, outHeight);
+                } else if (GrabGdiInitialSnapshot(g_dxgiPrevPixels, g_dxgiWidth, g_dxgiHeight)) {
+                    g_needsRefinement = false;
+                    return EncodeRefinementFrame(g_dxgiPrevPixels.data(), g_dxgiWidth, g_dxgiHeight, outBuffer, outX, outY, outWidth, outHeight);
                 }
             }
             if (g_needsRefinement && !g_dxgiPrevPixels.empty()) {
@@ -330,7 +346,8 @@ namespace {
             // Khi UAC xuất hiện, lock screen, Task Manager admin, hoặc thay đổi độ phân giải màn hình
             CleanupDxgi();
             g_lastDxgiRetryTime = std::chrono::steady_clock::now();
-            return false;
+            InitGdi();
+            return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
         }
 
         if (FAILED(hr) || !desktopResource) {
@@ -675,7 +692,11 @@ namespace ScreenCapture {
         if (!g_isInitialized) return false;
 
         if (g_useDxgi) {
-            return CaptureDxgiFrame(outBuffer, outX, outY, outWidth, outHeight);
+            bool ok = CaptureDxgiFrame(outBuffer, outX, outY, outWidth, outHeight);
+            if (!ok && !g_dxgiDupl) {
+                return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
+            }
+            return ok;
         } else {
             return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
         }
@@ -698,11 +719,8 @@ namespace ScreenCapture {
 
         g_needsRefinement = false;
 
-        if (g_useDxgi) {
-            CleanupDxgi();
-        } else {
-            CleanupGdi();
-        }
+        CleanupDxgi();
+        CleanupGdi();
 
         if (g_jpegBuf) {
             tjFree(g_jpegBuf);
@@ -734,5 +752,35 @@ namespace ScreenCapture {
 
     uint8_t GetTargetFps() {
         return g_targetFps.load(std::memory_order_relaxed);
+    }
+
+    const uint32_t* GetCurrentFramePixels(int& outWidth, int& outHeight) {
+        if (g_useDxgi && !g_dxgiPrevPixels.empty()) {
+            outWidth = g_dxgiWidth;
+            outHeight = g_dxgiHeight;
+            return g_dxgiPrevPixels.data();
+        } else if (!g_gdiPrevPixels.empty()) {
+            outWidth = g_gdiWidth;
+            outHeight = g_gdiHeight;
+            return g_gdiPrevPixels.data();
+        } else if (g_dibPixels) {
+            outWidth = g_gdiWidth;
+            outHeight = g_gdiHeight;
+            return g_dibPixels;
+        } else {
+            // Snapshot fallback nếu chưa có khung hình nào trong bộ nhớ
+            outWidth = GetSystemMetrics(SM_CXSCREEN);
+            outHeight = GetSystemMetrics(SM_CYSCREEN);
+            if (outWidth > 0 && outHeight > 0) {
+                if (GrabGdiInitialSnapshot(g_dxgiPrevPixels, outWidth, outHeight)) {
+                    g_dxgiWidth = outWidth;
+                    g_dxgiHeight = outHeight;
+                    return g_dxgiPrevPixels.data();
+                }
+            }
+        }
+        outWidth = 0;
+        outHeight = 0;
+        return nullptr;
     }
 }

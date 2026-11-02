@@ -1,15 +1,15 @@
 #include "../../Shared/Network.h"
 #include "../../Shared/Crypto.h"
 #include "../../Shared/ControlEnvelope.h"
+#include "../../Shared/RFB/RfbDefines.h"
 
 #include "DataReceiver.h"
+#include "RfbClientSession.h"
 
 #include "../UI/RemoteWindow.h"
-
 #include "../UI/InputHandler.h"
-
+#include "../UI/RfbInspectorWindow.h"
 #include "../Media/AudioPlayer.h"
-
 #include "../UI/ConnectWindow.h"
 
 #include <windows.h>
@@ -23,8 +23,6 @@
 #pragma comment(lib, "gdiplus.lib")
 
 TcpClient g_controlClient;
-
-TcpClient g_videoClient;
 
 TcpClient g_audioClient;
 
@@ -40,99 +38,67 @@ std::string GetManagerSessionToken() {
 
 bool ConnectAll(const std::string& ip, std::string& outError) {
 
-    // 1. Kết nối kênh Điều khiển (Port 8080)
-    if (!g_controlClient.Connect(ip, Protocol::PORT_CONTROL)) {
-        outError = "Không thể kết nối tới kênh Điều khiển (Port " + std::to_string(Protocol::PORT_CONTROL) + ") tại " + ip + "!\n\n"
-                   "Nguyên nhân thường gặp:\n"
-                   "1. Ứng dụng Client chưa được khởi chạy trên máy đích (" + ip + ").\n"
-                   "2. Windows Firewall trên máy Client đang chặn cổng " + std::to_string(Protocol::PORT_CONTROL) + ".\n"
-                   "3. Hai máy tính không cùng một mạng LAN / Wi-Fi hoặc địa chỉ IP chưa đúng.";
-        return false;
+    // 1. Thử kết nối giao thức VNC / RFB 3.8 (Port 5900) trước tiên
+    std::string rfbError = "";
+    bool rfbOk = RfbClient::Connect(ip, Rfb::PORT_VNC, rfbError);
+
+    // 2. Thử kết nối kênh Điều khiển (Port 8080) cho các tính năng quản lý (File, Task Manager, Chat)
+    bool ctrlOk = false;
+    if (g_controlClient.Connect(ip, Protocol::PORT_CONTROL)) {
+        Protocol::AuthRequestPayload authReq = {0};
+        strncpy_s(authReq.sessionToken, g_managerSessionToken.c_str(), sizeof(authReq.sessionToken) - 1);
+        authReq.clientVersion = Protocol::PROTOCOL_VERSION;
+
+        if (g_controlClient.SendPacket(Protocol::MSG_AUTH_REQUEST, (const char*)&authReq, sizeof(authReq))) {
+            SOCKET ctrlSock = g_controlClient.GetConnectSocket();
+            fd_set readFds;
+            FD_ZERO(&readFds);
+            FD_SET(ctrlSock, &readFds);
+            timeval tv = { 2, 0 }; // 2s timeout
+            int selRet = select(0, &readFds, NULL, NULL, &tv);
+            if (selRet > 0) {
+                Protocol::PacketHeader respHeader = { (Protocol::MessageType)0, 0 };
+                if (g_controlClient.ReceiveExact((char*)&respHeader, sizeof(respHeader)) &&
+                    respHeader.type == Protocol::MSG_AUTH_RESPONSE &&
+                    respHeader.size == sizeof(Protocol::AuthResponsePayload)) {
+                    Protocol::AuthResponsePayload authResp = {0};
+                    if (g_controlClient.ReceiveExact((char*)&authResp, sizeof(authResp)) &&
+                        authResp.status == Protocol::AUTH_SUCCESS) {
+                        uint8_t sessionKey[Crypto::KEY_SIZE];
+                        Crypto::DeriveKey(g_managerSessionToken, nullptr, 0, sessionKey);
+                        g_controlClient.SetSessionKey(sessionKey);
+                        ctrlOk = true;
+                    }
+                }
+            }
+        }
+        if (!ctrlOk) {
+            g_controlClient.Close();
+        }
     }
 
-    // 2. Thực hiện Handshake xác thực phiên ngay trên Port 8080
-    Protocol::AuthRequestPayload authReq = {0};
-    strncpy_s(authReq.sessionToken, g_managerSessionToken.c_str(), sizeof(authReq.sessionToken) - 1);
-    authReq.clientVersion = Protocol::PROTOCOL_VERSION;
-
-    if (!g_controlClient.SendPacket(Protocol::MSG_AUTH_REQUEST, (const char*)&authReq, sizeof(authReq))) {
-        g_controlClient.Close();
-        outError = "Kết nối bị từ chối: Không thể gửi yêu cầu xác thực phiên (MSG_AUTH_REQUEST) tới Client!";
-        return false;
+    // 3. Nếu RFB 3.8 (Port 5900) kết nối thành công:
+    // Video và Input chạy 100% qua chuẩn RFB 3.8 theo RFC 6143
+    if (rfbOk) {
+        // Kết nối thêm kênh Audio nếu Client đang chạy
+        g_audioClient.Connect(ip, Protocol::PORT_AUDIO);
+        return true;
     }
 
-    // Chờ phản hồi MSG_AUTH_RESPONSE với timeout 4s bằng select()
-    SOCKET ctrlSock = g_controlClient.GetConnectSocket();
-    fd_set readFds;
-    FD_ZERO(&readFds);
-    FD_SET(ctrlSock, &readFds);
-    timeval tv = { 4, 0 }; // 4s timeout
-
-    int selRet = select(0, &readFds, NULL, NULL, &tv);
-    if (selRet <= 0) {
-        g_controlClient.Close();
-        outError = "Kết nối bị từ chối: Quá thời gian chờ phản hồi xác thực phiên từ Client (Timeout 4s)!";
-        return false;
-    }
-
-    Protocol::PacketHeader respHeader = { (Protocol::MessageType)0, 0 };
-    if (!g_controlClient.ReceiveExact((char*)&respHeader, sizeof(respHeader))) {
-        g_controlClient.Close();
-        outError = "Kết nối bị từ chối: Kênh điều khiển bị đóng trong quá trình xác thực phiên!";
-        return false;
-    }
-
-    if (respHeader.type != Protocol::MSG_AUTH_RESPONSE || respHeader.size != sizeof(Protocol::AuthResponsePayload)) {
-        g_controlClient.Close();
-        outError = "Kết nối bị từ chối: Gói tin phản hồi xác thực phiên từ Client không đúng định dạng!";
-        return false;
-    }
-
-    Protocol::AuthResponsePayload authResp = {0};
-    if (!g_controlClient.ReceiveExact((char*)&authResp, sizeof(authResp))) {
-        g_controlClient.Close();
-        outError = "Kết nối bị từ chối: Lỗi đọc dữ liệu phản hồi xác thực phiên từ Client!";
-        return false;
-    }
-
-    authResp.message[sizeof(authResp.message) - 1] = '\0';
-    if (authResp.status != Protocol::AUTH_SUCCESS) {
-        g_controlClient.Close();
-        std::string detail = (authResp.message[0] != '\0') ? authResp.message : "Mã Token không hợp lệ";
-        outError = "Kết nối bị từ chối: Xác thực phiên thất bại!\n\n"
-                   "Chi tiết từ Client: " + detail + "\n\n"
-                   "Vui lòng kiểm tra lại mã Token xác thực giữa Manager và Client.";
-        return false;
-    }
-
-    // 2.5. Sinh khóa đối xứng và kích hoạt mã hóa phiên cho socket điều khiển
-    uint8_t sessionKey[Crypto::KEY_SIZE];
-    Crypto::DeriveKey(g_managerSessionToken, nullptr, 0, sessionKey);
-    g_controlClient.SetSessionKey(sessionKey);
-
-    // 3. Đã xác thực thành công -> Kết nối tiếp kênh Hình ảnh (Port 8081)
-    if (!g_videoClient.Connect(ip, Protocol::PORT_VIDEO)) {
-        g_controlClient.Close();
-        outError = "Đã xác thực thành công nhưng thất bại ở kênh Hình ảnh (Port " + std::to_string(Protocol::PORT_VIDEO) + ")!\n\n"
-                   "Vui lòng kiểm tra lại cấu hình tường lửa (Firewall) hoặc khởi động lại Client.";
-        return false;
-    }
-
-    // 4. Kết nối kênh Âm thanh (Port 8082)
-    if (!g_audioClient.Connect(ip, Protocol::PORT_AUDIO)) {
-        g_controlClient.Close();
-        g_videoClient.Close();
-        outError = "Đã kết nối kênh Hình ảnh nhưng thất bại ở kênh Âm thanh (Port " + std::to_string(Protocol::PORT_AUDIO) + ")!\n\n"
-                   "Vui lòng kiểm tra lại cấu hình tường lửa (Firewall) hoặc khởi động lại Client.";
-        return false;
-    }
-
-    return true;
+    // 4. Nếu RFB 3.8 không kết nối được:
+    outError = "Không thể kết nối tới máy đích " + ip + "!\n\n"
+               "1. Giao thức VNC (Port 5900): " + (rfbError.empty() ? "Không phản hồi" : rfbError) + "\n"
+               "2. Kênh điều khiển (Port " + std::to_string(Protocol::PORT_CONTROL) + "): " + (ctrlOk ? "Đã sẵn sàng" : "Chưa kết nối") + "\n\n"
+               "Nguyên nhân thường gặp:\n"
+               "- Ứng dụng Client chưa được khởi chạy trên máy đích (" + ip + ").\n"
+               "- Windows Firewall trên máy Client đang chặn cổng 5900 hoặc 8080.\n"
+               "- Hai máy tính không cùng một mạng LAN / Wi-Fi hoặc địa chỉ IP chưa đúng.";
+    return false;
 }
 
 void CloseAll() {
+    RfbClient::Disconnect();
     g_controlClient.Close();
-    g_videoClient.Close();
     g_audioClient.Close();
 }
 
@@ -156,6 +122,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     Gdiplus::GdiplusStartupInput gdiInput;
     Gdiplus::GdiplusStartup(&gdiToken, &gdiInput, NULL);
 
+    RfbClient::SetPacketLogCallback(RfbInspector::LogPacket);
+
     while (true) {
 
         std::string targetIP = "";
@@ -175,7 +143,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
         RemoteWindow::Create(hInst, &g_controlClient);
 
-        DataReceiver::Start(&g_controlClient, &g_videoClient, &g_audioClient);
+        DataReceiver::Start(&g_controlClient, &g_audioClient);
 
         MSG msg;
 
@@ -193,6 +161,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         RemoteWindow::Cleanup();
 
     }
+
+    RfbInspector::Close();
 
     Gdiplus::GdiplusShutdown(gdiToken);
 

@@ -3,6 +3,8 @@
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
 #include "ChatWindow.h"
+#include "RfbInspectorWindow.h"
+#include "../Core/RfbClientSession.h"
 #include "../Media/AudioPlayer.h"
 #include "../../Shared/ClipboardManager.h"
 #include <gdiplus.h>
@@ -67,6 +69,7 @@ namespace {
         BTN_CTRL_ALT_DEL,
         BTN_WIN_KEY,
         BTN_QUALITY,
+        BTN_INSPECTOR,
         BTN_CHAT,
         BTN_FILE_EXP,
         BTN_TASK_MGR,
@@ -146,6 +149,13 @@ namespace {
         float btnQW = (float)std::round(124.0f * scale);
         buttons.push_back({ BTN_QUALITY, Gdiplus::RectF(curX, btnY, btnQW, btnHeight), qText, L"Nhấp để đổi", false });
         curX += btnQW + gap;
+
+        // 5.1. Nhật ký Giao thức VNC / RFB 3.8 Protocol Inspector
+        bool isInspectorOpen = RfbInspector::IsOpen();
+        std::wstring rfbText = L"Giao thức RFB";
+        float btnRfbW = (float)std::round(112.0f * scale);
+        buttons.push_back({ BTN_INSPECTOR, Gdiplus::RectF(curX, btnY, btnRfbW, btnHeight), rfbText, L"Xem nhật ký gói tin VNC", isInspectorOpen });
+        curX += btnRfbW + gap;
 
         // 6. Trò chuyện (Chat Window)
         int unread = ChatWindow::GetUnreadCount();
@@ -266,6 +276,10 @@ namespace {
             } else if (btn.id == BTN_CHAT && btn.isSpecial) {
                 fillColor = isPressed ? Gdiplus::Color(255, 30, 58, 138) : (isHovered ? Gdiplus::Color(255, 37, 99, 235) : Gdiplus::Color(255, 29, 78, 216));
                 borderColor = Gdiplus::Color(255, 96, 165, 250);
+                textColor = Gdiplus::Color(255, 255, 255, 255);
+            } else if (btn.id == BTN_INSPECTOR && btn.isSpecial) {
+                fillColor = isPressed ? Gdiplus::Color(255, 88, 28, 135) : (isHovered ? Gdiplus::Color(255, 126, 34, 206) : Gdiplus::Color(255, 107, 33, 168));
+                borderColor = Gdiplus::Color(255, 192, 132, 252);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else {
                 fillColor = isPressed ? Gdiplus::Color(255, 28, 30, 36) : (isHovered ? Gdiplus::Color(255, 52, 55, 66) : Gdiplus::Color(255, 38, 40, 48));
@@ -850,6 +864,10 @@ namespace {
                                 }
                                 InvalidateRect(hwnd, NULL, FALSE);
                                 break;
+                            case BTN_INSPECTOR:
+                                RfbInspector::Toggle(hwnd);
+                                InvalidateRect(hwnd, NULL, FALSE);
+                                break;
                             case BTN_MUTE:
                                 AudioPlayer::ToggleMute();
                                 break;
@@ -1167,6 +1185,7 @@ namespace RemoteWindow {
         }
         g_hVideoWnd = NULL;
         ChatWindow::Cleanup();
+        RfbInspector::Close();
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();
         g_frameWidth = 0;

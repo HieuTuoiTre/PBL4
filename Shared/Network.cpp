@@ -14,12 +14,12 @@ namespace {
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
 
         // 2. Phân cấp kích thước bộ đệm SO_SNDBUF & SO_RCVBUF theo từng kênh:
-        //    - Kênh Video (8081, 18081): 1MB (1024 * 1024) chống nghẽn buffer khi khung hình JPEG lớn ở 60 FPS
+        //    - Kênh VNC (5900) & Video stream: 1MB (1024 * 1024) chống nghẽn buffer khi khung hình JPEG lớn ở 60 FPS
         //    - Kênh Audio (8082, 18082): 64KB (64 * 1024) phát tiếng tức thì, tránh trễ tiếng so với hình
         //    - Kênh Control (8080, 18080) & khác: 256KB (256 * 1024) đủ lớn cho file transfer và tối ưu chuột/phím
         int bufSize = 256 * 1024;
-        if (port == Protocol::PORT_VIDEO || port == 18081) {
-            bufSize = 1024 * 1024;
+        if (port == 5900 || port == 18081) {
+            bufSize = 2 * 1024 * 1024;
         } else if (port == Protocol::PORT_AUDIO || port == 18082) {
             bufSize = 64 * 1024;
         }
@@ -193,6 +193,14 @@ bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int 
     return true;
 }
 
+bool TcpServer::SendRaw(const char* data, int length) {
+    std::lock_guard<std::mutex> lock(sendMutex);
+    if (clientSocket == INVALID_SOCKET) {
+        return false;
+    }
+    return SendExact(clientSocket, data, length);
+}
+
 bool TcpServer::SendEncryptedPacket(Protocol::MessageType type, const char* payload, int payloadSize) {
     if (!m_hasSessionKey.load()) return false;
     return ControlEnvelope::SendEncryptedPacket(this, m_sessionKey, type, payload, payloadSize);
@@ -334,6 +342,14 @@ bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int 
     }
 
     return true;
+}
+
+bool TcpClient::SendRaw(const char* data, int length) {
+    std::lock_guard<std::mutex> lock(sendMutex);
+    if (connectSocket == INVALID_SOCKET) {
+        return false;
+    }
+    return SendExact(connectSocket, data, length);
 }
 
 bool TcpClient::SendEncryptedPacket(Protocol::MessageType type, const char* payload, int payloadSize) {

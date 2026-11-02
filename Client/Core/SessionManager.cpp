@@ -25,7 +25,6 @@
 
 namespace {
     TcpServer g_controlServer;
-    TcpServer g_videoServer;
     TcpServer g_audioServer;
 
     StatusOverlay g_overlay;
@@ -123,98 +122,10 @@ namespace {
     }
 
     // ==========================================
-    // LUỒNG GỬI VIDEO (TX): LIÊN TỤC CHỤP & GỬI MÀN HÌNH QUA CỔNG VIDEO (8081)
-    // ==========================================
-    void TransmitVideoLoop() {
-        if (!ScreenCapture::Initialize()) return;
-        ScreenCapture::ForceFullFrame(); // Đảm bảo frame đầu tiên gửi cho Manager luôn là 100% full screen
-        
-        std::vector<char> frameBuffer;
-        frameBuffer.reserve(512 * 1024); // Cấp phát sẵn 512KB tránh cấp phát lại
-        int x, y, w, h;
-
-        int currentFps = ScreenCapture::GetTargetFps();
-        if (currentFps != 30 && currentFps != 60) currentFps = 60;
-        std::chrono::microseconds frameTargetTime(1000000 / currentFps);
-        auto nextFrameTime = std::chrono::steady_clock::now();
-
-        while (g_isConnected && g_isRunning) {
-            int fps = ScreenCapture::GetTargetFps();
-            if (fps != currentFps && (fps == 30 || fps == 60)) {
-                currentFps = fps;
-                frameTargetTime = std::chrono::microseconds(1000000 / currentFps);
-            }
-            nextFrameTime += frameTargetTime;
-
-            // Chống dồn hàng đợi (TCP Flow-Control): Nếu socket đang bận thì bỏ qua khung
-            if (!g_videoServer.CanSendWithoutBlocking()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                auto now = std::chrono::steady_clock::now();
-                if (now > nextFrameTime + frameTargetTime) {
-                    nextFrameTime = now;
-                }
-                continue;
-            }
-
-            if (ScreenCapture::CaptureFrame(frameBuffer, x, y, w, h)) {
-                // frameBuffer đã chứa sẵn [VideoDeltaHeader + JPEG Data], gửi thẳng qua socket video!
-                auto tSendStart = std::chrono::steady_clock::now();
-                if (!g_videoServer.SendPacket(Protocol::MSG_VIDEO_FRAME, frameBuffer.data(), (int)frameBuffer.size())) {
-                    g_isConnected = false;
-                    break;
-                }
-                auto tSendEnd = std::chrono::steady_clock::now();
-                double sendMs = std::chrono::duration<double, std::milli>(tSendEnd - tSendStart).count();
-                ScreenCapture::ReportSendTime(sendMs);
-            }
-
-            // Bộ giữ nhịp độ chính xác cao (High-Precision Frame Pacer chuẩn 60.0 FPS)
-            auto now = std::chrono::steady_clock::now();
-            if (nextFrameTime > now) {
-                auto remainingUs = std::chrono::duration_cast<std::chrono::microseconds>(nextFrameTime - now).count();
-                // Nếu còn nhiều hơn 2.5ms, ngủ nhẹ để nhường CPU cho các luồng khác
-                if (remainingUs > 2500) {
-                    std::this_thread::sleep_for(std::chrono::microseconds(remainingUs - 2000));
-                }
-                // Trong 2ms cuối cùng, spin-wait kết hợp yield để căn trúng đích 60.0 FPS chuẩn xác
-                while (std::chrono::steady_clock::now() < nextFrameTime) {
-                    std::this_thread::yield();
-                }
-            } else {
-                // Đã quá thời hạn chu kỳ khung hình hiện tại: Căn chỉnh ngay nextFrameTime theo now để chống drift
-                nextFrameTime = now;
-            }
-        }
-        ScreenCapture::Cleanup();
-    }
-
-    // ==========================================
-    // ĐIỀU PHỐI TIN NHẮN ĐIỀU KHIỂN (ĐÃ GIẢI MÃ HOẶC RAW)
+    // ĐIỀU PHỐI TIN NHẮN DỊCH VỤ QUẢN TRỊ (PORT 8080)
     // ==========================================
     void DispatchClientControlMessage(Protocol::MessageType type, const char* payload, uint32_t size) {
         switch (type) {
-            case Protocol::MSG_MOUSE_EVENT: {
-                if (payload && size >= sizeof(Protocol::MousePayload)) {
-                    Protocol::MousePayload mouse;
-                    memcpy(&mouse, payload, sizeof(mouse));
-                    InputInjector::InjectMouse(mouse);
-                    g_overlay.SetState(OverlayState::ConnectedControlling);
-                    g_lastInputTimeMs = GetTickCount64();
-                }
-                break;
-            }
-
-            case Protocol::MSG_KEY_EVENT: {
-                if (payload && size >= sizeof(Protocol::KeyboardPayload)) {
-                    Protocol::KeyboardPayload key;
-                    memcpy(&key, payload, sizeof(key));
-                    InputInjector::InjectKeyboard(key);
-                    g_overlay.SetState(OverlayState::ConnectedControlling);
-                    g_lastInputTimeMs = GetTickCount64();
-                }
-                break;
-            }
-
             case Protocol::MSG_FILE_DOWNLOAD_REQ: {
                 if (payload && size > 0) {
                     std::string reqPath(payload, size);
@@ -546,14 +457,11 @@ namespace SessionManager {
         g_overlay.SetState(OverlayState::Disconnected);
 
         int portControl = basePort;
-        int portVideo   = basePort + 1;
         int portAudio   = basePort + 2;
 
         if (!g_controlServer.Start(portControl) ||
-            !g_videoServer.Start(portVideo) ||
             !g_audioServer.Start(portAudio)) {
             g_controlServer.Close();
-            g_videoServer.Close();
             g_audioServer.Close();
             return;
         }
@@ -565,40 +473,15 @@ namespace SessionManager {
             }
 
             // Bước 1.5: Xác thực phiên trên Port 8080 với 3s timeout.
-            // Client KHÔNG chấp nhận kết nối Video (8081) hoặc Audio (8082) nếu xác thực thất bại!
             if (!PerformAuthHandshake(g_controlServer)) {
                 g_controlServer.CloseClient();
                 continue;
             }
 
-            // Bước 2: Manager đã xác thực thành công Port 8080!
-            // Tiếp tục chấp nhận kết nối Video (8081) và Audio (8082) trong vòng 5 giây
-            if (!g_videoServer.AcceptConnection(5000) || !g_audioServer.AcceptConnection(5000)) {
-                g_controlServer.CloseClient();
-                g_videoServer.CloseClient();
-                g_audioServer.CloseClient();
-                continue;
-            }
+            // Bước 2: Chấp nhận kết nối Audio (8082) tùy chọn trong 1 giây
+            g_audioServer.AcceptConnection(1000);
 
-            // Bước 2.5: Kiểm tra xác minh IP nguồn (Chống tấn công cướp kênh stream 8081/8082)
-            sockaddr_in ctrlAddr = {}, vidAddr = {}, audAddr = {};
-            int addrLen = sizeof(sockaddr_in);
-            getpeername(g_controlServer.GetClientSocket(), (sockaddr*)&ctrlAddr, &addrLen);
-            addrLen = sizeof(sockaddr_in);
-            getpeername(g_videoServer.GetClientSocket(), (sockaddr*)&vidAddr, &addrLen);
-            addrLen = sizeof(sockaddr_in);
-            getpeername(g_audioServer.GetClientSocket(), (sockaddr*)&audAddr, &addrLen);
-
-            if (ctrlAddr.sin_addr.s_addr != vidAddr.sin_addr.s_addr ||
-                ctrlAddr.sin_addr.s_addr != audAddr.sin_addr.s_addr) {
-                // Remote IP của các kênh không trùng khớp!
-                g_controlServer.CloseClient();
-                g_videoServer.CloseClient();
-                g_audioServer.CloseClient();
-                continue;
-            }
-
-            // Cả 3 kết nối đã sẵn sàng và được xác thực hoàn toàn!
+            // Phiên kết nối quản trị đã sẵn sàng!
             g_isConnected = true;
             DiscoveryResponder::SetBusy(true);
             InputInjector::ReleaseAllModifiers();
@@ -616,13 +499,12 @@ namespace SessionManager {
 
             // Bắt đầu thu âm và gửi trực tiếp qua cổng Audio (8082)
             AudioCapture::Start([](const char* buffer, int size) {
-                if (g_isConnected) {
+                if (g_isConnected && g_audioServer.GetClientSocket() != INVALID_SOCKET) {
                     g_audioServer.SendPacket(Protocol::MSG_AUDIO_CHUNK, buffer, size);
                 }
             });
 
-            // Khởi chạy luồng gửi video và luồng nhận điều khiển
-            std::thread txThread(TransmitVideoLoop);
+            // Khởi chạy luồng nhận điều khiển dịch vụ quản trị
             std::thread rxThread(ReceiveControlLoop);
 
             // Giám sát trạng thái kết nối
@@ -643,19 +525,16 @@ namespace SessionManager {
             AudioCapture::Stop();
             ClientChatWindow::Close();
             g_controlServer.CloseClient();
-            g_videoServer.CloseClient();
             g_audioServer.CloseClient();
 
             // Cập nhật trạng thái và ẩn overlay khi Manager ngắt kết nối
             g_overlay.SetState(OverlayState::Disconnected);
             g_overlay.SetVisible(false);
 
-            if (txThread.joinable()) txThread.join();
             if (rxThread.joinable()) rxThread.join();
         }
 
         g_controlServer.Close();
-        g_videoServer.Close();
         g_audioServer.Close();
         g_overlay.Destroy();
         ClientChatWindow::Close();
@@ -670,7 +549,6 @@ namespace SessionManager {
         AudioCapture::Stop();
         ClientChatWindow::Close();
         g_controlServer.Close();
-        g_videoServer.Close();
         g_audioServer.Close();
         g_overlay.Destroy();
     }

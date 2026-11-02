@@ -16,7 +16,6 @@
 namespace {
     std::atomic<bool> g_isRunning(false);
     std::thread g_controlThread;
-    std::thread g_videoThread;
     std::thread g_audioThread;
 
     void DispatchControlMessage(Protocol::MessageType type, const char* data, uint32_t size) {
@@ -176,30 +175,8 @@ namespace {
         }
     }
 
-    void ReceiveVideoLoop(TcpClient* client) {
-        Protocol::PacketHeader hdr;
-        std::vector<char> buf;
-        buf.reserve(256 * 1024);
-
-        while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
-            if (hdr.size > 32 * 1024 * 1024) break;
-            if (hdr.size == 0) continue;
-
-            buf.resize(hdr.size);
-            if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;
-
-            if (hdr.type == Protocol::MSG_VIDEO_FRAME) {
-                if (hdr.size > sizeof(Protocol::VideoDeltaHeader)) {
-                    Protocol::VideoDeltaHeader delta;
-                    memcpy(&delta, buf.data(), sizeof(delta));
-                    int jpgSize = (int)hdr.size - (int)sizeof(delta);
-                    RemoteWindow::UpdateFrame(delta, buf.data() + sizeof(delta), jpgSize);
-                }
-            }
-        }
-    }
-
     void ReceiveAudioLoop(TcpClient* client) {
+        if (!client) return;
         Protocol::PacketHeader hdr;
         std::vector<char> buf;
         buf.reserve(8192);
@@ -219,13 +196,16 @@ namespace {
 }
 
 namespace DataReceiver {
-    void Start(TcpClient* controlClient, TcpClient* videoClient, TcpClient* audioClient) {
+    void Start(TcpClient* controlClient, TcpClient* audioClient) {
         if (g_isRunning) return;
         g_isRunning = true;
 
-        g_controlThread = std::thread(ReceiveControlLoop, controlClient);
-        g_videoThread = std::thread(ReceiveVideoLoop, videoClient);
-        g_audioThread = std::thread(ReceiveAudioLoop, audioClient);
+        if (controlClient) {
+            g_controlThread = std::thread(ReceiveControlLoop, controlClient);
+        }
+        if (audioClient) {
+            g_audioThread = std::thread(ReceiveAudioLoop, audioClient);
+        }
     }
 
     void Stop() {
@@ -233,7 +213,6 @@ namespace DataReceiver {
         g_isRunning = false;
 
         if (g_controlThread.joinable()) g_controlThread.join();
-        if (g_videoThread.joinable()) g_videoThread.join();
         if (g_audioThread.joinable()) g_audioThread.join();
     }
 }

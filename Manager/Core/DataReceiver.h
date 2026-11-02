@@ -4,7 +4,7 @@
 
 namespace DataReceiver {
 
-    void Start(TcpClient* controlClient, TcpClient* videoClient, TcpClient* audioClient);
+    void Start(TcpClient* controlClient, TcpClient* audioClient);
 
     void Stop();
 }
