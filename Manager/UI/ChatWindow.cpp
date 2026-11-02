@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <vector>
 #include <string>
+#include <cmath>
 
 #define WM_CHAT_NEW_MESSAGE (WM_APP + 201)
 #define IDC_CHAT_HISTORY    2001
@@ -17,6 +18,7 @@ namespace {
     HWND g_hInputEdit = NULL;
     HWND g_hBtnSend = NULL;
     WNDPROC g_oldEditProc = NULL;
+    HWND g_hHoveredBtn = NULL;
     HFONT g_hFontNormal = NULL;
     HFONT g_hFontBold = NULL;
     HBRUSH g_hBgBrush = NULL;
@@ -44,6 +46,47 @@ namespace {
         return (float)dpi / 96.0f;
     }
 
+    void AddRoundRectPath(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& rect, float radius) {
+        float d = radius * 2.0f;
+        if (d > rect.Width) d = rect.Width;
+        if (d > rect.Height) d = rect.Height;
+        path.Reset();
+        path.AddArc(rect.X, rect.Y, d, d, 180.0f, 90.0f);
+        path.AddArc(rect.X + rect.Width - d, rect.Y, d, d, 270.0f, 90.0f);
+        path.AddArc(rect.X + rect.Width - d, rect.Y + rect.Height - d, d, d, 0.0f, 90.0f);
+        path.AddArc(rect.X, rect.Y + rect.Height - d, d, d, 90.0f, 90.0f);
+        path.CloseFigure();
+    }
+
+    void DrawChatHeaderIcon(Gdiplus::Graphics& g, float x, float y, float scale) {
+        float bw = 18.0f * scale;
+        float bh = 13.0f * scale;
+        float r = 3.5f * scale;
+
+        Gdiplus::RectF bodyRect(x, y, bw, bh);
+        Gdiplus::GraphicsPath path;
+        AddRoundRectPath(path, bodyRect, r);
+
+        Gdiplus::SolidBrush whiteBrush(Gdiplus::Color(255, 255, 255, 255));
+        g.FillPath(&whiteBrush, &path);
+
+        Gdiplus::PointF tailPts[3] = {
+            Gdiplus::PointF(x + 3.0f * scale, y + bh - 1.0f * scale),
+            Gdiplus::PointF(x - 1.5f * scale, y + bh + 4.5f * scale),
+            Gdiplus::PointF(x + 8.5f * scale, y + bh - 1.0f * scale)
+        };
+        g.FillPolygon(&whiteBrush, tailPts, 3);
+
+        float dotSize = 2.2f * scale;
+        float dotY = y + (bh - dotSize) / 2.0f;
+        float dotStartX = x + 4.2f * scale;
+        float dotGap = 3.8f * scale;
+        Gdiplus::SolidBrush dotBrush(Gdiplus::Color(255, 30, 41, 59));
+        g.FillEllipse(&dotBrush, dotStartX, dotY, dotSize, dotSize);
+        g.FillEllipse(&dotBrush, dotStartX + dotGap, dotY, dotSize, dotSize);
+        g.FillEllipse(&dotBrush, dotStartX + dotGap * 2.0f, dotY, dotSize, dotSize);
+    }
+
     std::wstring GetCurrentTimeString() {
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -63,12 +106,36 @@ namespace {
     LRESULT CALLBACK InputEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         if ((uMsg == WM_KEYDOWN || uMsg == WM_CHAR) && wParam == VK_RETURN) {
             if (uMsg == WM_KEYDOWN) {
-                // Nhấn phím Enter trong ô nhập -> Tự động bấm gửi tin nhắn
                 SendMessageW(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(IDC_CHAT_SEND, BN_CLICKED), (LPARAM)hWnd);
             }
-            return 0; // Chặn cả KEYDOWN lẫn CHAR để không phát tiếng bíp của Windows
+            return 0;
         }
-        return CallWindowProcW(g_oldEditProc, hWnd, uMsg, wParam, lParam);
+
+        LRESULT lr = CallWindowProcW(g_oldEditProc, hWnd, uMsg, wParam, lParam);
+
+        if (uMsg == WM_PAINT) {
+            if (GetWindowTextLengthW(hWnd) == 0) {
+                HDC hdc = GetDC(hWnd);
+                if (hdc) {
+                    RECT rc;
+                    GetClientRect(hWnd, &rc);
+                    float scale = GetDpiScale(hWnd);
+                    rc.left += (int)std::round(6.0f * scale);
+                    SetBkMode(hdc, TRANSPARENT);
+                    SetTextColor(hdc, RGB(156, 163, 175));
+                    HFONT hOld = (HFONT)SelectObject(hdc, g_hFontNormal);
+                    DrawTextW(hdc, L"Gửi tin nhắn ở đây", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    SelectObject(hdc, hOld);
+                    ReleaseDC(hWnd, hdc);
+                }
+            }
+        } else if (uMsg == WM_SETFOCUS || uMsg == WM_KILLFOCUS || uMsg == WM_CHAR || uMsg == WM_KEYUP) {
+            if (GetWindowTextLengthW(hWnd) == 0) {
+                InvalidateRect(hWnd, NULL, TRUE);
+            }
+        }
+
+        return lr;
     }
 
     void SendCurrentMessage() {
@@ -78,7 +145,6 @@ namespace {
         GetWindowTextW(g_hInputEdit, buf, 1024);
         std::wstring wmsg = buf;
 
-        // Xóa khoảng trắng thừa đầu và cuối
         while (!wmsg.empty() && (wmsg.back() == L' ' || wmsg.back() == L'\r' || wmsg.back() == L'\n' || wmsg.back() == L'\t')) {
             wmsg.pop_back();
         }
@@ -98,6 +164,7 @@ namespace {
             std::wstring timeStr = GetCurrentTimeString();
             AppendMessageToHistory(timeStr + L" Bạn: " + wmsg);
             SetWindowTextW(g_hInputEdit, L"");
+            InvalidateRect(g_hInputEdit, NULL, TRUE);
             SetFocus(g_hInputEdit);
         }
     }
@@ -107,7 +174,7 @@ namespace {
         int headerH = (int)std::round(48.0f * scale);
         int inputH = (int)std::round(34.0f * scale);
         int pad = (int)std::round(12.0f * scale);
-        int btnW = (int)std::round(76.0f * scale);
+        int btnW = (int)std::round(80.0f * scale);
 
         switch (msg) {
             case WM_CREATE: {
@@ -118,10 +185,10 @@ namespace {
                 g_hInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_CHAT_INPUT, GetModuleHandle(NULL), NULL);
-                SendMessageW(g_hInputEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Nhập tin nhắn... (Nhấn Enter để gửi)");
+                SendMessageW(g_hInputEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Gửi tin nhắn ở đây");
                 g_oldEditProc = (WNDPROC)SetWindowLongPtrW(g_hInputEdit, GWLP_WNDPROC, (LONG_PTR)InputEditSubclassProc);
 
-                g_hBtnSend = CreateWindowExW(0, L"BUTTON", L"Gửi ➤",
+                g_hBtnSend = CreateWindowExW(0, L"BUTTON", L"Gửi",
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_CHAT_SEND, GetModuleHandle(NULL), NULL);
 
@@ -130,7 +197,6 @@ namespace {
                 SendMessageW(g_hHistoryEdit, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
                 SendMessageW(g_hInputEdit, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-                // Nạp toàn bộ tin nhắn đang chờ vào lịch sử
                 EnterCriticalSection(&g_cs);
                 for (const auto& line : g_pendingMessages) {
                     AppendMessageToHistory(line);
@@ -170,7 +236,6 @@ namespace {
                 RECT rc;
                 GetClientRect(hwnd, &rc);
 
-                // 1. Vẽ Header phong cách Slate/Dark hiện đại
                 Gdiplus::Graphics g(hdc);
                 g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
@@ -179,16 +244,20 @@ namespace {
                 g.FillRectangle(&headerBg, 0, 0, rc.right, headerH);
 
                 Gdiplus::FontFamily ff(L"Segoe UI");
-                Gdiplus::Font fontTitle(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                Gdiplus::Font fontSub(&ff, 9.5f * scale, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                Gdiplus::Font fontTitle(&ff, 12.5f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                Gdiplus::Font fontSub(&ff, 10.0f * scale, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 
                 Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 255, 255, 255));
                 Gdiplus::SolidBrush subBrush(Gdiplus::Color(255, 148, 163, 184));
 
-                g.DrawString(L"💬 Trò chuyện nội bộ (In-Session Chat)", -1, &fontTitle, Gdiplus::PointF(14.0f * scale, 9.0f * scale), &titleBrush);
-                g.DrawString(L"Kết nối trực tiếp hai chiều với máy khách qua LAN", -1, &fontSub, Gdiplus::PointF(14.0f * scale, 27.0f * scale), &subBrush);
+                float icX = 14.0f * scale;
+                float icY = 11.0f * scale;
+                DrawChatHeaderIcon(g, icX, icY, scale);
 
-                // 2. Nền phần dưới
+                float textX = icX + 24.0f * scale;
+                g.DrawString(L"Trò chuyện nội bộ (In-Session Chat)", -1, &fontTitle, Gdiplus::PointF(textX, 8.0f * scale), &titleBrush);
+                g.DrawString(L"Kết nối trực tiếp hai chiều với máy khách qua LAN", -1, &fontSub, Gdiplus::PointF(textX, 26.5f * scale), &subBrush);
+
                 RECT bottomRc = { 0, headerH, rc.right, rc.bottom };
                 if (!g_hBgBrush) g_hBgBrush = CreateSolidBrush(RGB(248, 250, 252));
                 FillRect(hdc, &bottomRc, g_hBgBrush);
@@ -197,29 +266,70 @@ namespace {
                 return 0;
             }
 
+            case WM_SETCURSOR: {
+                HWND hHit = (HWND)wp;
+                if (hHit == g_hBtnSend) {
+                    if (g_hHoveredBtn != g_hBtnSend) {
+                        g_hHoveredBtn = g_hBtnSend;
+                        InvalidateRect(g_hBtnSend, NULL, FALSE);
+                    }
+                    SetCursor(LoadCursor(NULL, IDC_HAND));
+                    return TRUE;
+                } else {
+                    if (g_hHoveredBtn == g_hBtnSend) {
+                        g_hHoveredBtn = NULL;
+                        InvalidateRect(g_hBtnSend, NULL, FALSE);
+                    }
+                }
+                break;
+            }
+
             case WM_DRAWITEM: {
                 LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lp;
                 if (!pDIS || pDIS->CtlID != IDC_CHAT_SEND) break;
 
+                bool isHover = (pDIS->hwndItem == g_hHoveredBtn);
                 bool isPressed = (pDIS->itemState & ODS_SELECTED);
+
                 Gdiplus::Graphics g(pDIS->hDC);
                 g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-                Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 29, 78, 216) : Gdiplus::Color(255, 37, 99, 235);
-                Gdiplus::SolidBrush fillBrush(fill);
-                Gdiplus::RectF r((float)pDIS->rcItem.left, (float)pDIS->rcItem.top, (float)(pDIS->rcItem.right - pDIS->rcItem.left), (float)(pDIS->rcItem.bottom - pDIS->rcItem.top));
+                Gdiplus::RectF r((float)pDIS->rcItem.left, (float)pDIS->rcItem.top,
+                                 (float)(pDIS->rcItem.right - pDIS->rcItem.left),
+                                 (float)(pDIS->rcItem.bottom - pDIS->rcItem.top));
 
-                g.FillRectangle(&fillBrush, r);
+                Gdiplus::GraphicsPath path;
+                AddRoundRectPath(path, r, 6.0f * scale);
+
+                Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 30, 58, 138) :
+                                      (isHover  ? Gdiplus::Color(255, 29, 78, 216) :
+                                                  Gdiplus::Color(255, 37, 99, 235));
+                Gdiplus::SolidBrush fillBrush(fill);
+                g.FillPath(&fillBrush, &path);
 
                 Gdiplus::FontFamily ff(L"Segoe UI");
-                Gdiplus::Font font(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                Gdiplus::Font font(&ff, 12.5f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                 Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
-                Gdiplus::StringFormat sf;
-                sf.SetAlignment(Gdiplus::StringAlignmentCenter);
-                sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 
-                g.DrawString(L"Gửi ➤", -1, &font, r, &sf, &textBrush);
+                float totalW = 46.0f * scale;
+                float startX = r.X + (r.Width - totalW) / 2.0f;
+                Gdiplus::RectF textRect(startX, r.Y, 28.0f * scale, r.Height);
+
+                Gdiplus::StringFormat sf;
+                sf.SetAlignment(Gdiplus::StringAlignmentNear);
+                sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+                g.DrawString(L"Gửi", -1, &font, textRect, &sf, &textBrush);
+
+                float ax = startX + 28.0f * scale;
+                float ay = r.Y + r.Height / 2.0f;
+                Gdiplus::PointF arrowPts[3] = {
+                    Gdiplus::PointF(ax + 8.0f * scale, ay),
+                    Gdiplus::PointF(ax, ay - 4.5f * scale),
+                    Gdiplus::PointF(ax, ay + 4.5f * scale)
+                };
+                g.FillPolygon(&textBrush, arrowPts, 3);
+
                 return TRUE;
             }
 
@@ -380,4 +490,3 @@ namespace ChatWindow {
         g_unreadCount = 0;
     }
 }
-
