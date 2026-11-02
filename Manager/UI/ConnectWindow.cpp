@@ -88,11 +88,11 @@ namespace {
     }
 
     int GetIpPriority(const std::string& ip) {
-        if (ip.rfind("192.168.", 0) == 0 && ip.rfind("192.168.56.", 0) != 0) return 3; // IP LAN thật (Wi-Fi/Ethernet)
-        if (ip.rfind("10.", 0) == 0) return 3;                                          // IP LAN doanh nghiệp
-        if (ip.rfind("172.", 0) == 0) return 3;                                         // IP ZeroTier / LAN trường học
-        if (ip.rfind("192.168.56.", 0) == 0) return 2;                                 // IP VirtualBox
-        if (ip == "127.0.0.1") return 1;                                               // Localhost
+        if (ip.rfind("192.168.", 0) == 0 && ip.rfind("192.168.56.", 0) != 0) return 3;
+        if (ip.rfind("10.", 0) == 0) return 3;
+        if (ip.rfind("172.", 0) == 0) return 3;
+        if (ip.rfind("192.168.56.", 0) == 0) return 2;
+        if (ip == "127.0.0.1") return 1;
         return 0;
     }
 
@@ -323,52 +323,32 @@ namespace {
         }
     }
 
-    void DrawNetworkBannerIcon(Gdiplus::Graphics& g, float x, float y) {
-
-        Gdiplus::RectF hostScr(x + 12.0f, y, 22.0f, 15.0f);
-        Gdiplus::GraphicsPath hostPath;
-        AddRoundRectPath(hostPath, hostScr, 2.0f);
-        Gdiplus::SolidBrush blueFill(Gdiplus::Color(255, 37, 99, 235));
-        Gdiplus::Pen bluePen(Gdiplus::Color(255, 29, 78, 216), 1.2f);
-        g.FillPath(&blueFill, &hostPath);
-        g.DrawPath(&bluePen, &hostPath);
-
-        Gdiplus::SolidBrush glowFill(Gdiplus::Color(255, 147, 197, 253));
-        Gdiplus::RectF innerScr(x + 15.0f, y + 3.0f, 16.0f, 7.0f);
-        g.FillRectangle(&glowFill, innerScr);
-
-        Gdiplus::Pen slatePen(Gdiplus::Color(255, 71, 85, 105), 1.5f);
-        g.DrawLine(&slatePen, x + 23.0f, y + 15.0f, x + 23.0f, y + 19.0f);
-        g.DrawLine(&slatePen, x + 18.0f, y + 19.0f, x + 28.0f, y + 19.0f);
-
-        Gdiplus::Pen busPen(Gdiplus::Color(255, 148, 163, 184), 1.5f);
-        g.DrawLine(&busPen, x + 23.0f, y + 19.0f, x + 23.0f, y + 25.0f);
-
-        g.DrawLine(&busPen, x + 6.0f, y + 25.0f, x + 40.0f, y + 25.0f);
-
-        float drops[3] = { x + 8.0f, x + 23.0f, x + 38.0f };
-        for (int i = 0; i < 3; i++) {
-            g.DrawLine(&busPen, drops[i], y + 25.0f, drops[i], y + 30.0f);
-            Gdiplus::RectF nodeRect(drops[i] - 5.0f, y + 30.0f, 10.0f, 8.0f);
-            Gdiplus::SolidBrush nodeFill(Gdiplus::Color(255, 59, 130, 246));
-            Gdiplus::Pen nodePen(Gdiplus::Color(255, 71, 85, 105), 1.0f);
-            g.FillRectangle(&nodeFill, nodeRect);
-            g.DrawRectangle(&nodePen, nodeRect);
-            g.DrawLine(&nodePen, drops[i] - 3.0f, y + 38.0f, drops[i] + 3.0f, y + 38.0f);
+    void DrawSystemStockIcon(HDC hdc, int siid, int x, int y, int size) {
+        typedef struct {
+            DWORD cbSize;
+            HICON hIcon;
+            int iSysImageIndex;
+            int iIcon;
+            WCHAR szPath[MAX_PATH];
+        } STOCK_INFO;
+        typedef HRESULT (WINAPI *PFN_SHGetStockIconInfo)(int, UINT, STOCK_INFO*);
+        static PFN_SHGetStockIconInfo pFn = nullptr;
+        static bool loaded = false;
+        if (!loaded) {
+            loaded = true;
+            HMODULE hShell = LoadLibraryW(L"shell32.dll");
+            if (hShell) {
+                pFn = (PFN_SHGetStockIconInfo)GetProcAddress(hShell, "SHGetStockIconInfo");
+            }
         }
-    }
-
-    void DrawMonitorRowIcon(Gdiplus::Graphics& g, float x, float y) {
-        Gdiplus::RectF scr(x, y, 18.0f, 13.0f);
-        Gdiplus::GraphicsPath scrPath;
-        AddRoundRectPath(scrPath, scr, 1.5f);
-        Gdiplus::Pen pen(Gdiplus::Color(255, 51, 65, 85), 1.4f);
-        Gdiplus::SolidBrush scrBg(Gdiplus::Color(255, 255, 255, 255));
-        g.FillPath(&scrBg, &scrPath);
-        g.DrawPath(&pen, &scrPath);
-
-        g.DrawLine(&pen, x + 9.0f, y + 13.0f, x + 9.0f, y + 16.0f);
-        g.DrawLine(&pen, x + 4.5f, y + 16.0f, x + 13.5f, y + 16.0f);
+        if (!pFn) return;
+        STOCK_INFO sii = {};
+        sii.cbSize = sizeof(sii);
+        UINT flags = 0x00000100 | (size <= 16 ? 0x00000001 : 0x00000000);
+        if (SUCCEEDED(pFn(siid, flags, &sii)) && sii.hIcon) {
+            DrawIconEx(hdc, x, y, sii.hIcon, size, size, 0, NULL, DI_NORMAL);
+            DestroyIcon(sii.hIcon);
+        }
     }
 
     void DrawStatusBadgePill(Gdiplus::Graphics& g, const Gdiplus::RectF& cellRect, int statusType, const std::wstring& text) {
@@ -531,32 +511,7 @@ namespace {
         sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
         sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
-        if (dis->CtlID == IDC_BTN_SCAN) {
-            float icX = rf.X + 20.0f;
-            float icY = rf.Y + rf.Height / 2.0f;
-            float r = 5.6f;
-            float strokeW = 1.6f;
-
-            Gdiplus::Pen arcPen(textColor, strokeW);
-            arcPen.SetStartCap(Gdiplus::LineCapRound);
-            arcPen.SetEndCap(Gdiplus::LineCapFlat);
-
-            float r_mid = r * 0.87f;
-            g.DrawArc(&arcPen, icX - r_mid, icY - r_mid, r_mid * 2.0f, r_mid * 2.0f, 20.0f, 275.0f);
-
-            Gdiplus::PointF arrowPts[3] = {
-                Gdiplus::PointF(icX + 1.0f * r, icY - 0.95f * r),
-                Gdiplus::PointF(icX + 1.0f * r, icY - 0.28f * r),
-                Gdiplus::PointF(icX + 0.30f * r, icY - 0.28f * r)
-            };
-            Gdiplus::SolidBrush arrowBrush(textColor);
-            g.FillPolygon(&arrowBrush, arrowPts, 3);
-
-            Gdiplus::RectF textRect(rf.X + 24.0f, rf.Y, rf.Width - 24.0f, rf.Height);
-            g.DrawString(text, -1, &font, textRect, &sf, &textBrush);
-        } else {
-            g.DrawString(text, -1, &font, rf, &sf, &textBrush);
-        }
+        g.DrawString(text, -1, &font, rf, &sf, &textBrush);
     }
 
     LRESULT CALLBACK ConnectWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -585,7 +540,7 @@ namespace {
                 g_hBgBrush = CreateSolidBrush(RGB(241, 245, 249));
                 g_hWhiteBrush = CreateSolidBrush(RGB(255, 255, 255));
 
-                g_hBtnScan = CreateWindowExW(0, L"BUTTON", L"Quét mạng",
+                g_hBtnScan = CreateWindowExW(0, L"BUTTON", L"\u21BB  Quét mạng",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     608, 22, 124, 36, hwnd, (HMENU)IDC_BTN_SCAN, GetModuleHandle(NULL), NULL);
 
@@ -670,7 +625,7 @@ namespace {
                     Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 241, 245, 249));
                     g.FillRectangle(&bgBrush, 0, 0, clientW, clientH);
 
-                    DrawNetworkBannerIcon(g, 26.0f, 20.0f);
+                    DrawSystemStockIcon(memDC, 17, 24, 18, 42);
 
                     Gdiplus::FontFamily ff(L"Segoe UI");
                     Gdiplus::StringFormat sfLeft;
@@ -734,20 +689,7 @@ namespace {
                                             g_editHasFocus ? 1.6f : 1.0f);
                     g.DrawPath(&ipBorderPen, &ipBoxPath);
 
-                    Gdiplus::RectF miniScr(46.0f, 404.0f, 22.0f, 15.0f);
-                    Gdiplus::GraphicsPath miniScrPath;
-                    AddRoundRectPath(miniScrPath, miniScr, 1.5f);
-                    Gdiplus::Pen miniPen(Gdiplus::Color(255, 71, 85, 105), 1.2f);
-                    g.DrawPath(&miniPen, &miniScrPath);
-                    g.DrawLine(&miniPen, 57.0f, 419.0f, 57.0f, 422.0f);
-                    g.DrawLine(&miniPen, 52.0f, 422.0f, 62.0f, 422.0f);
-
-                    Gdiplus::Font fontMiniIP(&ff, 8.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                    Gdiplus::SolidBrush ipTextBrush(Gdiplus::Color(255, 71, 85, 105));
-                    Gdiplus::StringFormat sfCenter;
-                    sfCenter.SetAlignment(Gdiplus::StringAlignmentCenter);
-                    sfCenter.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                    g.DrawString(L"IP", -1, &fontMiniIP, miniScr, &sfCenter, &ipTextBrush);
+                    DrawSystemStockIcon(memDC, 94, 48, 404, 16);
                 }
 
                 BitBlt(hdc, 0, 0, clientW, clientH, memDC, 0, 0, SRCCOPY);
@@ -910,8 +852,8 @@ namespace {
                             if (subItem == 0) {
 
                                 float rowH = (float)(subRect.bottom - subRect.top);
-                                float iconY = (float)subRect.top + (rowH - 17.0f) / 2.0f;
-                                DrawMonitorRowIcon(g, (float)subRect.left + 8.0f, iconY);
+                                int iconY = subRect.top + (int)((rowH - 16.0f) / 2.0f);
+                                DrawSystemStockIcon(hdc, 94, subRect.left + 8, iconY, 16);
 
                                 wchar_t nameBuf[128] = {0};
                                 ListView_GetItemText(g_hListClients, itemIdx, 0, nameBuf, 127);

@@ -312,7 +312,7 @@ namespace {
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_UP, GetModuleHandle(NULL), NULL);
 
-                g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"Làm mới",
+                g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"\u21BB  Làm mới",
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_FILE_REFRESH, GetModuleHandle(NULL), NULL);
 
@@ -418,34 +418,13 @@ namespace {
                     g.DrawPath(&borderPen, &path);
 
                     Gdiplus::Color iconColor = Gdiplus::Color(255, 51, 65, 85);
-                    float icX = btnRect.X + 16.0f * scale;
-                    float icY = btnRect.Y + btnRect.Height / 2.0f;
-                    float r = 5.6f * scale;
-                    float strokeW = 1.6f * scale;
-
-                    Gdiplus::Pen arcPen(iconColor, strokeW);
-                    arcPen.SetStartCap(Gdiplus::LineCapRound);
-                    arcPen.SetEndCap(Gdiplus::LineCapFlat);
-
-                    float r_mid = r * 0.87f;
-                    g.DrawArc(&arcPen, icX - r_mid, icY - r_mid, r_mid * 2.0f, r_mid * 2.0f, 20.0f, 275.0f);
-
-                    Gdiplus::PointF arrowPts[3] = {
-                        Gdiplus::PointF(icX + 1.0f * r, icY - 0.95f * r),
-                        Gdiplus::PointF(icX + 1.0f * r, icY - 0.28f * r),
-                        Gdiplus::PointF(icX + 0.30f * r, icY - 0.28f * r)
-                    };
-                    Gdiplus::SolidBrush arrowBrush(iconColor);
-                    g.FillPolygon(&arrowBrush, arrowPts, 3);
-
                     Gdiplus::FontFamily ff(L"Segoe UI");
                     Gdiplus::Font font(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                     Gdiplus::SolidBrush textBrush(iconColor);
                     Gdiplus::StringFormat sf;
                     sf.SetAlignment(Gdiplus::StringAlignmentCenter);
                     sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                    Gdiplus::RectF textRect(btnRect.X + 20.0f * scale, btnRect.Y, btnRect.Width - 20.0f * scale, btnRect.Height);
-                    g.DrawString(L"Làm mới", -1, &font, textRect, &sf, &textBrush);
+                    g.DrawString(L"\u21BB  Làm mới", -1, &font, btnRect, &sf, &textBrush);
                 } else {
                     Gdiplus::Color fill = isPressed ? Gdiplus::Color(255, 226, 232, 240) : (isHover ? Gdiplus::Color(255, 241, 245, 249) : Gdiplus::Color(255, 255, 255, 255));
                     Gdiplus::SolidBrush fillBrush(fill);

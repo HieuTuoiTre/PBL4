@@ -249,75 +249,6 @@ namespace {
                 textRect.X += (dotSize + 4.0f * scale);
                 textRect.Width -= (dotSize + 4.0f * scale);
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
-            } else if (btn.id == BTN_MUTE) {
-                bool isMuted = AudioPlayer::IsMuted();
-                float iconW = 12.0f * scale;
-                float iconX = btn.rect.X + 10.0f * scale;
-                float iconY = btn.rect.Y + (btn.rect.Height - 10.0f * scale) / 2.0f;
-                Gdiplus::SolidBrush iconBrush(textColor);
-
-                g.FillRectangle(&iconBrush, iconX, iconY + 3.0f * scale, 3.0f * scale, 4.0f * scale);
-
-                Gdiplus::PointF conePts[3] = {
-                    Gdiplus::PointF(iconX + 3.0f * scale, iconY + 3.0f * scale),
-                    Gdiplus::PointF(iconX + 7.0f * scale, iconY),
-                    Gdiplus::PointF(iconX + 7.0f * scale, iconY + 10.0f * scale)
-                };
-                g.FillPolygon(&iconBrush, conePts, 3);
-                if (isMuted) {
-                    Gdiplus::Pen slashPen(Gdiplus::Color(255, 239, 68, 68), 1.5f * scale);
-                    g.DrawLine(&slashPen, iconX, iconY, iconX + 11.0f * scale, iconY + 10.0f * scale);
-                } else {
-                    Gdiplus::Pen arcPen(textColor, 1.2f * scale);
-                    g.DrawArc(&arcPen, iconX + 5.0f * scale, iconY + 2.0f * scale, 6.0f * scale, 6.0f * scale, -45.0f, 90.0f);
-                }
-                Gdiplus::RectF textRect = btn.rect;
-                textRect.X += (iconW + 4.0f * scale);
-                textRect.Width -= (iconW + 4.0f * scale);
-                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
-            } else if (btn.id == BTN_TASK_MGR) {
-                float iconW = 12.0f * scale;
-                float iconX = btn.rect.X + 10.0f * scale;
-                float iconY = btn.rect.Y + (btn.rect.Height - 11.0f * scale) / 2.0f;
-                Gdiplus::SolidBrush barBrush(textColor);
-                g.FillRectangle(&barBrush, iconX, iconY + 5.0f * scale, 2.5f * scale, 6.0f * scale);
-                g.FillRectangle(&barBrush, iconX + 4.0f * scale, iconY, 2.5f * scale, 11.0f * scale);
-                g.FillRectangle(&barBrush, iconX + 8.0f * scale, iconY + 3.0f * scale, 2.5f * scale, 8.0f * scale);
-                Gdiplus::RectF textRect = btn.rect;
-                textRect.X += (iconW + 4.0f * scale);
-                textRect.Width -= (iconW + 4.0f * scale);
-                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
-            } else if (btn.id == BTN_FILE_EXP) {
-                float iconW = 13.0f * scale;
-                float iconX = btn.rect.X + 10.0f * scale;
-                float iconY = btn.rect.Y + (btn.rect.Height - 10.0f * scale) / 2.0f;
-                Gdiplus::SolidBrush folderBrush(textColor);
-                g.FillRectangle(&folderBrush, iconX, iconY, 5.0f * scale, 3.0f * scale);
-                g.FillRectangle(&folderBrush, iconX, iconY + 2.0f * scale, 12.0f * scale, 8.0f * scale);
-                Gdiplus::RectF textRect = btn.rect;
-                textRect.X += (iconW + 4.0f * scale);
-                textRect.Width -= (iconW + 4.0f * scale);
-                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
-            } else if (btn.id == BTN_CHAT) {
-                float iconW = 12.0f * scale;
-                float iconX = btn.rect.X + 10.0f * scale;
-                float iconY = btn.rect.Y + (btn.rect.Height - 10.0f * scale) / 2.0f;
-                Gdiplus::SolidBrush chatBrush(textColor);
-                Gdiplus::RectF bubbleRect(iconX, iconY, 11.0f * scale, 7.5f * scale);
-                Gdiplus::GraphicsPath bubblePath;
-                AddRoundRectPath(bubblePath, bubbleRect, 2.0f * scale);
-                g.FillPath(&chatBrush, &bubblePath);
-                Gdiplus::PointF tailPts[3] = {
-                    Gdiplus::PointF(iconX + 2.0f * scale, iconY + 6.0f * scale),
-                    Gdiplus::PointF(iconX - 0.5f * scale, iconY + 10.0f * scale),
-                    Gdiplus::PointF(iconX + 5.5f * scale, iconY + 6.0f * scale)
-                };
-                g.FillPolygon(&chatBrush, tailPts, 3);
-
-                Gdiplus::RectF textRect = btn.rect;
-                textRect.X += (iconW + 4.0f * scale);
-                textRect.Width -= (iconW + 4.0f * scale);
-                g.DrawString(btn.text.c_str(), -1, &fontBtn, textRect, &sfCenter, &textBrush);
             } else {
                 g.DrawString(btn.text.c_str(), -1, &fontBtn, btn.rect, &sfCenter, &textBrush);
             }
@@ -344,22 +275,19 @@ namespace {
         uint64_t lastFrameMs = g_lastFrameTimeMs.load(std::memory_order_relaxed);
         uint64_t msSinceLastFrame = (lastFrameMs > 0 && nowMs >= lastFrameMs) ? (nowMs - lastFrameMs) : 0;
 
-        // Nhận diện trạng thái màn hình tĩnh thông minh:
-        // Nếu trong 400ms qua không có frame mới (hoặc streamFps == 0), coi là màn hình tĩnh (Eco Mode).
-        // Tránh hiện tượng nhấp nháy đèn cam hoặc báo ảo "2-3 FPS" khi người dùng vừa dừng tay.
         bool isStaticScreen = (streamFps == 0) || (streamFps <= 6 && msSinceLastFrame >= 350) || (msSinceLastFrame >= 500);
 
         if (isStaticScreen) {
-            dotColor = Gdiplus::Color(255, 56, 189, 248); // Cyan: Màn hình tĩnh / đồng bộ tuyệt đối (Eco)
+            dotColor = Gdiplus::Color(255, 56, 189, 248);
             fpsStr = L"60 FPS (Tĩnh)";
         } else {
             int dispFps = (renderFps > 0) ? renderFps : streamFps;
             if (streamFps >= 25) {
-                dotColor = Gdiplus::Color(255, 34, 197, 94); // Xanh lá: Mượt mà 60 FPS
+                dotColor = Gdiplus::Color(255, 34, 197, 94);
             } else if (streamFps >= 12) {
-                dotColor = Gdiplus::Color(255, 245, 158, 11); // Vàng cam: Mạng trung bình
+                dotColor = Gdiplus::Color(255, 245, 158, 11);
             } else {
-                dotColor = Gdiplus::Color(255, 239, 68, 68); // Đỏ: Nghẽn mạng khi đang chuyển động
+                dotColor = Gdiplus::Color(255, 239, 68, 68);
             }
             fpsStr = std::to_wstring(dispFps) + L" FPS (Net " + std::to_wstring(streamFps) + L")";
         }
@@ -420,7 +348,6 @@ namespace {
                 ScreenToClient(g_hVideoWnd, &pt);
             }
 
-            // Kẹp tọa độ chuột trong phạm vi viewport hiển thị thực tế (Letterbox viewport)
             float cx = (float)pt.x;
             if (cx < vx) cx = vx;
             if (cx > vx + vw) cx = vx + vw;
@@ -429,7 +356,6 @@ namespace {
             if (cy < vy) cy = vy;
             if (cy > vy + vh) cy = vy + vh;
 
-            // Ánh xạ chính xác tuyệt đối sang tọa độ pixel của màn hình Client
             int16_t imgX = (int16_t)((cx - vx) * (float)frameW / vw);
             int16_t imgY = (int16_t)((cy - vy) * (float)frameH / vh);
 
@@ -466,7 +392,6 @@ namespace {
                     int offX = (r.right - drawW) / 2;
                     int offY = (r.bottom - drawH) / 2;
 
-                    // Tô đen viền letterbox xung quanh khung hình nếu có khoảng trống
                     HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
                     if (offX > 0) {
                         RECT rLeft = { 0, 0, offX, r.bottom };
@@ -849,7 +774,6 @@ namespace {
                     return 0;
                 }
 
-                // Khóa phím Windows: Không gửi lệnh nhấn Win sang Client để chống kẹt phím
                 if (wp == VK_LWIN || wp == VK_RWIN) {
                     return 0;
                 }
@@ -940,7 +864,6 @@ namespace RemoteWindow {
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
         if (jpegSize <= 0 || !jpegData || !g_tjDecompressor) return;
 
-        // 1. Kiểm tra an toàn biên: tọa độ và kích thước không âm, không vượt giới hạn thực tế
         if (delta.x < 0 || delta.y < 0 || delta.width <= 0 || delta.height <= 0) return;
         int reqW = delta.x + delta.width;
         int reqH = delta.y + delta.height;
@@ -948,8 +871,6 @@ namespace RemoteWindow {
 
         EnterCriticalSection(&g_cs);
 
-        // 2. Chỉ cấp phát mở rộng buffer khi kích thước yêu cầu vượt quá kích thước hiện tại
-        // Tuyệt đối không thu nhỏ canvas khi nhận partial delta ở (0, 0) để tránh hủy hoại bộ đệm màn hình
         bool needRealloc = (g_frameWidth < reqW || g_frameHeight < reqH);
 
         if (needRealloc) {

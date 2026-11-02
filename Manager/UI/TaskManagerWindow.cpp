@@ -39,22 +39,21 @@ namespace {
     std::vector<Protocol::ProcessInfoPayload> g_latestProcesses;
     std::wstring g_searchQuery = L"";
 
-    // Cấu trúc mô hình hóa danh sách tiến trình dạng Cây gom nhóm (chuẩn Windows Task Manager)
     struct ProcessDisplayRow {
-        bool isGroup;                     // true nếu là hàng cha gom nhóm (vd: Zalo 8 PIDs)
-        bool isExpanded;                  // true nếu hàng cha đang mở rộng
-        std::wstring groupKey;            // Key định danh nhóm chữ thường (vd: L"zalo.exe")
-        std::wstring nameDisplay;         // Tên hiển thị cột 0: "\u25B6 Zalo.exe (8)" hoặc "       \u2514 Zalo.exe"
-        std::wstring pidDisplay;          // Cột 1: "8 PIDs" hoặc "1240"
-        std::wstring ramDisplay;          // Cột 2: "221 MB" hoặc "126 MB"
-        std::wstring diskDisplay;         // Cột 3: "0 MB"
-        uint32_t pid;                     // PID nếu là con đơn lẻ (hoặc 0)
-        std::vector<uint32_t> allPids;    // Danh sách toàn bộ PID cần kill khi chọn hàng này
-        std::wstring appDisplayName;      // Tên app sạch hiển thị trong thông báo xác nhận
+        bool isGroup;
+        bool isExpanded;
+        std::wstring groupKey;
+        std::wstring nameDisplay;
+        std::wstring pidDisplay;
+        std::wstring ramDisplay;
+        std::wstring diskDisplay;
+        uint32_t pid;
+        std::vector<uint32_t> allPids;
+        std::wstring appDisplayName;
     };
 
     std::vector<ProcessDisplayRow> g_currentDisplayRows;
-    std::set<std::wstring> g_expandedGroups; // Lưu trạng thái mở rộng của các nhóm
+    std::set<std::wstring> g_expandedGroups;
 
     HFONT g_hFontNormal = NULL;
     HFONT g_hFontBtn = NULL;
@@ -89,7 +88,6 @@ namespace {
         path.CloseFigure();
     }
 
-    // Cuộn danh sách tiến trình bằng con lăn chuột mượt mà
     void ScrollTaskList(short zDelta) {
         if (!g_hTaskList) return;
         float scale = GetDpiScale(g_hTaskWnd ? g_hTaskWnd : g_hTaskList);
@@ -219,7 +217,6 @@ namespace {
         if (row.allPids.empty()) return;
 
         if (row.isGroup) {
-            // Hàng cha gom nhóm: Xác nhận kill TOÀN BỘ các tiến trình của ứng dụng
             std::wstring confirmMsg = L"Ứng dụng '" + row.appDisplayName + L"' đang chạy với " +
                                       std::to_wstring(row.allPids.size()) + L" tiến trình (" +
                                       row.ramDisplay + L" RAM).\n\n" +
@@ -233,7 +230,6 @@ namespace {
                 g_client->SendPacket(Protocol::MSG_SYS_INFO_REQUEST, nullptr, 0);
             }
         } else {
-            // Hàng con hoặc ứng dụng đơn lẻ: Kill 1 PID
             std::wstring confirmMsg = L"Bạn có chắc chắn muốn kết thúc (Kill) tiến trình '" + row.appDisplayName + L"' (PID: " + std::to_wstring(row.pid) + L") không?";
             if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Xác nhận kết thúc tác vụ", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
                 uint32_t p = row.pid;
@@ -268,7 +264,6 @@ namespace {
             }
         }
 
-        // Nhóm các tiến trình theo tên file thực thi (.exe)
         struct TempGroup {
             std::wstring appName;
             std::wstring key;
@@ -303,13 +298,11 @@ namespace {
             }
         }
 
-        // Sắp xếp các nhóm ứng dụng theo tổng RAM giảm dần (những app nặng nhất như Edge, Zalo lên trên cùng)
         std::sort(groups.begin(), groups.end(), [](const TempGroup& a, const TempGroup& b) {
             if (a.totalRamMB != b.totalRamMB) return a.totalRamMB > b.totalRamMB;
             return a.appName < b.appName;
         });
 
-        // Với mỗi nhóm, sắp xếp các tiến trình con bên trong theo RAM giảm dần
         for (auto& grp : groups) {
             std::sort(grp.items.begin(), grp.items.end(), [](const Protocol::ProcessInfoPayload& a, const Protocol::ProcessInfoPayload& b) {
                 if (a.ramUsageMB != b.ramUsageMB) return a.ramUsageMB > b.ramUsageMB;
@@ -317,7 +310,6 @@ namespace {
             });
         }
 
-        // Lưu lại vị trí hàng đang được chọn trước khi cập nhật
         std::wstring selectedRowId = L"";
         int curSel = (int)SendMessageW(g_hTaskList, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
         if (curSel >= 0 && curSel < (int)g_currentDisplayRows.size()) {
@@ -329,11 +321,9 @@ namespace {
             }
         }
 
-        // Xây dựng danh sách hiển thị phẳng g_currentDisplayRows
         g_currentDisplayRows.clear();
         for (const auto& grp : groups) {
             if (grp.items.size() == 1) {
-                // Ứng dụng chỉ có 1 tiến trình: hiển thị phẳng
                 ProcessDisplayRow row;
                 row.isGroup = false;
                 row.isExpanded = false;
@@ -347,7 +337,6 @@ namespace {
                 row.appDisplayName = grp.appName;
                 g_currentDisplayRows.push_back(row);
             } else {
-                // Ứng dụng đa tiến trình (như Edge, Zalo, Chrome...): Tạo hàng cha gom nhóm
                 bool isExp = (g_expandedGroups.count(grp.key) > 0);
                 std::vector<uint32_t> childPids;
                 for (const auto& c : grp.items) childPids.push_back(c.pid);
@@ -356,7 +345,6 @@ namespace {
                 groupRow.isGroup = true;
                 groupRow.isExpanded = isExp;
                 groupRow.groupKey = grp.key;
-                // Dùng mã Unicode \u25BC (▼) và \u25B6 (▶) an toàn tuyệt đối, không lo lỗi font
                 groupRow.nameDisplay = (isExp ? L"\u25BC " : L"\u25B6 ") + grp.appName + L" (" + std::to_wstring(grp.items.size()) + L")";
                 groupRow.pidDisplay = std::to_wstring(grp.items.size()) + L" PIDs";
                 groupRow.ramDisplay = std::to_wstring(grp.totalRamMB) + L" MB";
@@ -367,7 +355,6 @@ namespace {
                 g_currentDisplayRows.push_back(groupRow);
 
                 if (isExp) {
-                    // Nếu đang mở rộng: Thêm các hàng con thụt lề
                     for (const auto& c : grp.items) {
                         ProcessDisplayRow childRow;
                         childRow.isGroup = false;
@@ -386,7 +373,6 @@ namespace {
             }
         }
 
-        // Đồng bộ danh sách hiển thị vào Win32 ListView
         int count = (int)g_currentDisplayRows.size();
         SendMessageW(g_hTaskList, WM_SETREDRAW, FALSE, 0);
 
@@ -419,7 +405,6 @@ namespace {
             lvi.pszText = (LPWSTR)row.diskDisplay.c_str();
             SendMessageW(g_hTaskList, LVM_SETITEMTEXTW, i, (LPARAM)&lvi);
 
-            // Khôi phục lựa chọn
             std::wstring rowId = row.isGroup ? (L"grp:" + row.groupKey) : (L"pid:" + std::to_wstring(row.pid));
             if (!selectedRowId.empty() && rowId == selectedRowId) {
                 LVITEMW stateItem = {};
@@ -583,10 +568,10 @@ namespace {
                 g_hSearchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_TASK_SEARCH, GetModuleHandle(NULL), NULL);
-                SendMessageW(g_hSearchEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"🔍 Tìm kiếm tiến trình theo Tên hoặc PID...");
+                SendMessageW(g_hSearchEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Tìm kiếm tiến trình theo Tên hoặc PID...");
                 g_oldSearchProc = (WNDPROC)SetWindowLongPtrW(g_hSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditSubclassProc);
 
-                g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"Làm mới",
+                g_hBtnRefresh = CreateWindowExW(0, L"BUTTON", L"\u21BB  Làm mới",
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_TASK_REFRESH, GetModuleHandle(NULL), NULL);
 
@@ -696,34 +681,13 @@ namespace {
                     g.DrawPath(&borderPen, &path);
 
                     Gdiplus::Color iconColor = Gdiplus::Color(255, 51, 65, 85);
-                    float icX = btnRect.X + 20.0f * scale;
-                    float icY = btnRect.Y + btnRect.Height / 2.0f;
-                    float r = 5.6f * scale;
-                    float strokeW = 1.6f * scale;
-
-                    Gdiplus::Pen arcPen(iconColor, strokeW);
-                    arcPen.SetStartCap(Gdiplus::LineCapRound);
-                    arcPen.SetEndCap(Gdiplus::LineCapFlat);
-
-                    float r_mid = r * 0.87f;
-                    g.DrawArc(&arcPen, icX - r_mid, icY - r_mid, r_mid * 2.0f, r_mid * 2.0f, 20.0f, 275.0f);
-
-                    Gdiplus::PointF arrowPts[3] = {
-                        Gdiplus::PointF(icX + 1.0f * r, icY - 0.95f * r),
-                        Gdiplus::PointF(icX + 1.0f * r, icY - 0.28f * r),
-                        Gdiplus::PointF(icX + 0.30f * r, icY - 0.28f * r)
-                    };
-                    Gdiplus::SolidBrush arrowBrush(iconColor);
-                    g.FillPolygon(&arrowBrush, arrowPts, 3);
-
                     Gdiplus::FontFamily ff(L"Segoe UI");
                     Gdiplus::Font font(&ff, 12.0f * scale, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                     Gdiplus::SolidBrush textBrush(iconColor);
                     Gdiplus::StringFormat sf;
                     sf.SetAlignment(Gdiplus::StringAlignmentCenter);
                     sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                    Gdiplus::RectF textRect(btnRect.X + 24.0f * scale, btnRect.Y, btnRect.Width - 24.0f * scale, btnRect.Height);
-                    g.DrawString(L"Làm mới", -1, &font, textRect, &sf, &textBrush);
+                    g.DrawString(L"\u21BB  Làm mới", -1, &font, btnRect, &sf, &textBrush);
                 }
                 return TRUE;
             }
@@ -858,7 +822,6 @@ namespace {
                         return 0;
                     }
                     if (nmh->code == NM_CLICK) {
-                        // Click vào vùng mũi tên \u25B6 / \u25BC ở đầu hàng
                         LVHITTESTINFO hti = {};
                         GetCursorPos(&hti.pt);
                         ScreenToClient(g_hTaskList, &hti.pt);
@@ -883,14 +846,14 @@ namespace {
                             int itemIdx = (int)pLVCD->nmcd.dwItemSpec;
                             bool isSel = (ListView_GetItemState(g_hTaskList, itemIdx, LVIS_SELECTED) & LVIS_SELECTED) != 0;
                             if (isSel) {
-                                pLVCD->clrText = RGB(29, 78, 216);      // Blue primary
-                                pLVCD->clrTextBk = RGB(239, 246, 255);  // Soft blue highlight
+                                pLVCD->clrText = RGB(29, 78, 216);
+                                pLVCD->clrTextBk = RGB(239, 246, 255);
                             } else if (itemIdx >= 0 && itemIdx < (int)g_currentDisplayRows.size() && g_currentDisplayRows[itemIdx].isGroup) {
-                                pLVCD->clrText = RGB(15, 23, 42);       // Dark Slate đậm cho hàng cha
+                                pLVCD->clrText = RGB(15, 23, 42);
                                 pLVCD->clrTextBk = (itemIdx % 2 == 1) ? RGB(241, 245, 249) : RGB(248, 250, 252);
                             } else {
-                                pLVCD->clrText = RGB(71, 85, 105);      // Muted Slate cho hàng con
-                                pLVCD->clrTextBk = RGB(255, 255, 255);  // White background
+                                pLVCD->clrText = RGB(71, 85, 105);
+                                pLVCD->clrTextBk = RGB(255, 255, 255);
                             }
                             return CDRF_DODEFAULT;
                         }

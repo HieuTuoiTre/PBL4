@@ -45,7 +45,6 @@ namespace InputHandler {
 
     void SendKey(WPARAM wp, uint8_t isDown) {
         if (!s_client || !s_isControlling) return;
-        // Khóa phím Windows: Không gửi phím Windows (VK_LWIN, VK_RWIN) xuống Client để tránh kẹt phím
         if (wp == VK_LWIN || wp == VK_RWIN) {
             if (isDown != 0) return;
         }
