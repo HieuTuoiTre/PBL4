@@ -17,6 +17,18 @@ namespace {
     std::atomic<bool> g_forceFull(true);
     std::atomic<bool> g_useTightJpeg(false);
 
+    // TigerVNC SConnection State Machine (§7 RFC 6143)
+    std::atomic<Rfb::RfbState> g_state(Rfb::RFBSTATE_UNINITIALISED);
+
+    void SetState(Rfb::RfbState newState) {
+        Rfb::RfbState oldState = g_state.exchange(newState, std::memory_order_acq_rel);
+        if (oldState != newState) {
+            std::cout << "[RFB Server State Machine] "
+                      << Rfb::RfbStateToString(oldState) << " -> "
+                      << Rfb::RfbStateToString(newState) << "\n";
+        }
+    }
+
     TcpServer g_server;
 
     std::thread g_acceptThread;
@@ -31,9 +43,13 @@ namespace {
     int16_t g_prevMouseY = -1;
 
     bool PerformHandshake() {
+        // State: RFBSTATE_PROTOCOL_VERSION (§7.1.1)
+        SetState(Rfb::RFBSTATE_PROTOCOL_VERSION);
+
         // 1. Gửi ProtocolVersion ("RFB 003.008\n", 12 bytes)
         if (!g_server.SendRaw(Rfb::VERSION_3_8_STRING, (int)Rfb::VERSION_STRING_LENGTH)) {
             std::cerr << "[RFB Server] Lỗi gửi ProtocolVersion tới Client!\n";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
 
@@ -41,35 +57,50 @@ namespace {
         char clientVer[13] = { 0 };
         if (!g_server.ReceiveExact(clientVer, (int)Rfb::VERSION_STRING_LENGTH)) {
             std::cerr << "[RFB Server] Lỗi đọc ProtocolVersion từ Client!\n";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         std::cout << "[RFB Server] Client kết nối với phiên bản: " << clientVer;
 
+        // State: RFBSTATE_SECURITY_TYPES (§7.1.2)
+        SetState(Rfb::RFBSTATE_SECURITY_TYPES);
+
         // 3. Gửi danh sách Security Types (1 loại: None)
         uint8_t secTypes[2] = { 1, (uint8_t)Rfb::SECURITY_NONE };
         if (!g_server.SendRaw((const char*)secTypes, sizeof(secTypes))) {
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
 
         // 4. Đọc loại bảo mật Client chọn (1 byte)
         uint8_t chosenSec = 0;
         if (!g_server.ReceiveExact((char*)&chosenSec, 1)) {
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         if (chosenSec != Rfb::SECURITY_NONE) {
             std::cerr << "[RFB Server] Client chọn loại bảo mật không được hỗ trợ: " << (int)chosenSec << "\n";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
+
+        // State: RFBSTATE_SECURITY (§7.1.3)
+        SetState(Rfb::RFBSTATE_SECURITY);
 
         // 5. Gửi SecurityResult (4 bytes Big-Endian: 0 = OK)
         uint32_t secResult = htonl(Rfb::SECURITY_RESULT_OK);
         if (!g_server.SendRaw((const char*)&secResult, sizeof(secResult))) {
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
+
+        // State: RFBSTATE_INITIALISATION (§7.3)
+        SetState(Rfb::RFBSTATE_INITIALISATION);
 
         // 6. Đọc ClientInit (1 byte shared-flag)
         Rfb::RfbClientInit clientInit = { 0 };
         if (!g_server.ReceiveExact((char*)&clientInit, sizeof(clientInit))) {
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         std::cout << "[RFB Server] Nhận ClientInit (shared = " << (int)clientInit.sharedFlag << ")\n";
@@ -107,9 +138,12 @@ namespace {
 
         if (!g_server.SendRaw(initPayload.data(), (int)initPayload.size())) {
             std::cerr << "[RFB Server] Lỗi gửi ServerInit!\n";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
 
+        // State: RFBSTATE_NORMAL (§7.5 & §7.6)
+        SetState(Rfb::RFBSTATE_NORMAL);
         std::cout << "[RFB Server] Bắt tay RFB 3.8 hoàn tất thành công! Sẵn sàng nhận lệnh.\n";
         return true;
     }
@@ -174,7 +208,7 @@ namespace {
                     char pad[3];
                     Rfb::RfbPixelFormat fmt;
                     if (!g_server.ReceiveExact(pad, 3) || !g_server.ReceiveExact((char*)&fmt, sizeof(fmt))) {
-                        return;
+                        break;
                     }
                     break;
                 }
@@ -183,13 +217,13 @@ namespace {
                     uint8_t pad = 0;
                     uint16_t numEnc = 0;
                     if (!g_server.ReceiveExact((char*)&pad, 1) || !g_server.ReceiveExact((char*)&numEnc, 2)) {
-                        return;
+                        break;
                     }
                     numEnc = ntohs(numEnc);
                     std::vector<int32_t> encodings(numEnc);
                     if (numEnc > 0) {
                         if (!g_server.ReceiveExact((char*)encodings.data(), numEnc * sizeof(int32_t))) {
-                            return;
+                            break;
                         }
                     }
 
@@ -215,7 +249,7 @@ namespace {
                         !g_server.ReceiveExact((char*)&y, 2) ||
                         !g_server.ReceiveExact((char*)&w, 2) ||
                         !g_server.ReceiveExact((char*)&h, 2)) {
-                        return;
+                        break;
                     }
 
                     g_hasReceivedInitialRequest.store(true, std::memory_order_release);
@@ -233,7 +267,7 @@ namespace {
                     if (!g_server.ReceiveExact((char*)&downFlag, 1) ||
                         !g_server.ReceiveExact((char*)&pad, 2) ||
                         !g_server.ReceiveExact((char*)&keysym, 4)) {
-                        return;
+                        break;
                     }
                     keysym = ntohl(keysym);
                     WPARAM vk = KeySymToWinVk(keysym);
@@ -249,7 +283,7 @@ namespace {
                     if (!g_server.ReceiveExact((char*)&btnMask, 1) ||
                         !g_server.ReceiveExact((char*)&x, 2) ||
                         !g_server.ReceiveExact((char*)&y, 2)) {
-                        return;
+                        break;
                     }
                     ProcessPointerEvent(btnMask, (int16_t)ntohs(x), (int16_t)ntohs(y));
                     break;
@@ -259,7 +293,7 @@ namespace {
                     char pad[3];
                     uint32_t len = 0;
                     if (!g_server.ReceiveExact(pad, 3) || !g_server.ReceiveExact((char*)&len, 4)) {
-                        return;
+                        break;
                     }
                     len = ntohl(len);
                     if (len > 0 && len <= 1024 * 1024) {
@@ -275,6 +309,9 @@ namespace {
                     break;
             }
         }
+
+        g_isClientConnected.store(false, std::memory_order_release);
+        SetState(Rfb::RFBSTATE_UNINITIALISED);
     }
 
     void TransmitLoop() {
@@ -403,6 +440,7 @@ namespace {
             if (g_transmitThread.joinable()) g_transmitThread.join();
 
             g_isClientConnected.store(false, std::memory_order_release);
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             g_server.CloseClient();
             std::cout << "[RFB Server] Client đã ngắt kết nối. Sẵn sàng cho phiên tiếp theo.\n";
         }
@@ -433,6 +471,7 @@ namespace RfbServer {
 
         g_isRunning.store(false, std::memory_order_release);
         g_isClientConnected.store(false, std::memory_order_release);
+        SetState(Rfb::RFBSTATE_UNINITIALISED);
 
         g_server.Close();
 
@@ -447,6 +486,10 @@ namespace RfbServer {
 
     bool IsClientConnected() {
         return g_isClientConnected.load(std::memory_order_relaxed);
+    }
+
+    Rfb::RfbState GetState() {
+        return g_state.load(std::memory_order_relaxed);
     }
 
     void ForceFullUpdate() {

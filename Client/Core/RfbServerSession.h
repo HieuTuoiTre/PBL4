@@ -34,6 +34,11 @@ namespace RfbServer {
     bool IsClientConnected();
 
     /**
+     * @brief Returns the current TigerVNC State Machine state of the server session.
+     */
+    Rfb::RfbState GetState();
+
+    /**
      * @brief Forces a full screen framebuffer update to be sent to the client on the next cycle.
      */
     void ForceFullUpdate();

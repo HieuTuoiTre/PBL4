@@ -28,6 +28,14 @@ namespace {
 
     tjhandle g_tjDecompressor = nullptr;
     CRITICAL_SECTION g_cs;
+    static bool g_csInitialized = false;
+
+    void EnsureCriticalSection() {
+        if (!g_csInitialized) {
+            InitializeCriticalSection(&g_cs);
+            g_csInitialized = true;
+        }
+    }
 
     constexpr UINT WM_USER_NEW_FRAME = WM_USER + 101;
     static std::atomic<bool> g_paintPending(false);
@@ -935,6 +943,11 @@ namespace {
                     return 0;
                 }
 
+                if (wp == VK_F5) {
+                    RfbClient::RequestUpdate(false);
+                    return 0;
+                }
+
                 if (wp == VK_F11) {
                     ToggleFullscreenInternal(hwnd);
                     return 0;
@@ -1056,10 +1069,28 @@ namespace RemoteWindow {
         return g_hwnd;
     }
 
-    HWND Create(HINSTANCE hInst, TcpClient* client) {
+    HWND Create(HINSTANCE hInst, TcpClient* client, int initWidth, int initHeight) {
         g_client = client;
-        InitializeCriticalSection(&g_cs);
-        g_tjDecompressor = tjInitDecompress();
+        EnsureCriticalSection();
+        if (!g_tjDecompressor) {
+            g_tjDecompressor = tjInitDecompress();
+        }
+
+        if (initWidth > 0 && initHeight > 0) {
+            EnterCriticalSection(&g_cs);
+            g_frameWidth = initWidth;
+            g_frameHeight = initHeight;
+            g_framePixels.assign(g_frameWidth * g_frameHeight, 0xFF000000);
+
+            std::memset(&g_bmi, 0, sizeof(g_bmi));
+            g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            g_bmi.bmiHeader.biWidth = g_frameWidth;
+            g_bmi.bmiHeader.biHeight = -g_frameHeight;
+            g_bmi.bmiHeader.biPlanes = 1;
+            g_bmi.bmiHeader.biBitCount = 32;
+            g_bmi.bmiHeader.biCompression = BI_RGB;
+            LeaveCriticalSection(&g_cs);
+        }
 
         HBRUSH hDarkBrush = CreateSolidBrush(RGB(18, 19, 23));
 
@@ -1111,7 +1142,12 @@ namespace RemoteWindow {
     }
 
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
-        if (jpegSize <= 0 || !jpegData || !g_tjDecompressor) return;
+        if (jpegSize <= 0 || !jpegData) return;
+        EnsureCriticalSection();
+        if (!g_tjDecompressor) {
+            g_tjDecompressor = tjInitDecompress();
+        }
+        if (!g_tjDecompressor) return;
 
         // 1. Kiểm tra an toàn biên: tọa độ và kích thước không âm, không vượt giới hạn thực tế
         if (delta.x < 0 || delta.y < 0 || delta.width <= 0 || delta.height <= 0) return;
@@ -1182,6 +1218,58 @@ namespace RemoteWindow {
         }
     }
 
+    void UpdateRawFrame(int x, int y, int w, int h, const uint32_t* rawPixels) {
+        if (!rawPixels || w <= 0 || h <= 0 || x < 0 || y < 0) return;
+        int reqW = x + w;
+        int reqH = y + h;
+        if (reqW > 16384 || reqH > 16384) return;
+
+        EnsureCriticalSection();
+        EnterCriticalSection(&g_cs);
+
+        bool needRealloc = (g_frameWidth < reqW || g_frameHeight < reqH);
+        if (needRealloc) {
+            int newW = (std::max)(g_frameWidth, reqW);
+            int newH = (std::max)(g_frameHeight, reqH);
+            std::vector<uint32_t> newPixels(newW * newH, 0);
+            if (g_frameWidth > 0 && g_frameHeight > 0) {
+                int copyW = (std::min)(g_frameWidth, newW);
+                int copyH = (std::min)(g_frameHeight, newH);
+                for (int r = 0; r < copyH; ++r) {
+                    std::memcpy(&newPixels[r * newW], &g_framePixels[r * g_frameWidth], copyW * sizeof(uint32_t));
+                }
+            }
+            g_framePixels = std::move(newPixels);
+            g_frameWidth = newW;
+            g_frameHeight = newH;
+
+            std::memset(&g_bmi, 0, sizeof(g_bmi));
+            g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            g_bmi.bmiHeader.biWidth = g_frameWidth;
+            g_bmi.bmiHeader.biHeight = -g_frameHeight;
+            g_bmi.bmiHeader.biPlanes = 1;
+            g_bmi.bmiHeader.biBitCount = 32;
+            g_bmi.bmiHeader.biCompression = BI_RGB;
+        }
+
+        for (int r = 0; r < h; ++r) {
+            std::memcpy(&g_framePixels[(y + r) * g_frameWidth + x],
+                        &rawPixels[r * w],
+                        w * sizeof(uint32_t));
+        }
+        g_streamFrameCount++;
+        g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
+        LeaveCriticalSection(&g_cs);
+
+        if (g_hVideoWnd) {
+            InvalidateRect(g_hVideoWnd, NULL, FALSE);
+            bool expected = false;
+            if (g_paintPending.compare_exchange_strong(expected, true)) {
+                PostMessageW(g_hVideoWnd, WM_USER_NEW_FRAME, 0, 0);
+            }
+        }
+    }
+
     void Cleanup() {
         g_paintPending.store(false, std::memory_order_relaxed);
         if (g_hwnd) {
@@ -1192,6 +1280,7 @@ namespace RemoteWindow {
         g_hVideoWnd = NULL;
         ChatWindow::Cleanup();
         RfbInspector::Close();
+        EnsureCriticalSection();
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();
         g_frameWidth = 0;
@@ -1201,7 +1290,6 @@ namespace RemoteWindow {
             g_tjDecompressor = nullptr;
         }
         LeaveCriticalSection(&g_cs);
-        DeleteCriticalSection(&g_cs);
     }
 
     bool IsFullscreen() {

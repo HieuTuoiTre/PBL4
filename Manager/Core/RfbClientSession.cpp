@@ -20,17 +20,32 @@ namespace {
 
     RfbClient::PacketLogCallback g_logCallback = nullptr;
 
+    // TigerVNC CConnection State Machine (§7 RFC 6143)
+    std::atomic<Rfb::RfbState> g_state(Rfb::RFBSTATE_UNINITIALISED);
+
     void LogPacket(const std::string& dir, const std::string& type, size_t size, const std::string& desc) {
         if (g_logCallback) {
             g_logCallback(dir, type, size, desc);
         }
     }
 
+    void SetState(Rfb::RfbState newState) {
+        Rfb::RfbState oldState = g_state.exchange(newState, std::memory_order_acq_rel);
+        if (oldState != newState) {
+            LogPacket("STATE", Rfb::RfbStateToString(newState), 0,
+                      std::string("Chuyển trạng thái: ") + Rfb::RfbStateToString(oldState) + " -> " + Rfb::RfbStateToString(newState));
+        }
+    }
+
     bool PerformClientHandshake(std::string& outError) {
+        // State: RFBSTATE_PROTOCOL_VERSION (§7.1.1)
+        SetState(Rfb::RFBSTATE_PROTOCOL_VERSION);
+
         // 1. Nhận ProtocolVersion từ Server (12 bytes)
         char serverVer[13] = { 0 };
         if (!g_client.ReceiveExact(serverVer, (int)Rfb::VERSION_STRING_LENGTH)) {
             outError = "Không thể nhận chuỗi phiên bản ProtocolVersion từ VNC Server!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         LogPacket("RECV", "ProtocolVersion", 12, std::string(serverVer, 12));
@@ -38,14 +53,19 @@ namespace {
         // 2. Gửi lại ProtocolVersion chuẩn RFB 003.008\n
         if (!g_client.SendRaw(Rfb::VERSION_3_8_STRING, (int)Rfb::VERSION_STRING_LENGTH)) {
             outError = "Không thể gửi phản hồi ProtocolVersion tới VNC Server!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         LogPacket("SEND", "ProtocolVersion", 12, "RFB 003.008\\n");
+
+        // State: RFBSTATE_SECURITY_TYPES (§7.1.2)
+        SetState(Rfb::RFBSTATE_SECURITY_TYPES);
 
         // 3. Nhận danh sách loại bảo mật (Security Types)
         uint8_t numSecTypes = 0;
         if (!g_client.ReceiveExact((char*)&numSecTypes, 1)) {
             outError = "Không thể nhận số lượng Security Types từ Server!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
 
@@ -61,12 +81,14 @@ namespace {
                 reason = rBuf.data();
             }
             outError = "VNC Server từ chối kết nối: " + reason;
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
 
         std::vector<uint8_t> secList(numSecTypes);
         if (!g_client.ReceiveExact((char*)secList.data(), numSecTypes)) {
             outError = "Lỗi đọc danh sách Security Types từ Server!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
 
@@ -78,28 +100,38 @@ namespace {
         uint8_t chosenSec = (uint8_t)Rfb::SECURITY_NONE;
         if (!g_client.SendRaw((const char*)&chosenSec, 1)) {
             outError = "Lỗi gửi loại bảo mật được chọn!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         LogPacket("SEND", "SecurityChoice", 1, "Chọn SECURITY_NONE (1)");
+
+        // State: RFBSTATE_SECURITY (§7.1.3)
+        SetState(Rfb::RFBSTATE_SECURITY);
 
         // 4. Nhận SecurityResult (4 bytes Big-Endian: 0 = OK)
         uint32_t secResult = 0;
         if (!g_client.ReceiveExact((char*)&secResult, 4)) {
             outError = "Lỗi nhận kết quả xác thực SecurityResult từ Server!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         secResult = ntohl(secResult);
         if (secResult != Rfb::SECURITY_RESULT_OK) {
             outError = "Xác thực VNC thất bại (SecurityResult != 0)!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         LogPacket("RECV", "SecurityResult", 4, "Xác thực thành công (OK 0)");
+
+        // State: RFBSTATE_INITIALISATION (§7.3)
+        SetState(Rfb::RFBSTATE_INITIALISATION);
 
         // 5. Gửi ClientInit (1 byte shared-flag = 1)
         Rfb::RfbClientInit cInit;
         cInit.sharedFlag = 1;
         if (!g_client.SendRaw((const char*)&cInit, sizeof(cInit))) {
             outError = "Lỗi gửi ClientInit!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         LogPacket("SEND", "ClientInit", 1, "sharedFlag = 1 (Chia sẻ phiên)");
@@ -108,6 +140,7 @@ namespace {
         Rfb::RfbServerInitHeader sInit;
         if (!g_client.ReceiveExact((char*)&sInit, sizeof(sInit))) {
             outError = "Lỗi nhận ServerInit Header từ Server!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
 
@@ -145,13 +178,13 @@ namespace {
 
         if (!g_client.SendRaw(encPacket.data(), (int)encPacket.size())) {
             outError = "Lỗi gửi SetEncodings!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
         LogPacket("SEND", "SetEncodings", encPacket.size(), "Hỗ trợ Tight/JPEG, Raw, DesktopSize");
 
-        // 8. Gửi FramebufferUpdateRequest ban đầu (chụp toàn màn hình)
-        RfbClient::RequestUpdate(false);
-
+        // State: RFBSTATE_NORMAL (§7.5 & §7.6)
+        SetState(Rfb::RFBSTATE_NORMAL);
         return true;
     }
 
@@ -224,7 +257,12 @@ namespace {
                             size_t rawBytes = (size_t)rw * rh * 4;
                             std::vector<char> rawPixels(rawBytes);
                             if (!g_client.ReceiveExact(rawPixels.data(), (int)rawBytes)) return;
-                            // Raw fallback
+
+                            RemoteWindow::UpdateRawFrame((int)rx, (int)ry, (int)rw, (int)rh, (const uint32_t*)rawPixels.data());
+
+                            std::stringstream ss;
+                            ss << "Rect=(" << rx << "," << ry << " " << rw << "x" << rh << ") Raw " << (rawBytes / 1024) << "KB";
+                            LogPacket("RECV", "FramebufferUpdate", rawBytes, ss.str());
                         }
                     }
 
@@ -277,8 +315,18 @@ namespace RfbClient {
         g_isConnected.store(true, std::memory_order_release);
         g_shouldStop.store(false, std::memory_order_release);
 
-        g_workerThread = std::thread(WorkerLoop);
         return true;
+    }
+
+    void Start() {
+        if (!g_isConnected.load(std::memory_order_relaxed)) return;
+        if (g_workerThread.joinable()) return;
+
+        g_shouldStop.store(false, std::memory_order_release);
+        g_workerThread = std::thread(WorkerLoop);
+
+        // Yêu cầu khung hình đầy đủ (non-incremental = false) ngay khi RemoteWindow đã sẵn sàng
+        RequestUpdate(false);
     }
 
     void Disconnect() {
@@ -286,6 +334,7 @@ namespace RfbClient {
 
         g_shouldStop.store(true, std::memory_order_release);
         g_isConnected.store(false, std::memory_order_release);
+        SetState(Rfb::RFBSTATE_UNINITIALISED);
 
         g_client.Close();
 
@@ -296,6 +345,10 @@ namespace RfbClient {
 
     bool IsConnected() {
         return g_isConnected.load(std::memory_order_relaxed);
+    }
+
+    Rfb::RfbState GetState() {
+        return g_state.load(std::memory_order_relaxed);
     }
 
     void SendPointer(uint8_t buttonMask, uint16_t x, uint16_t y) {

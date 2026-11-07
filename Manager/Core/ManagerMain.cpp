@@ -141,7 +141,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
         AudioPlayer::Initialize(targetIP == "127.0.0.1");
 
-        RemoteWindow::Create(hInst, &g_controlClient);
+        RemoteWindow::Create(hInst, &g_controlClient, RfbClient::GetServerWidth(), RfbClient::GetServerHeight());
+
+        RfbClient::Start();
 
         DataReceiver::Start(&g_controlClient, &g_audioClient);
 

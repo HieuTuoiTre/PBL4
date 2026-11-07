@@ -68,4 +68,29 @@ namespace Rfb {
         WHEEL_DOWN    = 1 << 4  // 0x10
     };
 
+    /**
+     * @brief TigerVNC / RFC 6143 Connection State Machine
+     *        Models the exact states used in TigerVNC's SConnection (Server) and CConnection (Client).
+     */
+    enum RfbState : uint8_t {
+        RFBSTATE_UNINITIALISED    = 0, // Chưa kết nối / Đã ngắt phiên
+        RFBSTATE_PROTOCOL_VERSION = 1, // RFC 6143 §7.1.1 Bắt tay phiên bản (ProtocolVersion)
+        RFBSTATE_SECURITY_TYPES   = 2, // RFC 6143 §7.1.2 Đàm phán danh sách bảo mật (SecurityTypes)
+        RFBSTATE_SECURITY         = 3, // RFC 6143 §7.1.3 Xác thực bảo mật (SecurityResult)
+        RFBSTATE_INITIALISATION   = 4, // RFC 6143 §7.3 Khởi tạo phiên (ClientInit / ServerInit)
+        RFBSTATE_NORMAL           = 5  // RFC 6143 §7.5 & §7.6 Phiên hoạt động chính thức (Tương tác màn hình & chuột phím)
+    };
+
+    inline const char* RfbStateToString(RfbState state) {
+        switch (state) {
+            case RFBSTATE_UNINITIALISED:    return "RFBSTATE_UNINITIALISED";
+            case RFBSTATE_PROTOCOL_VERSION: return "RFBSTATE_PROTOCOL_VERSION";
+            case RFBSTATE_SECURITY_TYPES:   return "RFBSTATE_SECURITY_TYPES";
+            case RFBSTATE_SECURITY:         return "RFBSTATE_SECURITY";
+            case RFBSTATE_INITIALISATION:   return "RFBSTATE_INITIALISATION";
+            case RFBSTATE_NORMAL:           return "RFBSTATE_NORMAL";
+            default:                        return "RFBSTATE_UNKNOWN";
+        }
+    }
+
 } // namespace Rfb

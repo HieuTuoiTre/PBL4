@@ -15,12 +15,19 @@ namespace RfbClient {
 
     /**
      * @brief Connects to a VNC / RFB 3.8 Server at the specified IP and port.
+     *        Performs the RFB handshake, exchanges security, and sets encodings.
      * @param ip Server IP address.
      * @param port Server VNC port (default: 5900).
      * @param outError Output string containing error description if connection fails.
      * @return true if connected and RFB 3.8 handshake completed successfully.
      */
     bool Connect(const std::string& ip, int port, std::string& outError);
+
+    /**
+     * @brief Starts the RFB client worker thread and requests the initial full frame.
+     *        Should be called after the display window (RemoteWindow) is created.
+     */
+    void Start();
 
     /**
      * @brief Closes the connection to the VNC Server and terminates worker threads.
@@ -31,6 +38,11 @@ namespace RfbClient {
      * @brief Checks if connected to the VNC Server.
      */
     bool IsConnected();
+
+    /**
+     * @brief Returns the current TigerVNC State Machine state of the client connection.
+     */
+    Rfb::RfbState GetState();
 
     /**
      * @brief Sends a standard RFB PointerEvent (mouse action).

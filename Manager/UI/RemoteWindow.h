@@ -7,11 +7,13 @@
 
 namespace RemoteWindow {
 
-    HWND Create(HINSTANCE hInst, TcpClient* client);
+    HWND Create(HINSTANCE hInst, TcpClient* client, int initWidth = 0, int initHeight = 0);
 
     HWND GetHwnd();
 
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize);
+
+    void UpdateRawFrame(int x, int y, int w, int h, const uint32_t* rawPixels);
 
     bool IsFullscreen();
 
