@@ -1,5 +1,6 @@
 #include "ConnectWindow.h"
 #include "../Core/DiscoveryScanner.h"
+#include "../Core/RfbClientSession.h"
 #include "../../Shared/Utils.h"
 
 #include <commctrl.h>
@@ -34,6 +35,7 @@ namespace {
     HWND g_hBtnLocalhost = NULL;
     HWND g_hBtnScan = NULL;
     HWND g_hBtnExit = NULL;
+    HWND g_hChkCompat = NULL;
 
     HWND g_hHeader = NULL;
     WNDPROC g_oldHeaderProc = NULL;
@@ -72,7 +74,8 @@ namespace {
         IDC_BTN_CONNECT   = 102,
         IDC_BTN_LOCALHOST = 103,
         IDC_BTN_SCAN      = 104,
-        IDC_BTN_EXIT      = 105
+        IDC_BTN_EXIT      = 105,
+        IDC_CHK_COMPAT    = 106
     };
 
     void AddRoundRectPath(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& rect, float radius) {
@@ -291,11 +294,15 @@ namespace {
         g_targetIP = ipStr;
         g_isConnecting = true;
 
+        bool isCompat = (g_hChkCompat && SendMessageW(g_hChkCompat, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        RfbClient::SetCompatibilityMode(isCompat);
+
         EnableWindow(g_hBtnConnect, FALSE);
         EnableWindow(g_hBtnLocalhost, FALSE);
         EnableWindow(g_hBtnScan, FALSE);
         EnableWindow(g_hEditIp, FALSE);
         EnableWindow(g_hListClients, FALSE);
+        if (g_hChkCompat) EnableWindow(g_hChkCompat, FALSE);
 
         SetStatus(L"⏳ Đang kết nối tới " + trimmed + L"...", 1);
 
@@ -633,6 +640,11 @@ namespace {
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     262, 394, 88, 36, hwnd, (HMENU)IDC_BTN_LOCALHOST, GetModuleHandle(NULL), NULL);
 
+                g_hChkCompat = CreateWindowExW(0, L"BUTTON", L"Tương thích TightVNC",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                    362, 400, 175, 24, hwnd, (HMENU)IDC_CHK_COMPAT, GetModuleHandle(NULL), NULL);
+                SendMessageW(g_hChkCompat, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+
                 g_hBtnConnect = CreateWindowExW(0, L"BUTTON", L"↗  Kết nối",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     552, 402, 102, 38, hwnd, (HMENU)IDC_BTN_CONNECT, GetModuleHandle(NULL), NULL);
@@ -770,6 +782,17 @@ namespace {
                 SetTextColor(hdcEdit, RGB(15, 23, 42));
                 SetBkColor(hdcEdit, RGB(255, 255, 255));
                 return (LRESULT)g_hWhiteBrush;
+            }
+
+            case WM_CTLCOLORSTATIC: {
+                HDC hdcStatic = (HDC)wp;
+                HWND hStatic = (HWND)lp;
+                if (hStatic == g_hChkCompat) {
+                    SetBkMode(hdcStatic, TRANSPARENT);
+                    SetTextColor(hdcStatic, RGB(30, 41, 59));
+                    return (LRESULT)g_hBgBrush;
+                }
+                break;
             }
 
             case WM_DRAWITEM: {
@@ -1093,6 +1116,7 @@ namespace {
                     EnableWindow(g_hBtnScan, TRUE);
                     EnableWindow(g_hEditIp, TRUE);
                     EnableWindow(g_hListClients, TRUE);
+                    if (g_hChkCompat) EnableWindow(g_hChkCompat, TRUE);
 
                     std::wstring errW = L"Không thể kết nối tới Client!";
                     if (pErr && !pErr->empty()) {

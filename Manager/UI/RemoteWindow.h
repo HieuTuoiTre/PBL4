@@ -13,7 +13,9 @@ namespace RemoteWindow {
 
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize);
 
-    void UpdateRawFrame(int x, int y, int w, int h, const uint32_t* rawPixels);
+    void UpdateRawFrame(int x, int y, int w, int h, const uint32_t* rawPixels, bool repaint = true);
+
+    void PresentFrame();
 
     bool IsFullscreen();
 

@@ -65,6 +65,16 @@ namespace RfbClient {
      */
     void SetPacketLogCallback(PacketLogCallback cb);
 
+    /**
+     * @brief Sets compatibility mode (Raw Encoding) for generic VNC servers like TightVNC.
+     */
+    void SetCompatibilityMode(bool enableRawOnly);
+
+    /**
+     * @brief Checks if compatibility mode (Raw Encoding) is enabled.
+     */
+    bool IsCompatibilityMode();
+
     int GetServerWidth();
     int GetServerHeight();
     std::string GetServerDesktopName();

@@ -23,6 +23,9 @@ namespace {
     // TigerVNC CConnection State Machine (§7 RFC 6143)
     std::atomic<Rfb::RfbState> g_state(Rfb::RFBSTATE_UNINITIALISED);
 
+    // Chế độ tương thích (Raw Encoding) cho TightVNC / UltraVNC
+    std::atomic<bool> g_compatibilityMode(false);
+
     void LogPacket(const std::string& dir, const std::string& type, size_t size, const std::string& desc) {
         if (g_logCallback) {
             g_logCallback(dir, type, size, desc);
@@ -188,30 +191,39 @@ namespace {
                << ", Tên: '" << g_serverDesktopName << "'";
         LogPacket("RECV", "ServerInit", sizeof(sInit) + nameLen, ssInit.str());
 
-        // 7. Gửi SetEncodings (Thông báo hỗ trợ Tight/JPEG, Tight Quality 8, Raw, DesktopSize)
-        int32_t encodings[] = {
-            (int32_t)htonl((uint32_t)Rfb::ENCODING_TIGHT),
-            (int32_t)htonl((uint32_t)(Rfb::ENCODING_JPEG_QUALITY_0 + 8)), // Yêu cầu Tight JPEG Quality 8
-            (int32_t)htonl((uint32_t)Rfb::ENCODING_RAW),
-            (int32_t)htonl((uint32_t)Rfb::ENCODING_DESKTOP_SIZE)
-        };
-        uint16_t numEnc = 4;
+        // 7. Gửi SetEncodings
+        std::vector<int32_t> encodings;
+        std::string encDesc;
+        if (g_compatibilityMode.load(std::memory_order_acquire)) {
+            // Chế độ tương thích tuyệt đối cho TightVNC, UltraVNC, RealVNC (Raw + DesktopSize)
+            encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_RAW));
+            encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_DESKTOP_SIZE));
+            encDesc = "Chế độ tương thích TightVNC: Raw (0), DesktopSize (-223)";
+        } else {
+            // Chế độ hiệu năng cao TurboJPEG cho PBL4 Client và TigerVNC
+            encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_TIGHT));
+            encodings.push_back((int32_t)htonl((uint32_t)(Rfb::ENCODING_JPEG_QUALITY_0 + 8)));
+            encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_RAW));
+            encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_DESKTOP_SIZE));
+            encDesc = "Hỗ trợ Tight/JPEG (Q8), Raw, DesktopSize";
+        }
 
+        uint16_t numEnc = (uint16_t)encodings.size();
         Rfb::RfbSetEncodingsHeader encHdr;
         encHdr.messageType = Rfb::CLIENT_SET_ENCODINGS;
         encHdr.padding = 0;
         encHdr.numEncodings = htons(numEnc);
 
-        std::vector<char> encPacket(sizeof(encHdr) + sizeof(encodings));
+        std::vector<char> encPacket(sizeof(encHdr) + encodings.size() * sizeof(int32_t));
         std::memcpy(encPacket.data(), &encHdr, sizeof(encHdr));
-        std::memcpy(encPacket.data() + sizeof(encHdr), encodings, sizeof(encodings));
+        std::memcpy(encPacket.data() + sizeof(encHdr), encodings.data(), encodings.size() * sizeof(int32_t));
 
         if (!g_client.SendRaw(encPacket.data(), (int)encPacket.size())) {
             outError = "Lỗi gửi SetEncodings!";
             SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
-        LogPacket("SEND", "SetEncodings", encPacket.size(), "Hỗ trợ Tight/JPEG (Q8), Raw, DesktopSize");
+        LogPacket("SEND", "SetEncodings", encPacket.size(), encDesc);
 
         // State: RFBSTATE_NORMAL (§7.5 & §7.6)
         SetState(Rfb::RFBSTATE_NORMAL);
@@ -249,7 +261,14 @@ namespace {
                         uint16_t rh = ntohs(rectHdr.height);
                         int32_t enc = (int32_t)ntohl((uint32_t)rectHdr.encodingType);
 
-                        if (enc == Rfb::ENCODING_TIGHT) {
+                        if (enc == Rfb::ENCODING_DESKTOP_SIZE) {
+                            // Cập nhật lại kích thước desktop nếu server thay đổi độ phân giải
+                            g_serverWidth = (int)rw;
+                            g_serverHeight = (int)rh;
+                            std::stringstream ss;
+                            ss << "Kích thước Desktop cập nhật: " << rw << "x" << rh;
+                            LogPacket("RECV", "DesktopSize", 0, ss.str());
+                        } else if (enc == Rfb::ENCODING_TIGHT) {
                             // Đọc 1 byte Compression Control
                             uint8_t compCtrl = 0;
                             if (!g_client.ReceiveExact((char*)&compCtrl, 1)) return;
@@ -260,13 +279,13 @@ namespace {
                                 if (!g_client.ReceiveExact((char*)rgb, 3)) return;
                                 uint32_t color = 0xFF000000 | ((uint32_t)rgb[0] << 16) | ((uint32_t)rgb[1] << 8) | (uint32_t)rgb[2];
                                 std::vector<uint32_t> fillBuf((size_t)rw * rh, color);
-                                RemoteWindow::UpdateRawFrame((int)rx, (int)ry, (int)rw, (int)rh, fillBuf.data());
+                                RemoteWindow::UpdateRawFrame((int)rx, (int)ry, (int)rw, (int)rh, fillBuf.data(), false);
 
                                 std::stringstream ss;
                                 ss << "Rect=(" << rx << "," << ry << " " << rw << "x" << rh << ") Tight/Fill Solid Color";
                                 LogPacket("RECV", "FramebufferUpdate", 3, ss.str());
-                            } else {
-                                // Tight JPEG (compCtrl 0x90) hoặc Sub-encoding có compact length
+                            } else if ((compCtrl & 0xF0) == 0x90) {
+                                // Tight JPEG (compCtrl 0x90)
                                 uint32_t jpegLen = 0;
                                 uint8_t b1 = 0;
                                 if (!g_client.ReceiveExact((char*)&b1, 1)) return;
@@ -295,19 +314,30 @@ namespace {
                                     ss << "Rect=(" << rx << "," << ry << " " << rw << "x" << rh << ") Tight/JPEG " << (jpegLen / 1024) << "KB";
                                     LogPacket("RECV", "FramebufferUpdate", jpegLen, ss.str());
                                 }
+                            } else {
+                                // Server đang gửi định dạng nén zlib/palette (TightVNC)
+                                std::stringstream ss;
+                                ss << "Server gửi nén zlib (compCtrl=0x" << std::hex << (int)compCtrl << "). "
+                                   << "Hãy tích chọn 'Tương thích TightVNC (Raw)' khi kết nối!";
+                                LogPacket("WARN", "TightZlibUnsupported", 1, ss.str());
+                                return;
                             }
                         } else if (enc == Rfb::ENCODING_RAW) {
                             size_t rawBytes = (size_t)rw * rh * 4;
                             std::vector<char> rawPixels(rawBytes);
                             if (!g_client.ReceiveExact(rawPixels.data(), (int)rawBytes)) return;
 
-                            RemoteWindow::UpdateRawFrame((int)rx, (int)ry, (int)rw, (int)rh, (const uint32_t*)rawPixels.data());
+                            RemoteWindow::UpdateRawFrame((int)rx, (int)ry, (int)rw, (int)rh, (const uint32_t*)rawPixels.data(), false);
 
                             std::stringstream ss;
                             ss << "Rect=(" << rx << "," << ry << " " << rw << "x" << rh << ") Raw " << (rawBytes / 1024) << "KB";
                             LogPacket("RECV", "FramebufferUpdate", rawBytes, ss.str());
                         }
                     }
+
+                    // Sau khi đã gom đủ toàn bộ các rectangles trong FramebufferUpdate:
+                    // Render frame hoàn chỉnh lên màn hình duy nhất 1 lần (loại bỏ hiện tượng quét mành từ trên xuống)
+                    RemoteWindow::PresentFrame();
 
                     // Tiếp tục gửi FramebufferUpdateRequest để yêu cầu frame tiếp theo
                     RfbClient::RequestUpdate(true);
@@ -437,6 +467,14 @@ namespace RfbClient {
 
     void SetPacketLogCallback(PacketLogCallback cb) {
         g_logCallback = cb;
+    }
+
+    void SetCompatibilityMode(bool enableRawOnly) {
+        g_compatibilityMode.store(enableRawOnly, std::memory_order_release);
+    }
+
+    bool IsCompatibilityMode() {
+        return g_compatibilityMode.load(std::memory_order_acquire);
     }
 
     int GetServerWidth() { return g_serverWidth; }

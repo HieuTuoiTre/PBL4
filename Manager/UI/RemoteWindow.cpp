@@ -1218,7 +1218,17 @@ namespace RemoteWindow {
         }
     }
 
-    void UpdateRawFrame(int x, int y, int w, int h, const uint32_t* rawPixels) {
+    void PresentFrame() {
+        if (g_hVideoWnd) {
+            InvalidateRect(g_hVideoWnd, NULL, FALSE);
+            bool expected = false;
+            if (g_paintPending.compare_exchange_strong(expected, true)) {
+                PostMessageW(g_hVideoWnd, WM_USER_NEW_FRAME, 0, 0);
+            }
+        }
+    }
+
+    void UpdateRawFrame(int x, int y, int w, int h, const uint32_t* rawPixels, bool repaint) {
         if (!rawPixels || w <= 0 || h <= 0 || x < 0 || y < 0) return;
         int reqW = x + w;
         int reqH = y + h;
@@ -1261,12 +1271,8 @@ namespace RemoteWindow {
         g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
         LeaveCriticalSection(&g_cs);
 
-        if (g_hVideoWnd) {
-            InvalidateRect(g_hVideoWnd, NULL, FALSE);
-            bool expected = false;
-            if (g_paintPending.compare_exchange_strong(expected, true)) {
-                PostMessageW(g_hVideoWnd, WM_USER_NEW_FRAME, 0, 0);
-            }
+        if (repaint) {
+            PresentFrame();
         }
     }
 
