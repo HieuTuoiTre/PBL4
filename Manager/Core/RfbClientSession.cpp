@@ -92,8 +92,27 @@ namespace {
             return false;
         }
 
+        // Kiểm tra xem Server có hỗ trợ SECURITY_NONE (1) hay không
+        bool hasNone = false;
+        for (uint8_t st : secList) {
+            if (st == (uint8_t)Rfb::SECURITY_NONE) {
+                hasNone = true;
+                break;
+            }
+        }
+
+        if (!hasNone) {
+            outError = "VNC Server (ví dụ TigerVNC) đang yêu cầu mật khẩu bảo mật (VncAuth / VeNCrypt)!\n\n"
+                       "Để kết nối thành công với Manager:\n"
+                       "1. Mở cấu hình TigerVNC Server -> Options -> Security.\n"
+                       "2. Chọn kiểu bảo mật là 'None' (hoặc tham số SecurityTypes=None).\n"
+                       "3. Thử kết nối lại.";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
+            return false;
+        }
+
         std::stringstream ssSec;
-        ssSec << "Hỗ trợ " << (int)numSecTypes << " kiểu bảo mật. Chọn None (1)";
+        ssSec << "Server hỗ trợ " << (int)numSecTypes << " kiểu bảo mật. Chọn None (1)";
         LogPacket("RECV", "SecurityTypes", 1 + numSecTypes, ssSec.str());
 
         // Chọn kiểu bảo mật None (1)
@@ -117,7 +136,17 @@ namespace {
         }
         secResult = ntohl(secResult);
         if (secResult != Rfb::SECURITY_RESULT_OK) {
-            outError = "Xác thực VNC thất bại (SecurityResult != 0)!";
+            uint32_t reasonLen = 0;
+            std::string reason = "";
+            if (g_client.ReceiveExact((char*)&reasonLen, 4)) {
+                reasonLen = ntohl(reasonLen);
+                if (reasonLen > 0 && reasonLen < 1024) {
+                    std::vector<char> rBuf(reasonLen + 1, 0);
+                    g_client.ReceiveExact(rBuf.data(), reasonLen);
+                    reason = ": " + std::string(rBuf.data());
+                }
+            }
+            outError = "Xác thực VNC thất bại (SecurityResult != 0)" + reason;
             SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
@@ -159,13 +188,14 @@ namespace {
                << ", Tên: '" << g_serverDesktopName << "'";
         LogPacket("RECV", "ServerInit", sizeof(sInit) + nameLen, ssInit.str());
 
-        // 7. Gửi SetEncodings (Thông báo hỗ trợ Tight/JPEG, Raw, DesktopSize)
+        // 7. Gửi SetEncodings (Thông báo hỗ trợ Tight/JPEG, Tight Quality 8, Raw, DesktopSize)
         int32_t encodings[] = {
             (int32_t)htonl((uint32_t)Rfb::ENCODING_TIGHT),
+            (int32_t)htonl((uint32_t)(Rfb::ENCODING_JPEG_QUALITY_0 + 8)), // Yêu cầu Tight JPEG Quality 8
             (int32_t)htonl((uint32_t)Rfb::ENCODING_RAW),
             (int32_t)htonl((uint32_t)Rfb::ENCODING_DESKTOP_SIZE)
         };
-        uint16_t numEnc = 3;
+        uint16_t numEnc = 4;
 
         Rfb::RfbSetEncodingsHeader encHdr;
         encHdr.messageType = Rfb::CLIENT_SET_ENCODINGS;
@@ -181,7 +211,7 @@ namespace {
             SetState(Rfb::RFBSTATE_UNINITIALISED);
             return false;
         }
-        LogPacket("SEND", "SetEncodings", encPacket.size(), "Hỗ trợ Tight/JPEG, Raw, DesktopSize");
+        LogPacket("SEND", "SetEncodings", encPacket.size(), "Hỗ trợ Tight/JPEG (Q8), Raw, DesktopSize");
 
         // State: RFBSTATE_NORMAL (§7.5 & §7.6)
         SetState(Rfb::RFBSTATE_NORMAL);
@@ -224,34 +254,47 @@ namespace {
                             uint8_t compCtrl = 0;
                             if (!g_client.ReceiveExact((char*)&compCtrl, 1)) return;
 
-                            // Đọc compact length (1, 2, hoặc 3 bytes)
-                            uint32_t jpegLen = 0;
-                            uint8_t b1 = 0;
-                            if (!g_client.ReceiveExact((char*)&b1, 1)) return;
-                            jpegLen = b1 & 0x7F;
-
-                            if (b1 & 0x80) {
-                                uint8_t b2 = 0;
-                                if (!g_client.ReceiveExact((char*)&b2, 1)) return;
-                                jpegLen |= (uint32_t)(b2 & 0x7F) << 7;
-
-                                if (b2 & 0x80) {
-                                    uint8_t b3 = 0;
-                                    if (!g_client.ReceiveExact((char*)&b3, 1)) return;
-                                    jpegLen |= (uint32_t)b3 << 14;
-                                }
-                            }
-
-                            if (jpegLen > 0 && jpegLen <= 32 * 1024 * 1024) {
-                                jpegBuf.resize(jpegLen);
-                                if (!g_client.ReceiveExact(jpegBuf.data(), (int)jpegLen)) return;
-
-                                Protocol::VideoDeltaHeader delta = { (int16_t)rx, (int16_t)ry, (int16_t)rw, (int16_t)rh };
-                                RemoteWindow::UpdateFrame(delta, jpegBuf.data(), (int)jpegLen);
+                            if (compCtrl == 0x80) {
+                                // Tight Solid Fill Rectangle (RFC 6143 / Tight spec: 3 bytes RGB)
+                                uint8_t rgb[3] = {0};
+                                if (!g_client.ReceiveExact((char*)rgb, 3)) return;
+                                uint32_t color = 0xFF000000 | ((uint32_t)rgb[0] << 16) | ((uint32_t)rgb[1] << 8) | (uint32_t)rgb[2];
+                                std::vector<uint32_t> fillBuf((size_t)rw * rh, color);
+                                RemoteWindow::UpdateRawFrame((int)rx, (int)ry, (int)rw, (int)rh, fillBuf.data());
 
                                 std::stringstream ss;
-                                ss << "Rect=(" << rx << "," << ry << " " << rw << "x" << rh << ") Tight/JPEG " << (jpegLen / 1024) << "KB";
-                                LogPacket("RECV", "FramebufferUpdate", jpegLen, ss.str());
+                                ss << "Rect=(" << rx << "," << ry << " " << rw << "x" << rh << ") Tight/Fill Solid Color";
+                                LogPacket("RECV", "FramebufferUpdate", 3, ss.str());
+                            } else {
+                                // Tight JPEG (compCtrl 0x90) hoặc Sub-encoding có compact length
+                                uint32_t jpegLen = 0;
+                                uint8_t b1 = 0;
+                                if (!g_client.ReceiveExact((char*)&b1, 1)) return;
+                                jpegLen = b1 & 0x7F;
+
+                                if (b1 & 0x80) {
+                                    uint8_t b2 = 0;
+                                    if (!g_client.ReceiveExact((char*)&b2, 1)) return;
+                                    jpegLen |= (uint32_t)(b2 & 0x7F) << 7;
+
+                                    if (b2 & 0x80) {
+                                        uint8_t b3 = 0;
+                                        if (!g_client.ReceiveExact((char*)&b3, 1)) return;
+                                        jpegLen |= (uint32_t)b3 << 14;
+                                    }
+                                }
+
+                                if (jpegLen > 0 && jpegLen <= 32 * 1024 * 1024) {
+                                    jpegBuf.resize(jpegLen);
+                                    if (!g_client.ReceiveExact(jpegBuf.data(), (int)jpegLen)) return;
+
+                                    Protocol::VideoDeltaHeader delta = { (int16_t)rx, (int16_t)ry, (int16_t)rw, (int16_t)rh };
+                                    RemoteWindow::UpdateFrame(delta, jpegBuf.data(), (int)jpegLen);
+
+                                    std::stringstream ss;
+                                    ss << "Rect=(" << rx << "," << ry << " " << rw << "x" << rh << ") Tight/JPEG " << (jpegLen / 1024) << "KB";
+                                    LogPacket("RECV", "FramebufferUpdate", jpegLen, ss.str());
+                                }
                             }
                         } else if (enc == Rfb::ENCODING_RAW) {
                             size_t rawBytes = (size_t)rw * rh * 4;
