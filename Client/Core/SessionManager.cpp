@@ -14,7 +14,9 @@
 #include "ConnectionAlert.h"
 #include "DiscoveryResponder.h"
 #include "ClientChatWindow.h"
+#include "RfbServerSession.h"
 #include "../../Shared/CRC32.h"
+#include "../../Shared/PathSanitizer.h"
 #include <filesystem>
 #include <thread>
 #include <chrono>
@@ -39,6 +41,13 @@ namespace {
 
     std::string g_expectedSessionToken = Protocol::DEFAULT_AUTH_TOKEN;
     std::mutex g_tokenMutex;
+
+    std::string g_authorizedPeerIP = "";
+    uint64_t g_authorizedPeerExpiryTick = 0;
+    std::mutex g_authPeerMutex;
+
+    std::string g_currentSessionId = "";
+    std::mutex g_sessionIdMutex;
 
     // Helper: Xác thực handshake với select() timeout 3 giây
     bool PerformAuthHandshake(TcpServer& server) {
@@ -89,6 +98,15 @@ namespace {
         }
         req.sessionToken[sizeof(req.sessionToken) - 1] = '\0';
 
+        // 4.1. Kiểm tra phiên bản giao thức (N-1)
+        if (req.clientVersion != Protocol::PROTOCOL_VERSION) {
+            Protocol::AuthResponsePayload resp = {0};
+            resp.status = Protocol::AUTH_VERSION_MISMATCH;
+            strncpy_s(resp.message, "Protocol version mismatch", sizeof(resp.message) - 1);
+            server.SendPacket(Protocol::MSG_AUTH_RESPONSE, (const char*)&resp, sizeof(resp));
+            return false;
+        }
+
         // 5. Kiểm tra tính hợp lệ của Token trong constant time
         std::string expectedToken = SessionManager::GetExpectedToken();
         char expectedBuf[64] = {0};
@@ -102,17 +120,37 @@ namespace {
             return false;
         }
 
-        // 6. Xác thực thành công: Gửi phản hồi SUCCESS
+        // 6. Xác thực thành công: Gửi phản hồi SUCCESS kèm 16-byte random challenge
         Protocol::AuthResponsePayload resp = {0};
         resp.status = Protocol::AUTH_SUCCESS;
         strncpy_s(resp.message, "Authenticated successfully", sizeof(resp.message) - 1);
+        Crypto::GenerateRandomBytes(resp.serverChallenge, sizeof(resp.serverChallenge));
+
         if (!server.SendPacket(Protocol::MSG_AUTH_RESPONSE, (const char*)&resp, sizeof(resp))) {
             return false;
         }
 
-        // 7. Sinh khóa phiên đối xứng ChaCha20 từ token và kích hoạt trên socket điều khiển
+        // 6.1. Sinh correlation session ID cho phiên (N-2)
+        uint8_t randId[4];
+        Crypto::GenerateRandomBytes(randId, sizeof(randId));
+        char sessIdBuf[16];
+        snprintf(sessIdBuf, sizeof(sessIdBuf), "SESS-%02X%02X%02X%02X", randId[0], randId[1], randId[2], randId[3]);
+        {
+            std::lock_guard<std::mutex> lock(g_sessionIdMutex);
+            g_currentSessionId = sessIdBuf;
+        }
+
+        // Cấp quyền cho IP này trên cổng RFB 5900 (hạn chờ 30 giây để hoàn tất kết nối RFB)
+        std::string clientIP = server.GetClientIP();
+        SessionManager::AuthorizePeer(clientIP, 30000);
+
+        // 7. Sinh khóa phiên đối xứng ChaCha20 từ token kết hợp 32-byte salt (clientChallenge + serverChallenge)
+        uint8_t salt[32];
+        std::memcpy(salt, req.clientChallenge, 16);
+        std::memcpy(salt + 16, resp.serverChallenge, 16);
+
         uint8_t sessionKey[Crypto::KEY_SIZE];
-        Crypto::DeriveKey(expectedToken, nullptr, 0, sessionKey);
+        Crypto::DeriveKey(expectedToken, salt, sizeof(salt), sessionKey);
         server.SetSessionKey(sessionKey);
 
         // 8. Khôi phục SO_RCVTIMEO = 0 (vô hạn) cho luồng nhận điều khiển sau handshake
@@ -319,7 +357,11 @@ namespace {
                     Protocol::FileBatchStartPayload batch;
                     memcpy(&batch, payload, sizeof(batch));
                     batch.rootName[sizeof(batch.rootName) - 1] = '\0';
-                    g_uploadTargetDir = batch.rootName;
+                    if (batch.rootName[0] && PathSanitizer::IsSafeRelativePath(batch.rootName)) {
+                        g_uploadTargetDir = batch.rootName;
+                    } else {
+                        g_uploadTargetDir = "uploads";
+                    }
                     g_fileTransferCancel = false;
                 }
                 break;
@@ -336,23 +378,34 @@ namespace {
                     memcpy(&hdr, payload, sizeof(hdr));
                     hdr.relativePath[sizeof(hdr.relativePath) - 1] = '\0';
 
-                    std::string targetPath = hdr.relativePath;
-                    if (!g_uploadTargetDir.empty() && targetPath.find(g_uploadTargetDir) != 0) {
-                        targetPath = g_uploadTargetDir + "/" + targetPath;
+                    std::string safeBaseDir = g_uploadTargetDir.empty() ? "uploads" : g_uploadTargetDir;
+                    std::string safePath;
+                    if (!PathSanitizer::ResolveSafePath(safeBaseDir, hdr.relativePath, safePath)) {
+                        std::string err = "ERROR: Phat hien Path Traversal hoac duong dan khong hop le: " + std::string(hdr.relativePath);
+                        g_controlServer.SendPacket(Protocol::MSG_FILE_ERROR, err.c_str(), (int)err.size());
+                        break;
                     }
 
                     if (hdr.isDirectory) {
                         try {
-                            std::filesystem::create_directories(std::filesystem::u8path(targetPath));
+                            std::filesystem::create_directories(std::filesystem::u8path(safePath));
                         } catch (...) {}
                     } else {
-                        g_clientUploadWorker.OpenFileForWrite(targetPath, hdr.fileSize, hdr.expectedCrc32);
+                        g_clientUploadWorker.OpenFileForWrite(safePath, hdr.fileSize, hdr.expectedCrc32);
                     }
                 } else if (payload && size >= sizeof(Protocol::FileInfoPayload)) {
                     Protocol::FileInfoPayload info;
                     memcpy(&info, payload, sizeof(info));
                     info.fileName[sizeof(info.fileName) - 1] = '\0';
-                    g_clientUploadWorker.OpenFileForWrite(info.fileName, info.fileSize, 0);
+                    std::string safeBaseDir = g_uploadTargetDir.empty() ? "uploads" : g_uploadTargetDir;
+                    std::string safeFileName = PathSanitizer::SanitizeFileName(info.fileName);
+                    std::string safePath;
+                    if (PathSanitizer::ResolveSafePath(safeBaseDir, safeFileName, safePath)) {
+                        g_clientUploadWorker.OpenFileForWrite(safePath, info.fileSize, 0);
+                    } else {
+                        std::string err = "ERROR: Ten file khong hop le!";
+                        g_controlServer.SendPacket(Protocol::MSG_FILE_ERROR, err.c_str(), (int)err.size());
+                    }
                 }
                 break;
             }
@@ -408,7 +461,8 @@ namespace {
                 break;
             }
 
-            if (header.size > ControlEnvelope::MAX_CONTROL_PAYLOAD) {
+            // Kiểm tra header size và tính hợp lệ của message type (N-1)
+            if (header.size > ControlEnvelope::MAX_CONTROL_PAYLOAD || !Protocol::ValidatePacketSize(header.type, header.size)) {
                 g_isConnected = false;
                 break;
             }
@@ -432,6 +486,12 @@ namespace {
 
                 Protocol::PacketHeader innerHdr;
                 if (!ControlEnvelope::UnwrapPacket(key, (const uint8_t*)rawBuf.data(), header.size, innerHdr, plainPayload)) {
+                    g_isConnected = false;
+                    break;
+                }
+
+                // Kiểm tra tính hợp lệ của gói tin bên trong sau khi giải mã (N-1)
+                if (!Protocol::ValidatePacketSize(innerHdr.type, innerHdr.size)) {
                     g_isConnected = false;
                     break;
                 }
@@ -519,6 +579,8 @@ namespace SessionManager {
 
             // Mất kết nối hoặc app dừng: Dọn dẹp phiên hiện tại
             g_isConnected = false;
+            SessionManager::RevokeAuthorizedPeer();
+            RfbServer::DisconnectClient();
             ClipboardManager::Reset();
             DiscoveryResponder::SetBusy(false);
             InputInjector::ReleaseAllModifiers();
@@ -534,6 +596,8 @@ namespace SessionManager {
             if (rxThread.joinable()) rxThread.join();
         }
 
+        SessionManager::RevokeAuthorizedPeer();
+        RfbServer::DisconnectClient();
         g_controlServer.Close();
         g_audioServer.Close();
         g_overlay.Destroy();
@@ -543,6 +607,8 @@ namespace SessionManager {
     void Stop() {
         g_isRunning = false;
         g_isConnected = false;
+        SessionManager::RevokeAuthorizedPeer();
+        RfbServer::DisconnectClient();
         ClipboardManager::Reset();
         DiscoveryResponder::SetBusy(false);
         InputInjector::ReleaseAllModifiers();
@@ -565,6 +631,57 @@ namespace SessionManager {
     std::string GetExpectedToken() {
         std::lock_guard<std::mutex> lock(g_tokenMutex);
         return g_expectedSessionToken;
+    }
+
+    std::string GenerateNewPin() {
+        // Sinh mã PIN ngẫu nhiên gồm 6 chữ số (100000 - 999999) sử dụng CSPRNG
+        uint32_t val = 0;
+        Crypto::GenerateRandomBytes(reinterpret_cast<uint8_t*>(&val), sizeof(val));
+        uint32_t pinNum = 100000 + (val % 900000);
+        std::string newPin = std::to_string(pinNum);
+        SetExpectedToken(newPin);
+        return newPin;
+    }
+
+    bool IsPeerAuthorized(const std::string& ip) {
+        std::lock_guard<std::mutex> lock(g_authPeerMutex);
+        if (g_authorizedPeerIP.empty()) return false;
+
+        bool ipMatch = (ip == g_authorizedPeerIP);
+        if (!ipMatch && (ip == "127.0.0.1" || ip == "localhost") &&
+            (g_authorizedPeerIP == "127.0.0.1" || g_authorizedPeerIP == "localhost")) {
+            ipMatch = true;
+        }
+        if (!ipMatch) return false;
+
+        if (g_isConnected.load(std::memory_order_acquire)) return true;
+        return (GetTickCount64() < g_authorizedPeerExpiryTick);
+    }
+
+    void AuthorizePeer(const std::string& ip, uint64_t durationMs) {
+        std::lock_guard<std::mutex> lock(g_authPeerMutex);
+        g_authorizedPeerIP = ip;
+        g_authorizedPeerExpiryTick = GetTickCount64() + durationMs;
+    }
+
+    void RevokeAuthorizedPeer() {
+        std::lock_guard<std::mutex> lock(g_authPeerMutex);
+        g_authorizedPeerIP.clear();
+        g_authorizedPeerExpiryTick = 0;
+        {
+            std::lock_guard<std::mutex> sLock(g_sessionIdMutex);
+            g_currentSessionId.clear();
+        }
+    }
+
+    std::string GetAuthorizedPeerIP() {
+        std::lock_guard<std::mutex> lock(g_authPeerMutex);
+        return g_authorizedPeerIP;
+    }
+
+    std::string GetCurrentSessionId() {
+        std::lock_guard<std::mutex> lock(g_sessionIdMutex);
+        return g_currentSessionId;
     }
 
     bool IsConnected() {

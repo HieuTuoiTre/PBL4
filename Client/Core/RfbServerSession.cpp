@@ -1,4 +1,5 @@
 #include "RfbServerSession.h"
+#include "SessionManager.h"
 #include "../Media/ScreenCapture.h"
 #include "../System/InputInjector.h"
 
@@ -7,6 +8,8 @@
 #include <vector>
 #include <chrono>
 #include <cstring>
+#include <mutex>
+#include <functional>
 
 namespace {
     std::atomic<bool> g_isRunning(false);
@@ -16,6 +19,9 @@ namespace {
     std::atomic<bool> g_encodingsReceived(false);
     std::atomic<bool> g_forceFull(true);
     std::atomic<bool> g_useTightJpeg(false);
+
+    RfbServer::AuthValidator g_authValidator = nullptr;
+    std::mutex g_authValidatorMutex;
 
     // TigerVNC SConnection State Machine (§7 RFC 6143)
     std::atomic<Rfb::RfbState> g_state(Rfb::RFBSTATE_UNINITIALISED);
@@ -420,7 +426,27 @@ namespace {
                 continue;
             }
 
-            std::cout << "[RFB Server] Có kết nối mới! Tiến hành bắt tay RFB 3.8...\n";
+            std::string clientIP = g_server.GetClientIP();
+            bool isAuth = false;
+            {
+                std::lock_guard<std::mutex> lock(g_authValidatorMutex);
+                if (g_authValidator) {
+                    isAuth = g_authValidator(clientIP);
+                } else {
+                    isAuth = SessionManager::IsPeerAuthorized(clientIP);
+                }
+            }
+
+            std::string sessId = SessionManager::GetCurrentSessionId();
+            std::string sessTag = sessId.empty() ? "" : ("[" + sessId + "] ");
+
+            if (!isAuth) {
+                std::cout << "[RFB Server] " << sessTag << "Tu choi ket noi: peer chua duoc xac thuc qua session 8080 (" << clientIP << ")\n";
+                g_server.CloseClient();
+                continue;
+            }
+
+            std::cout << "[RFB Server] " << sessTag << "Có kết nối mới từ peer hợp lệ (" << clientIP << ")! Tiến hành bắt tay RFB 3.8...\n";
             if (!PerformHandshake()) {
                 g_server.CloseClient();
                 continue;
@@ -448,6 +474,16 @@ namespace {
 } // namespace
 
 namespace RfbServer {
+
+    void SetAuthorizationValidator(AuthValidator validator) {
+        std::lock_guard<std::mutex> lock(g_authValidatorMutex);
+        g_authValidator = validator;
+    }
+
+    void DisconnectClient() {
+        g_isClientConnected.store(false, std::memory_order_release);
+        g_server.CloseClient();
+    }
 
     bool Start(int port, const std::string& serverName) {
         if (g_isRunning) return true;

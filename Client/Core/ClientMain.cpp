@@ -71,6 +71,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
+    // 3.5 Sinh mã PIN ngẫu nhiên 6 chữ số cho phiên làm việc
+    std::string sessionPin = SessionManager::GenerateNewPin();
+    TrayIcon::SetPin(sessionPin);
+    TrayIcon::ShowPinNotification();
+
     // 4. Đẩy vòng lặp mạng sang một luồng (Thread) chạy ngầm riêng biệt
     std::thread networkThread([]() {
         // Cổng cơ sở 8080 (mở 8080 cho Control, 8081 cho Video, 8082 cho Audio)

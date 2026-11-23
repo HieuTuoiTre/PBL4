@@ -11,7 +11,7 @@ echo Hoan tat!
 if "%1"=="test" (
     echo.
     echo Dang bien dich bo kiem thu M3...
-    g++ -std=c++17 -finput-charset=UTF-8 -fexec-charset=UTF-8 tests\test_file_transfer.cpp Manager\FileTransfer\FileManger.cpp Client\FileTransfer\FileWorker.cpp Shared\CRC32.cpp Shared\Utils.cpp -o tests\test_file_transfer.exe -O2 -luser32 -lgdi32 -DUNICODE -D_UNICODE
+    g++ -std=c++17 -finput-charset=UTF-8 -fexec-charset=UTF-8 tests\test_file_transfer.cpp Manager\FileTransfer\FileManger.cpp Client\FileTransfer\FileWorker.cpp Shared\CRC32.cpp Shared\Utils.cpp Shared\PathSanitizer.cpp -o tests\test_file_transfer.exe -O2 -luser32 -lgdi32 -DUNICODE -D_UNICODE
     if errorlevel 1 (
         echo [ERROR] Bien dich test_file_transfer that bai!
         exit /b 1

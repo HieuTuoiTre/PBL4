@@ -148,7 +148,8 @@ namespace {
         plainPayload.reserve(64 * 1024);
 
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
-            if (hdr.size > ControlEnvelope::MAX_CONTROL_PAYLOAD) break;
+            // Kiểm tra tính hợp lệ của loại gói tin và kích thước (N-1)
+            if (hdr.size > ControlEnvelope::MAX_CONTROL_PAYLOAD || !Protocol::ValidatePacketSize(hdr.type, hdr.size)) break;
 
             if (hdr.size > 0) {
                 rawBuf.resize(hdr.size);
@@ -163,6 +164,11 @@ namespace {
 
                 Protocol::PacketHeader innerHdr;
                 if (!ControlEnvelope::UnwrapPacket(key, (const uint8_t*)rawBuf.data(), hdr.size, innerHdr, plainPayload)) {
+                    break;
+                }
+
+                // Kiểm tra gói tin bên trong sau khi giải mã (N-1)
+                if (!Protocol::ValidatePacketSize(innerHdr.type, innerHdr.size)) {
                     break;
                 }
 
@@ -183,7 +189,7 @@ namespace {
 
         while (g_isRunning && client->ReceiveExact((char*)&hdr, sizeof(hdr))) {
             if (hdr.size == 0) continue;
-            if (hdr.size > 1024 * 1024) break;
+            if (!Protocol::ValidatePacketSize(hdr.type, hdr.size)) break;
 
             buf.resize(hdr.size);
             if (!client->ReceiveExact(buf.data(), (int)hdr.size)) break;

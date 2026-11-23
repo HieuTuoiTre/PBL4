@@ -2,6 +2,7 @@
 
 #include "../../Shared/Utils.h"
 #include "../../Shared/CRC32.h"
+#include "../../Shared/PathSanitizer.h"
 #include "../FileTransfer/FileManager.h"
 
 #include <commctrl.h>
@@ -1217,17 +1218,19 @@ namespace FileExplorerWindow {
     void OnFileInfo(const Protocol::FileInfoPayload& info) {
         if (!g_csInit) return;
         EnterCriticalSection(&g_fileCs);
-        std::string fileName = info.fileName;
+        std::string safeFileName = PathSanitizer::SanitizeFileName(info.fileName);
+        std::string safePath;
+        if (!PathSanitizer::ResolveSafePath("downloads", safeFileName, safePath)) {
+            LeaveCriticalSection(&g_fileCs);
+            return;
+        }
 
-        size_t slashPos = fileName.find_last_of("\\/");
-        if (slashPos != std::string::npos) fileName = fileName.substr(slashPos + 1);
-
-        g_downloadingFile = fileName;
+        g_downloadingFile = safeFileName;
         g_totalFileSize = info.fileSize;
         g_downloadedBytes = 0;
         g_transferStartTimeMs = GetTickCount64();
 
-        g_fileMgr.OpenFileForWrite(g_downloadingFile);
+        g_fileMgr.OpenForWrite(safePath, info.fileSize, 0);
         LeaveCriticalSection(&g_fileCs);
 
         if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_START_DL, 0, 0);
@@ -1238,11 +1241,15 @@ namespace FileExplorerWindow {
         EnterCriticalSection(&g_fileCs);
         std::string relPath = header.relativePath;
 
-        std::string savePath = "downloads/" + relPath;
+        std::string safePath;
+        if (!PathSanitizer::ResolveSafePath("downloads", relPath, safePath)) {
+            LeaveCriticalSection(&g_fileCs);
+            return;
+        }
 
         if (header.isDirectory) {
             try {
-                std::filesystem::create_directories(std::filesystem::u8path(savePath));
+                std::filesystem::create_directories(std::filesystem::u8path(safePath));
             } catch (...) {}
             LeaveCriticalSection(&g_fileCs);
             return;
@@ -1253,7 +1260,7 @@ namespace FileExplorerWindow {
         g_downloadedBytes = 0;
         g_transferStartTimeMs = GetTickCount64();
 
-        g_fileMgr.OpenForWrite(savePath, header.fileSize, header.expectedCrc32);
+        g_fileMgr.OpenForWrite(safePath, header.fileSize, header.expectedCrc32);
         LeaveCriticalSection(&g_fileCs);
 
         if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_START_DL, 0, 0);

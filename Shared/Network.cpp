@@ -126,9 +126,18 @@ bool TcpServer::AcceptConnection(int timeoutMs){
         CloseClient();
     }
 
-    clientSocket = accept(listenSocket, NULL, NULL);
+    sockaddr_in clientAddr = {};
+    int addrLen = sizeof(clientAddr);
+    clientSocket = accept(listenSocket, (sockaddr*)&clientAddr, &addrLen);
     if (clientSocket == INVALID_SOCKET){
         return false;
+    }
+
+    char ipBuf[INET_ADDRSTRLEN] = {0};
+    if (inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(ipBuf))) {
+        clientIP = ipBuf;
+    } else {
+        clientIP = "127.0.0.1";
     }
 
     // Áp dụng bộ tham số tối ưu socket nâng cao (TCP_NODELAY, buffer kênh riêng, Keep-Alive)
@@ -136,7 +145,23 @@ bool TcpServer::AcceptConnection(int timeoutMs){
     return true;
 }
 
+std::string TcpServer::GetClientIP() const {
+    if (!clientIP.empty()) return clientIP;
+    SOCKET s = clientSocket.load();
+    if (s == INVALID_SOCKET) return "";
+    sockaddr_in addr = {};
+    int len = sizeof(addr);
+    if (getpeername(s, (sockaddr*)&addr, &len) == 0) {
+        char ipBuf[INET_ADDRSTRLEN] = {0};
+        if (inet_ntop(AF_INET, &addr.sin_addr, ipBuf, sizeof(ipBuf))) {
+            return std::string(ipBuf);
+        }
+    }
+    return "";
+}
+
 void TcpServer::Close(){
+    clientIP.clear();
     ClearSessionKey();
     SOCKET sClient = clientSocket.exchange(INVALID_SOCKET);
     SOCKET sListen = listenSocket.exchange(INVALID_SOCKET);
@@ -151,6 +176,7 @@ void TcpServer::Close(){
 }
 
 void TcpServer::CloseClient(){
+    clientIP.clear();
     ClearSessionKey();
     SOCKET sClient = clientSocket.exchange(INVALID_SOCKET);
     if (sClient != INVALID_SOCKET){

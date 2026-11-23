@@ -21,6 +21,7 @@ namespace {
     // ==========================================
     // CỐ ĐỊNH CHẤT LƯỢNG MỨC VỪA PHẢI (BALANCED) & TIẾT KIỆM BĂNG THÔNG
     // ==========================================
+    std::atomic<uint8_t> g_qualityPreset(Protocol::QUALITY_BALANCED);
     std::atomic<uint8_t> g_targetFps(30);
     std::atomic<bool> g_forceFullFrame(false);
     bool g_needsRefinement = false;
@@ -34,7 +35,17 @@ namespace {
     // Mức nén chuẩn cân bằng tối ưu: Chất lượng 65, lấy mẫu màu TJSAMP_420 (YUV 4:2:0)
     // Giữ hình ảnh và văn bản rõ nét, đồng thời tiết kiệm tối đa băng thông mạng (~1.5-2.5 Mbps ở 30 FPS)
     CompressionConfig GetCompressionConfig(int changedArea, int totalPixels) {
-        return { 65, TJSAMP_420 };
+        uint8_t preset = g_qualityPreset.load(std::memory_order_acquire);
+        switch (preset) {
+            case Protocol::QUALITY_LOW:
+                return { 50, TJSAMP_420 };
+            case Protocol::QUALITY_HIGH:
+                return { 80, TJSAMP_420 };
+            case Protocol::QUALITY_BALANCED:
+            case Protocol::QUALITY_AUTO:
+            default:
+                return { 65, TJSAMP_420 };
+        }
     }
 
     // Nén khung hoàn thiện toàn màn hình (Progressive Refinement) sắc nét tối ưu khi dừng chuyển động
@@ -689,16 +700,19 @@ namespace ScreenCapture {
     }
 
     void SetVideoConfig(uint8_t qualityPreset, uint8_t targetFps) {
-        // Cố định chất lượng chuẩn vừa phải và 30 FPS
+        g_qualityPreset.store(qualityPreset, std::memory_order_release);
+        if (targetFps > 0) {
+            g_targetFps.store(targetFps, std::memory_order_release);
+        }
         ForceFullFrame();
     }
 
     uint8_t GetQualityPreset() {
-        return Protocol::QUALITY_BALANCED;
+        return g_qualityPreset.load(std::memory_order_acquire);
     }
 
     uint8_t GetTargetFps() {
-        return 30; // Cố định 30 FPS
+        return g_targetFps.load(std::memory_order_acquire);
     }
 
     const uint32_t* GetCurrentFramePixels(int& outWidth, int& outHeight) {

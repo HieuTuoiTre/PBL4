@@ -112,6 +112,7 @@ namespace Protocol
 
     // --- 6. XÁC THỰC PHIÊN BẢO MẬT (SESSION AUTHENTICATION) ---
     constexpr uint32_t PROTOCOL_VERSION = 1;
+    // Token dự phòng tương thích cho test suite (mặc định môi trường chạy thật dùng mã PIN ngẫu nhiên 6 chữ số)
     constexpr const char* DEFAULT_AUTH_TOKEN = "PBL4_REMOTE_DESKTOP_SECRET_2026";
 
     enum AuthStatus : uint8_t {
@@ -125,11 +126,13 @@ namespace Protocol
     struct AuthRequestPayload {
         char sessionToken[64];
         uint32_t clientVersion;
+        uint8_t clientChallenge[16]; // 16-byte random challenge / salt từ Manager
     };
 
     struct AuthResponsePayload {
         uint8_t status;
         char message[64];
+        uint8_t serverChallenge[16]; // 16-byte random challenge / salt từ Client
     };
 
     // --- 7. PHÍM TẮT ĐẶC BIỆT ---
@@ -248,4 +251,134 @@ namespace Protocol
     };
     
     #pragma pack(pop)
+
+    // --- 15. COMPILE-TIME PACKING & SIZE ASSERTIONS (N-1) ---
+    static_assert(sizeof(PacketHeader) == 5, "PacketHeader must be exactly 5 bytes");
+    static_assert(sizeof(AuthRequestPayload) == 84, "AuthRequestPayload must be 84 bytes");
+    static_assert(sizeof(AuthResponsePayload) == 81, "AuthResponsePayload must be 81 bytes");
+    static_assert(sizeof(SpecialActionPayload) == 1, "SpecialActionPayload must be 1 byte");
+    static_assert(sizeof(VideoConfigPayload) == 2, "VideoConfigPayload must be 2 bytes");
+    static_assert(sizeof(FileBatchStartPayload) == 268, "FileBatchStartPayload must be 268 bytes");
+    static_assert(sizeof(FileHeaderPayload) == 529, "FileHeaderPayload must be 529 bytes");
+    static_assert(sizeof(FileChunkHeader) == 8, "FileChunkHeader must be 8 bytes");
+    static_assert(sizeof(FileEndPayload) == 9, "FileEndPayload must be 9 bytes");
+    static_assert(sizeof(FileInfoPayload) == 264, "FileInfoPayload must be 264 bytes");
+    static_assert(sizeof(DiscoveryPacket) == 134, "DiscoveryPacket must be 134 bytes");
+    static_assert(sizeof(MousePayload) == 8, "MousePayload must be 8 bytes");
+    static_assert(sizeof(KeyboardPayload) == 5, "KeyboardPayload must be 5 bytes");
+    static_assert(sizeof(SysInfoPayload) == 3, "SysInfoPayload must be 3 bytes");
+    static_assert(sizeof(ProcessInfoPayload) == 268, "ProcessInfoPayload must be 268 bytes");
+    static_assert(sizeof(VideoDeltaHeader) == 16, "VideoDeltaHeader must be 16 bytes");
+    static_assert(sizeof(ChatMessagePayload) == 1064, "ChatMessagePayload must be 1064 bytes");
+
+    // --- 16. PROTOCOL VALIDATION HELPERS (N-1) ---
+    inline bool IsValidMessageType(MessageType type) {
+        switch (type) {
+            case MSG_PING:
+            case MSG_PONG:
+            case MSG_DISCONNECT:
+            case MSG_AUDIO_CHUNK:
+            case MSG_SYS_INFO_REQUEST:
+            case MSG_SYS_INFO_RESPONSE:
+            case MSG_PROCESS_LIST_REQUEST:
+            case MSG_PROCESS_LIST_RESPONSE:
+            case MSG_KILL_PROCESS:
+            case MSG_DRIVE_LIST_REQUEST:
+            case MSG_DRIVE_LIST_RESPONSE:
+            case MSG_DIR_REQUEST:
+            case MSG_DIR_RESPONSE:
+            case MSG_FILE_DOWNLOAD_REQ:
+            case MSG_FILE_INFO:
+            case MSG_FILE_CHUNK:
+            case MSG_FILE_END:
+            case MSG_CHAT_MESSAGE:
+            case MSG_AUTH_REQUEST:
+            case MSG_AUTH_RESPONSE:
+            case MSG_ENCRYPTED_CONTROL:
+            case MSG_CLIPBOARD_TEXT:
+            case MSG_FILE_UPLOAD_REQ:
+            case MSG_FILE_BATCH_START:
+            case MSG_FILE_BATCH_END:
+            case MSG_FILE_CANCEL:
+            case MSG_FILE_ERROR:
+            case MSG_SPECIAL_ACTION:
+            case MSG_VIDEO_CONFIG:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    inline bool ValidatePacketSize(MessageType type, uint32_t size) {
+        if (!IsValidMessageType(type)) return false;
+        switch (type) {
+            case MSG_PING:
+            case MSG_PONG:
+            case MSG_DISCONNECT:
+            case MSG_SYS_INFO_REQUEST:
+            case MSG_PROCESS_LIST_REQUEST:
+            case MSG_DRIVE_LIST_REQUEST:
+            case MSG_FILE_BATCH_END:
+            case MSG_FILE_CANCEL:
+                return (size == 0);
+
+            case MSG_AUTH_REQUEST:
+                return (size == sizeof(AuthRequestPayload));
+
+            case MSG_AUTH_RESPONSE:
+                return (size == sizeof(AuthResponsePayload));
+
+            case MSG_SPECIAL_ACTION:
+                return (size == sizeof(SpecialActionPayload));
+
+            case MSG_VIDEO_CONFIG:
+                return (size == sizeof(VideoConfigPayload));
+
+            case MSG_SYS_INFO_RESPONSE:
+                return (size == sizeof(SysInfoPayload));
+
+            case MSG_KILL_PROCESS:
+                return (size == sizeof(uint32_t));
+
+            case MSG_CHAT_MESSAGE:
+                return (size == sizeof(ChatMessagePayload));
+
+            case MSG_FILE_BATCH_START:
+                return (size == sizeof(FileBatchStartPayload));
+
+            case MSG_FILE_END:
+                return (size == 0 || size == sizeof(FileEndPayload));
+
+            case MSG_FILE_INFO:
+                return (size == sizeof(FileHeaderPayload) || size == sizeof(FileInfoPayload));
+
+            case MSG_FILE_CHUNK:
+                return (size > 0 && size <= (sizeof(FileChunkHeader) + FILE_CHUNK_SIZE + 4096));
+
+            case MSG_CLIPBOARD_TEXT:
+                return (size > 0 && size <= 1024 * 1024); // Tối đa 1MB clipboard
+
+            case MSG_DIR_REQUEST:
+            case MSG_FILE_DOWNLOAD_REQ:
+            case MSG_FILE_UPLOAD_REQ:
+                return (size > 0 && size <= 4096); // Đường dẫn tối đa 4KB
+
+            case MSG_DIR_RESPONSE:
+            case MSG_DRIVE_LIST_RESPONSE:
+            case MSG_FILE_ERROR:
+                return (size <= 1024 * 1024); // Phản hồi văn bản tối đa 1MB
+
+            case MSG_PROCESS_LIST_RESPONSE:
+                return (size % sizeof(ProcessInfoPayload) == 0 && size <= 2 * 1024 * 1024);
+
+            case MSG_AUDIO_CHUNK:
+                return (size > 0 && size <= 64 * 1024);
+
+            case MSG_ENCRYPTED_CONTROL:
+                return (size >= 12 + 16 && size <= 32 * 1024 * 1024);
+
+            default:
+                return false;
+        }
+    }
 }

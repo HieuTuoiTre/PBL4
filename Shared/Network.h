@@ -26,6 +26,7 @@ class TcpServer{
         std::mutex sendMutex; // THÊM KHÓA CHO SERVER
         uint8_t m_sessionKey[32] = {0};
         std::atomic<bool> m_hasSessionKey{false};
+        std::string clientIP = "";
 
     public:
         TcpServer();
@@ -59,6 +60,7 @@ class TcpServer{
         const uint8_t* GetSessionKey() const { return m_hasSessionKey.load() ? m_sessionKey : nullptr; }
 
         SOCKET GetClientSocket() const { return clientSocket.load(); }
+        std::string GetClientIP() const;
         int GetPort() const { return serverPort; }
 };
 
