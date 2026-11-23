@@ -26,11 +26,7 @@ namespace {
     // Chế độ tương thích (Raw Encoding) cho TightVNC / UltraVNC
     std::atomic<bool> g_compatibilityMode(false);
 
-    void LogPacket(const std::string& dir, const std::string& type, size_t size, const std::string& desc) {
-        if (g_logCallback) {
-            g_logCallback(dir, type, size, desc);
-        }
-    }
+    inline void LogPacket(const std::string&, const std::string&, size_t, const std::string&) {}
 
     void SetState(Rfb::RfbState newState) {
         Rfb::RfbState oldState = g_state.exchange(newState, std::memory_order_acq_rel);
@@ -200,12 +196,12 @@ namespace {
             encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_DESKTOP_SIZE));
             encDesc = "Chế độ tương thích TightVNC: Raw (0), DesktopSize (-223)";
         } else {
-            // Chế độ hiệu năng cao TurboJPEG cho PBL4 Client và TigerVNC
+            // Chế độ hiệu năng cao TurboJPEG cho PBL4 Client và TigerVNC (Q65 tiết kiệm băng thông)
             encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_TIGHT));
-            encodings.push_back((int32_t)htonl((uint32_t)(Rfb::ENCODING_JPEG_QUALITY_0 + 8)));
+            encodings.push_back((int32_t)htonl((uint32_t)(Rfb::ENCODING_JPEG_QUALITY_0 + 6)));
             encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_RAW));
             encodings.push_back((int32_t)htonl((uint32_t)Rfb::ENCODING_DESKTOP_SIZE));
-            encDesc = "Hỗ trợ Tight/JPEG (Q8), Raw, DesktopSize";
+            encDesc = "Hỗ trợ Tight/JPEG (Q65 tiết kiệm băng thông), Raw, DesktopSize";
         }
 
         uint16_t numEnc = (uint16_t)encodings.size();

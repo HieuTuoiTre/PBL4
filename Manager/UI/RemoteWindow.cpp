@@ -3,7 +3,6 @@
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
 #include "ChatWindow.h"
-#include "RfbInspectorWindow.h"
 #include "../Core/RfbClientSession.h"
 #include "../Media/AudioPlayer.h"
 #include "../../Shared/ClipboardManager.h"
@@ -43,7 +42,7 @@ namespace {
     std::atomic<int> g_streamFrameCount(0);
     std::atomic<int> g_renderFrameCount(0);
     std::atomic<int> g_streamFps(0);
-    std::atomic<int> g_renderFps(60);
+    std::atomic<int> g_renderFps(30);
     std::atomic<uint64_t> g_lastFrameTimeMs(0);
 
     int GetFrameWidth() { return g_frameWidth; }
@@ -76,8 +75,6 @@ namespace {
         BTN_FULLSCREEN,
         BTN_CTRL_ALT_DEL,
         BTN_WIN_KEY,
-        BTN_QUALITY,
-        BTN_INSPECTOR,
         BTN_CHAT,
         BTN_FILE_EXP,
         BTN_TASK_MGR,
@@ -101,7 +98,6 @@ namespace {
     bool g_isFullscreen = false;
     WINDOWPLACEMENT g_prevPlacement = { sizeof(WINDOWPLACEMENT) };
     LONG_PTR g_prevStyle = 0;
-    uint8_t g_currentQualityPreset = Protocol::QUALITY_AUTO;
 
     void ToggleFullscreenInternal(HWND hwnd);
 
@@ -149,23 +145,7 @@ namespace {
         buttons.push_back({ BTN_WIN_KEY, Gdiplus::RectF(curX, btnY, btnWinW, btnHeight), L"Phím Win", L"", false });
         curX += btnWinW + gap;
 
-        // 5. Cấu hình chất lượng hình ảnh / Video Quality (Auto / Low / Balanced / High)
-        std::wstring qText = L"Chất lượng: Auto";
-        if (g_currentQualityPreset == Protocol::QUALITY_LOW) qText = L"Chất lượng: Thấp";
-        else if (g_currentQualityPreset == Protocol::QUALITY_BALANCED) qText = L"Chất lượng: Chuẩn";
-        else if (g_currentQualityPreset == Protocol::QUALITY_HIGH) qText = L"Chất lượng: Cao";
-        float btnQW = (float)std::round(124.0f * scale);
-        buttons.push_back({ BTN_QUALITY, Gdiplus::RectF(curX, btnY, btnQW, btnHeight), qText, L"Nhấp để đổi", false });
-        curX += btnQW + gap;
-
-        // 5.1. Nhật ký Giao thức VNC / RFB 3.8 Protocol Inspector
-        bool isInspectorOpen = RfbInspector::IsOpen();
-        std::wstring rfbText = L"Giao thức RFB";
-        float btnRfbW = (float)std::round(112.0f * scale);
-        buttons.push_back({ BTN_INSPECTOR, Gdiplus::RectF(curX, btnY, btnRfbW, btnHeight), rfbText, L"Xem nhật ký gói tin VNC", isInspectorOpen });
-        curX += btnRfbW + gap;
-
-        // 6. Trò chuyện (Chat Window)
+        // 5. Trò chuyện (Chat Window)
         int unread = ChatWindow::GetUnreadCount();
         std::wstring chatText = (unread > 0) ? (L"Trò chuyện (" + std::to_wstring(unread) + L")") : L"Trò chuyện";
         std::wstring chatHint = L"Ctrl+T";
@@ -284,10 +264,6 @@ namespace {
             } else if (btn.id == BTN_CHAT && btn.isSpecial) {
                 fillColor = isPressed ? Gdiplus::Color(255, 30, 58, 138) : (isHovered ? Gdiplus::Color(255, 37, 99, 235) : Gdiplus::Color(255, 29, 78, 216));
                 borderColor = Gdiplus::Color(255, 96, 165, 250);
-                textColor = Gdiplus::Color(255, 255, 255, 255);
-            } else if (btn.id == BTN_INSPECTOR && btn.isSpecial) {
-                fillColor = isPressed ? Gdiplus::Color(255, 88, 28, 135) : (isHovered ? Gdiplus::Color(255, 126, 34, 206) : Gdiplus::Color(255, 107, 33, 168));
-                borderColor = Gdiplus::Color(255, 192, 132, 252);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else {
                 fillColor = isPressed ? Gdiplus::Color(255, 28, 30, 36) : (isHovered ? Gdiplus::Color(255, 52, 55, 66) : Gdiplus::Color(255, 38, 40, 48));
@@ -413,21 +389,20 @@ namespace {
         // Nhận diện trạng thái màn hình tĩnh thông minh:
         // Nếu trong 400ms qua không có frame mới (hoặc streamFps == 0), coi là màn hình tĩnh (Eco Mode).
         // Tránh hiện tượng nhấp nháy đèn cam hoặc báo ảo "2-3 FPS" khi người dùng vừa dừng tay.
-        bool isStaticScreen = (streamFps == 0) || (streamFps <= 6 && msSinceLastFrame >= 350) || (msSinceLastFrame >= 500);
+        bool isStaticScreen = (streamFps == 0) || (streamFps <= 5 && msSinceLastFrame >= 350) || (msSinceLastFrame >= 500);
 
         if (isStaticScreen) {
             dotColor = Gdiplus::Color(255, 56, 189, 248); // Cyan: Màn hình tĩnh / đồng bộ tuyệt đối (Eco)
-            fpsStr = L"60 FPS (Tĩnh)";
+            fpsStr = L"30 FPS (Tĩnh)";
         } else {
-            int dispFps = (renderFps > 0) ? renderFps : streamFps;
-            if (streamFps >= 25) {
-                dotColor = Gdiplus::Color(255, 34, 197, 94); // Xanh lá: Mượt mà 60 FPS
-            } else if (streamFps >= 12) {
+            if (streamFps >= 20) {
+                dotColor = Gdiplus::Color(255, 34, 197, 94); // Xanh lá: Mượt mà 30 FPS
+            } else if (streamFps >= 10) {
                 dotColor = Gdiplus::Color(255, 245, 158, 11); // Vàng cam: Mạng trung bình
             } else {
                 dotColor = Gdiplus::Color(255, 239, 68, 68); // Đỏ: Nghẽn mạng khi đang chuyển động
             }
-            fpsStr = std::to_wstring(dispFps) + L" FPS (Net " + std::to_wstring(streamFps) + L")";
+            fpsStr = std::to_wstring(streamFps) + L" FPS";
         }
 
         Gdiplus::SolidBrush dotBrush(dotColor);
@@ -484,6 +459,7 @@ namespace {
             InvalidateRect(g_hVideoWnd, NULL, FALSE);
         }
         InvalidateRect(hwnd, NULL, TRUE);
+        UpdateWindow(hwnd);
     }
 
     static void DispatchVideoMouse(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, uint8_t action, uint8_t btn) {
@@ -592,12 +568,7 @@ namespace {
                         FillRect(hdc, &rBottom, s_bgBrush);
                     }
 
-                    if (drawW == g_frameWidth && drawH == g_frameHeight) {
-                        SetStretchBltMode(hdc, COLORONCOLOR);
-                    } else {
-                        SetStretchBltMode(hdc, HALFTONE);
-                        SetBrushOrgEx(hdc, 0, 0, NULL);
-                    }
+                    SetStretchBltMode(hdc, COLORONCOLOR);
                     StretchDIBits(
                         hdc,
                         offX, offY, drawW, drawH,
@@ -625,6 +596,16 @@ namespace {
             }
 
             case WM_MOUSEMOVE: {
+                if (g_hoveredBtn != BTN_NONE) {
+                    g_hoveredBtn = BTN_NONE;
+                    if (g_hwnd) {
+                        RECT r;
+                        GetClientRect(g_hwnd, &r);
+                        RECT tbRect = { 0, 0, r.right, GetToolbarHeight(g_hwnd) };
+                        InvalidateRect(g_hwnd, &tbRect, FALSE);
+                        UpdateWindow(g_hwnd);
+                    }
+                }
                 DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE);
                 return 0;
             }
@@ -657,11 +638,6 @@ namespace {
 
             case WM_ACTIVATE:
             case WM_SETFOCUS: {
-                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
                 if (InputHandler::IsControlling()) {
                     InputHandler::ReleaseModifiers();
                 }
@@ -669,12 +645,9 @@ namespace {
             }
 
             case WM_KILLFOCUS: {
-                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
-                InputHandler::ReleaseModifiers();
+                if (InputHandler::IsControlling()) {
+                    InputHandler::ReleaseModifiers();
+                }
                 return 0;
             }
 
@@ -785,6 +758,12 @@ namespace {
                         g_hoveredBtn = hit;
                         RECT tbRect = { 0, 0, r.right, tbHeight };
                         InvalidateRect(hwnd, &tbRect, FALSE);
+                        UpdateWindow(hwnd);
+                    }
+                    if (hit != BTN_NONE) {
+                        SetCursor(LoadCursor(NULL, IDC_HAND));
+                    } else {
+                        SetCursor(LoadCursor(NULL, IDC_ARROW));
                     }
                     if (!g_trackingMouseLeave) {
                         TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
@@ -800,6 +779,7 @@ namespace {
                     GetClientRect(hwnd, &r);
                     RECT tbRect = { 0, 0, r.right, tbHeight };
                     InvalidateRect(hwnd, &tbRect, FALSE);
+                    UpdateWindow(hwnd);
                 }
 
                 DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_MOVE, Protocol::BUTTON_NONE);
@@ -815,6 +795,7 @@ namespace {
                     GetClientRect(hwnd, &r);
                     RECT tbRect = { 0, 0, r.right, tbHeight };
                     InvalidateRect(hwnd, &tbRect, FALSE);
+                    UpdateWindow(hwnd);
                 }
                 return 0;
             }
@@ -832,6 +813,7 @@ namespace {
                         g_pressedBtn = hit;
                         RECT tbRect = { 0, 0, r.right, tbHeight };
                         InvalidateRect(hwnd, &tbRect, FALSE);
+                        UpdateWindow(hwnd);
                     }
                     return 0;
                 }
@@ -868,19 +850,6 @@ namespace {
                                     g_client->SendPacket(Protocol::MSG_SPECIAL_ACTION, (const char*)&act, sizeof(act));
                                 }
                                 break;
-                            case BTN_QUALITY:
-                                g_currentQualityPreset = (g_currentQualityPreset + 1) % 4;
-                                if (g_client) {
-                                    uint8_t targetFps = (g_currentQualityPreset == Protocol::QUALITY_LOW) ? 30 : 60;
-                                    Protocol::VideoConfigPayload cfg = { g_currentQualityPreset, targetFps };
-                                    g_client->SendPacket(Protocol::MSG_VIDEO_CONFIG, (const char*)&cfg, sizeof(cfg));
-                                }
-                                InvalidateRect(hwnd, NULL, FALSE);
-                                break;
-                            case BTN_INSPECTOR:
-                                RfbInspector::Toggle(hwnd);
-                                InvalidateRect(hwnd, NULL, FALSE);
-                                break;
                             case BTN_MUTE:
                                 AudioPlayer::ToggleMute();
                                 break;
@@ -906,6 +875,7 @@ namespace {
                     g_pressedBtn = BTN_NONE;
                     RECT tbRect = { 0, 0, r.right, tbHeight };
                     InvalidateRect(hwnd, &tbRect, FALSE);
+                    UpdateWindow(hwnd);
                     return 0;
                 }
 
@@ -915,11 +885,6 @@ namespace {
 
             case WM_ACTIVATE:
             case WM_SETFOCUS: {
-                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
                 if (InputHandler::IsControlling()) {
                     InputHandler::ReleaseModifiers();
                 }
@@ -927,12 +892,9 @@ namespace {
             }
 
             case WM_KILLFOCUS: {
-                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
-                InputHandler::ReleaseModifiers();
+                if (InputHandler::IsControlling()) {
+                    InputHandler::ReleaseModifiers();
+                }
                 return 0;
             }
 
@@ -953,57 +915,68 @@ namespace {
                     return 0;
                 }
 
-                if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000)) {
-                    if ((lp & (1 << 30)) == 0) {
+                uint64_t nowKeyMs = GetTickCount64();
+
+                if ((GetKeyState(VK_CONTROL) < 0) && (GetKeyState(VK_MENU) < 0)) {
+                    static uint64_t s_lastCtrlToggleMs = 0;
+                    if ((lp & (1 << 30)) == 0 || (nowKeyMs - s_lastCtrlToggleMs > 400)) {
+                        s_lastCtrlToggleMs = nowKeyMs;
                         InputHandler::ToggleControlling();
                         RECT r; GetClientRect(hwnd, &r);
                         RECT toolbarRect = {0, 0, r.right, tbHeight};
                         InvalidateRect(hwnd, &toolbarRect, FALSE);
+                        UpdateWindow(hwnd);
                     }
                     return 0;
                 }
 
-                if (wp == VK_TAB && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                if (wp == VK_TAB && (GetKeyState(VK_CONTROL) < 0)) {
                     TaskManagerWindow::Show(hwnd, g_client);
                     return 0;
                 }
 
-                if (wp == 'E' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                if (wp == 'E' && (GetKeyState(VK_CONTROL) < 0)) {
                     FileExplorerWindow::Show(hwnd, g_client);
                     return 0;
                 }
 
-                if (wp == 'T' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                if (wp == 'T' && (GetKeyState(VK_CONTROL) < 0)) {
                     ChatWindow::Toggle(hwnd, g_client);
                     RECT r; GetClientRect(hwnd, &r);
                     RECT toolbarRect = {0, 0, r.right, tbHeight};
                     InvalidateRect(hwnd, &toolbarRect, FALSE);
+                    UpdateWindow(hwnd);
                     return 0;
                 }
 
-                if (wp == 'M' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
-                    if ((lp & (1 << 30)) == 0) {
+                if (wp == 'M' && (GetKeyState(VK_CONTROL) < 0)) {
+                    static uint64_t s_lastMuteToggleMs = 0;
+                    if ((lp & (1 << 30)) == 0 || (nowKeyMs - s_lastMuteToggleMs > 400)) {
+                        s_lastMuteToggleMs = nowKeyMs;
                         AudioPlayer::ToggleMute();
                         RECT r; GetClientRect(hwnd, &r);
                         RECT toolbarRect = {0, 0, r.right, tbHeight};
                         InvalidateRect(hwnd, &toolbarRect, FALSE);
+                        UpdateWindow(hwnd);
                     }
                     return 0;
                 }
 
-                if (wp == VK_UP && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                if (wp == VK_UP && (GetKeyState(VK_CONTROL) < 0)) {
                     AudioPlayer::IncreaseVolume();
                     RECT r; GetClientRect(hwnd, &r);
                     RECT toolbarRect = {0, 0, r.right, tbHeight};
                     InvalidateRect(hwnd, &toolbarRect, FALSE);
+                    UpdateWindow(hwnd);
                     return 0;
                 }
 
-                if (wp == VK_DOWN && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+                if (wp == VK_DOWN && (GetKeyState(VK_CONTROL) < 0)) {
                     AudioPlayer::DecreaseVolume();
                     RECT r; GetClientRect(hwnd, &r);
                     RECT toolbarRect = {0, 0, r.right, tbHeight};
                     InvalidateRect(hwnd, &toolbarRect, FALSE);
+                    UpdateWindow(hwnd);
                     return 0;
                 }
 
@@ -1285,7 +1258,6 @@ namespace RemoteWindow {
         }
         g_hVideoWnd = NULL;
         ChatWindow::Cleanup();
-        RfbInspector::Close();
         EnsureCriticalSection();
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();

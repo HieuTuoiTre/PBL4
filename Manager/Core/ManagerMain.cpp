@@ -8,7 +8,6 @@
 
 #include "../UI/RemoteWindow.h"
 #include "../UI/InputHandler.h"
-#include "../UI/RfbInspectorWindow.h"
 #include "../Media/AudioPlayer.h"
 #include "../UI/ConnectWindow.h"
 
@@ -122,8 +121,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     Gdiplus::GdiplusStartupInput gdiInput;
     Gdiplus::GdiplusStartup(&gdiToken, &gdiInput, NULL);
 
-    RfbClient::SetPacketLogCallback(RfbInspector::LogPacket);
-
     while (true) {
 
         std::string targetIP = "";
@@ -163,8 +160,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         RemoteWindow::Cleanup();
 
     }
-
-    RfbInspector::Close();
 
     Gdiplus::GdiplusShutdown(gdiToken);
 

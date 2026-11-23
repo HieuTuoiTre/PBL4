@@ -13,7 +13,7 @@
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow){
 
-    // Đặt độ phân giải bộ định thời Windows về 1ms (chuẩn 60-120 FPS mượt mà)
+    // Đặt độ phân giải bộ định thời Windows về 1ms (chuẩn 30 FPS mượt mà và ổn định)
     timeBeginPeriod(1);
 
     SetProcessDPIAware();

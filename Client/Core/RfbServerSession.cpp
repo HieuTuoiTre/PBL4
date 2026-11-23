@@ -324,7 +324,7 @@ namespace {
         uint64_t lastEmptySendTime = GetTickCount64();
 
         auto nextFrameTime = std::chrono::steady_clock::now();
-        const std::chrono::microseconds frameInterval(1000000 / 60); // 60 FPS
+        const std::chrono::microseconds frameInterval(1000000 / 30); // Cố định 30 FPS ổn định
 
         while (g_isRunning && g_isClientConnected) {
             nextFrameTime += frameInterval;
