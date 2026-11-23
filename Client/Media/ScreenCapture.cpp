@@ -22,6 +22,9 @@ namespace {
     // ĐO TỐC ĐỘ MẠNG THỜI GIAN THỰC & PROGRESSIVE REFINEMENT
     // ==========================================
     std::atomic<double> g_avgSendTimeMs(2.0); // Giả định ban đầu mạng rất tốt (<4ms)
+    std::atomic<uint8_t> g_qualityPreset(Protocol::QUALITY_AUTO);
+    std::atomic<uint8_t> g_targetFps(60);
+    std::atomic<bool> g_forceFullFrame(false);
     bool g_needsRefinement = false;
     std::chrono::steady_clock::time_point g_lastMotionTime = std::chrono::steady_clock::now();
 
@@ -32,6 +35,15 @@ namespace {
 
     // Tự động nâng sàn chất lượng nếu mạng mạnh và phân cấp chất lượng theo diện tích thay đổi
     CompressionConfig GetCompressionConfig(int changedArea, int totalPixels) {
+        uint8_t preset = g_qualityPreset.load(std::memory_order_relaxed);
+        if (preset == Protocol::QUALITY_LOW) {
+            return { 30, TJSAMP_420 };
+        } else if (preset == Protocol::QUALITY_BALANCED) {
+            return { 60, TJSAMP_420 };
+        } else if (preset == Protocol::QUALITY_HIGH) {
+            return { 85, TJSAMP_420 };
+        }
+
         double sendMs = g_avgSendTimeMs.load(std::memory_order_relaxed);
         bool fastNetwork = (sendMs < 4.0);
         bool slowNetwork = (sendMs > 12.0);
@@ -78,6 +90,8 @@ namespace {
         outWidth = width;
         outHeight = height;
 
+        CompressionConfig cfg = GetCompressionConfig(width * height, width * height);
+
         int compressRes = tjCompress2(
             g_tjCompressor,
             (const unsigned char*)pixels,
@@ -87,8 +101,8 @@ namespace {
             TJPF_BGRX,
             &g_jpegBuf,
             &g_jpegBufSize,
-            TJSAMP_420, // 4:2:0 tối ưu dung lượng và tốc độ
-            80,         // Chất lượng sắc nét 80% (chỉ ~80-120KB thay vì 1MB)
+            cfg.subsamp,
+            cfg.quality,
             TJFLAG_FASTDCT | TJFLAG_FASTUPSAMPLE
         );
 
@@ -102,6 +116,11 @@ namespace {
         std::memcpy(outBuffer.data() + sizeof(delta), g_jpegBuf, g_jpegBufSize);
         return true;
     }
+
+    // Forward declarations for fallback engine
+    bool InitGdi();
+    void CleanupGdi();
+    bool CaptureGdiFrame(std::vector<char>& outBuffer, int& outX, int& outY, int& outWidth, int& outHeight);
 
     // ==========================================
     // 1. DIRECTX 11 DESKTOP DUPLICATION (GPU)
@@ -227,13 +246,61 @@ namespace {
         return true;
     }
 
+        bool GrabGdiInitialSnapshot(std::vector<uint32_t>& outPixels, int width, int height) {
+        if (width <= 0) width = GetSystemMetrics(SM_CXSCREEN);
+        if (height <= 0) height = GetSystemMetrics(SM_CYSCREEN);
+        if (width <= 0 || height <= 0) return false;
+        HDC hScreenDC = GetDC(NULL);
+        if (!hScreenDC) return false;
+
+        HDC hMemDC = CreateCompatibleDC(hScreenDC);
+        if (!hMemDC) {
+            ReleaseDC(NULL, hScreenDC);
+            return false;
+        }
+
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* dibBits = nullptr;
+        HBITMAP hBmp = CreateDIBSection(hMemDC, &bmi, DIB_RGB_COLORS, &dibBits, NULL, 0);
+        if (!hBmp || !dibBits) {
+            DeleteDC(hMemDC);
+            ReleaseDC(NULL, hScreenDC);
+            return false;
+        }
+
+        HGDIOBJ oldBmp = SelectObject(hMemDC, hBmp);
+        BitBlt(hMemDC, 0, 0, width, height, hScreenDC, 0, 0, SRCCOPY);
+
+        outPixels.resize(width * height);
+        std::memcpy(outPixels.data(), dibBits, width * height * sizeof(uint32_t));
+
+        SelectObject(hMemDC, oldBmp);
+        DeleteObject(hBmp);
+        DeleteDC(hMemDC);
+        ReleaseDC(NULL, hScreenDC);
+        return true;
+    }
+
     bool CaptureDxgiFrame(std::vector<char>& outBuffer, int& outX, int& outY, int& outWidth, int& outHeight) {
         if (!g_dxgiDupl || !g_stagingTexture || !g_tjCompressor) {
             // Thử tái khởi tạo DXGI định kỳ mỗi 500ms nếu trước đó bị mất quyền truy cập (UAC / Lock Screen)
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastDxgiRetryTime).count() >= 500) {
                 g_lastDxgiRetryTime = now;
-                InitDxgi();
+                if (!InitDxgi()) {
+                    InitGdi();
+                    return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
+                }
+            } else {
+                InitGdi();
+                return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
             }
             return false;
         }
@@ -244,6 +311,23 @@ namespace {
         // Timeout 25ms: Đủ biên độ cho DWM bàn giao khung 60Hz mà không bị lỡ nhịp (tránh rớt khung hình xuống 30 FPS)
         HRESULT hr = g_dxgiDupl->AcquireNextFrame(25, &frameInfo, &desktopResource);
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+            // Khi vừa kết nối hoặc màn hình tĩnh tuyệt đối, chủ động chụp 1 frame ban đầu để Manager không bị trắng màn hình
+            if (g_dxgiPrevPixels.empty()) {
+                g_forceFullFrame.store(false, std::memory_order_relaxed);
+                if (GrabGdiInitialSnapshot(g_dxgiPrevPixels, g_dxgiWidth, g_dxgiHeight)) {
+                    g_needsRefinement = false;
+                    return EncodeRefinementFrame(g_dxgiPrevPixels.data(), g_dxgiWidth, g_dxgiHeight, outBuffer, outX, outY, outWidth, outHeight);
+                }
+            }
+            if (g_forceFullFrame.exchange(false, std::memory_order_acq_rel)) {
+                if (!g_dxgiPrevPixels.empty()) {
+                    g_needsRefinement = false;
+                    return EncodeRefinementFrame(g_dxgiPrevPixels.data(), g_dxgiWidth, g_dxgiHeight, outBuffer, outX, outY, outWidth, outHeight);
+                } else if (GrabGdiInitialSnapshot(g_dxgiPrevPixels, g_dxgiWidth, g_dxgiHeight)) {
+                    g_needsRefinement = false;
+                    return EncodeRefinementFrame(g_dxgiPrevPixels.data(), g_dxgiWidth, g_dxgiHeight, outBuffer, outX, outY, outWidth, outHeight);
+                }
+            }
             if (g_needsRefinement && !g_dxgiPrevPixels.empty()) {
                 auto now = std::chrono::steady_clock::now();
                 auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastMotionTime).count();
@@ -262,7 +346,8 @@ namespace {
             // Khi UAC xuất hiện, lock screen, Task Manager admin, hoặc thay đổi độ phân giải màn hình
             CleanupDxgi();
             g_lastDxgiRetryTime = std::chrono::steady_clock::now();
-            return false;
+            InitGdi();
+            return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
         }
 
         if (FAILED(hr) || !desktopResource) {
@@ -304,7 +389,8 @@ namespace {
         const uint32_t* curPixels = (const uint32_t*)mapped.pData;
         int rowPitchElements = mapped.RowPitch / sizeof(uint32_t);
 
-        if (g_dxgiPrevPixels.size() != (size_t)pixelsCount) {
+        bool forceFull = g_forceFullFrame.exchange(false, std::memory_order_acq_rel);
+        if (forceFull || g_dxgiPrevPixels.size() != (size_t)pixelsCount) {
             g_dxgiPrevPixels.clear();
             g_dxgiPrevPixels.resize(pixelsCount);
             for (int y = 0; y < g_dxgiHeight; ++y) {
@@ -487,7 +573,8 @@ namespace {
         int pixelsCount = g_gdiWidth * g_gdiHeight;
         int minX = g_gdiWidth, minY = g_gdiHeight, maxX = -1, maxY = -1;
 
-        if (g_gdiPrevPixels.empty()) {
+        bool forceFull = g_forceFullFrame.exchange(false, std::memory_order_acq_rel);
+        if (forceFull || g_gdiPrevPixels.empty()) {
             g_gdiPrevPixels.assign(g_dibPixels, g_dibPixels + pixelsCount);
             minX = 0; minY = 0;
             maxX = g_gdiWidth - 1; maxY = g_gdiHeight - 1;
@@ -605,7 +692,11 @@ namespace ScreenCapture {
         if (!g_isInitialized) return false;
 
         if (g_useDxgi) {
-            return CaptureDxgiFrame(outBuffer, outX, outY, outWidth, outHeight);
+            bool ok = CaptureDxgiFrame(outBuffer, outX, outY, outWidth, outHeight);
+            if (!ok && !g_dxgiDupl) {
+                return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
+            }
+            return ok;
         } else {
             return CaptureGdiFrame(outBuffer, outX, outY, outWidth, outHeight);
         }
@@ -620,9 +711,7 @@ namespace ScreenCapture {
     }
 
     void ForceFullFrame() {
-        g_dxgiPrevPixels.clear();
-        g_gdiPrevPixels.clear();
-        g_needsRefinement = false;
+        g_forceFullFrame.store(true, std::memory_order_release);
     }
 
     void Cleanup() {
@@ -630,11 +719,8 @@ namespace ScreenCapture {
 
         g_needsRefinement = false;
 
-        if (g_useDxgi) {
-            CleanupDxgi();
-        } else {
-            CleanupGdi();
-        }
+        CleanupDxgi();
+        CleanupGdi();
 
         if (g_jpegBuf) {
             tjFree(g_jpegBuf);
@@ -648,5 +734,53 @@ namespace ScreenCapture {
         }
 
         g_isInitialized = false;
+    }
+
+    void SetVideoConfig(uint8_t qualityPreset, uint8_t targetFps) {
+        if (qualityPreset <= Protocol::QUALITY_HIGH) {
+            g_qualityPreset.store(qualityPreset, std::memory_order_relaxed);
+        }
+        if (targetFps == 30 || targetFps == 60) {
+            g_targetFps.store(targetFps, std::memory_order_relaxed);
+        }
+        ForceFullFrame();
+    }
+
+    uint8_t GetQualityPreset() {
+        return g_qualityPreset.load(std::memory_order_relaxed);
+    }
+
+    uint8_t GetTargetFps() {
+        return g_targetFps.load(std::memory_order_relaxed);
+    }
+
+    const uint32_t* GetCurrentFramePixels(int& outWidth, int& outHeight) {
+        if (g_useDxgi && !g_dxgiPrevPixels.empty()) {
+            outWidth = g_dxgiWidth;
+            outHeight = g_dxgiHeight;
+            return g_dxgiPrevPixels.data();
+        } else if (!g_gdiPrevPixels.empty()) {
+            outWidth = g_gdiWidth;
+            outHeight = g_gdiHeight;
+            return g_gdiPrevPixels.data();
+        } else if (g_dibPixels) {
+            outWidth = g_gdiWidth;
+            outHeight = g_gdiHeight;
+            return g_dibPixels;
+        } else {
+            // Snapshot fallback nếu chưa có khung hình nào trong bộ nhớ
+            outWidth = GetSystemMetrics(SM_CXSCREEN);
+            outHeight = GetSystemMetrics(SM_CYSCREEN);
+            if (outWidth > 0 && outHeight > 0) {
+                if (GrabGdiInitialSnapshot(g_dxgiPrevPixels, outWidth, outHeight)) {
+                    g_dxgiWidth = outWidth;
+                    g_dxgiHeight = outHeight;
+                    return g_dxgiPrevPixels.data();
+                }
+            }
+        }
+        outWidth = 0;
+        outHeight = 0;
+        return nullptr;
     }
 }

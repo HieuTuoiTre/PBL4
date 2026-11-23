@@ -1,4 +1,6 @@
 #include "TrayIcon.h"
+#include "../../Shared/ClipboardManager.h"
+#include "SessionManager.h"
 #include <shellapi.h>
 
 namespace{
@@ -80,8 +82,14 @@ namespace TrayIcon {
             return false;
         }
 
+        ClipboardManager::Initialize(g_hWnd);
+
         g_isInitialized = true;
         return true;
+    }
+
+    HWND GetHwnd() {
+        return g_hWnd;
     }
 
 } // namespace TrayIcon
@@ -149,6 +157,18 @@ namespace {
             }
             break;
 
+        case WM_CLIPBOARDUPDATE: {
+            if (SessionManager::IsConnected()) {
+                std::string utf8Text;
+                if (ClipboardManager::ReadText(hWnd, utf8Text)) {
+                    if (ClipboardManager::ShouldSync(utf8Text)) {
+                        SessionManager::SendClipboardText(utf8Text);
+                    }
+                }
+            }
+            return 0;
+        }
+
         case WM_DESTROY:
             PostQuitMessage(0);
             break;
@@ -166,10 +186,15 @@ namespace TrayIcon {
     void Cleanup() {
         if (!g_isInitialized) return;
 
-        // 1. Xóa icon khỏi khay hệ thống
+        // 1. Hủy lắng nghe sự kiện clipboard
+        if (g_hWnd) {
+            ClipboardManager::Cleanup(g_hWnd);
+        }
+
+        // 2. Xóa icon khỏi khay hệ thống
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
 
-        // 2. Hủy cửa sổ ẩn và hủy đăng ký lớp cửa sổ
+        // 3. Hủy cửa sổ ẩn và hủy đăng ký lớp cửa sổ
         if (g_hWnd) {
             DestroyWindow(g_hWnd);
             g_hWnd = NULL;

@@ -8,6 +8,7 @@
 #include "SessionManager.h"
 #include "TrayIcon.h"
 #include "DiscoveryResponder.h"
+#include "RfbServerSession.h"
 #include "../System/InputInjector.h"
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow){
@@ -79,6 +80,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Tách rời luồng này khỏi luồng chính (Main Thread)
     networkThread.detach();
 
+    // 4.1 Khởi động chuẩn giao thức VNC / RFB 3.8 trên cổng 5900
+    RfbServer::Start(Rfb::PORT_VNC);
+
     // 5. Vòng lặp sự kiện (Message Loop) của luồng chính
     MSG msg = {0};
 
@@ -91,6 +95,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     // 6. Dọn dẹp tài nguyên trước khi tắt hẳn ứng dụng
+    RfbServer::Stop();                // Tắt máy chủ VNC / RFB
     TrayIcon::Cleanup();              // Xóa icon khỏi màn hình
     SessionManager::Stop();           // Đóng socket, tắt luồng mạng
     DiscoveryResponder::Stop();       // Dừng lắng nghe UDP và gửi thông báo DISCOVERY_BYE

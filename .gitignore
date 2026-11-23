@@ -24,7 +24,5 @@ Thumbs.db
 Instruction.txt
 
 graphify-out/
-
-tests/
-graphify-out/
 teamwork/
+tests/

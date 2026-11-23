@@ -13,4 +13,14 @@ namespace SessionManager {
 
     // Lấy instance overlay nếu cần tương tác từ nơi khác
     StatusOverlay& GetOverlay();
+
+    // Cấu hình token xác thực phiên
+    void SetExpectedToken(const std::string& token);
+    std::string GetExpectedToken();
+
+    // Kiểm tra trạng thái kết nối phiên
+    bool IsConnected();
+
+    // Gửi dữ liệu clipboard văn bản sang Manager
+    bool SendClipboardText(const std::string& text);
 }

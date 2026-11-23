@@ -3,7 +3,10 @@
 #include "TaskManagerWindow.h"
 #include "FileExplorerWindow.h"
 #include "ChatWindow.h"
+#include "RfbInspectorWindow.h"
+#include "../Core/RfbClientSession.h"
 #include "../Media/AudioPlayer.h"
+#include "../../Shared/ClipboardManager.h"
 #include <gdiplus.h>
 #include <turbojpeg.h>
 #include <string>
@@ -25,6 +28,17 @@ namespace {
 
     tjhandle g_tjDecompressor = nullptr;
     CRITICAL_SECTION g_cs;
+    static bool g_csInitialized = false;
+
+    void EnsureCriticalSection() {
+        if (!g_csInitialized) {
+            InitializeCriticalSection(&g_cs);
+            g_csInitialized = true;
+        }
+    }
+
+    constexpr UINT WM_USER_NEW_FRAME = WM_USER + 101;
+    static std::atomic<bool> g_paintPending(false);
 
     std::atomic<int> g_streamFrameCount(0);
     std::atomic<int> g_renderFrameCount(0);
@@ -59,12 +73,17 @@ namespace {
     enum ToolbarButtonId {
         BTN_NONE = 0,
         BTN_MODE,
+        BTN_FULLSCREEN,
+        BTN_CTRL_ALT_DEL,
+        BTN_WIN_KEY,
+        BTN_QUALITY,
+        BTN_INSPECTOR,
+        BTN_CHAT,
+        BTN_FILE_EXP,
+        BTN_TASK_MGR,
         BTN_MUTE,
         BTN_VOL_DOWN,
-        BTN_VOL_UP,
-        BTN_TASK_MGR,
-        BTN_FILE_EXP,
-        BTN_CHAT
+        BTN_VOL_UP
     };
 
     struct ToolbarButton {
@@ -78,6 +97,13 @@ namespace {
     ToolbarButtonId g_hoveredBtn = BTN_NONE;
     ToolbarButtonId g_pressedBtn = BTN_NONE;
     bool g_trackingMouseLeave = false;
+
+    bool g_isFullscreen = false;
+    WINDOWPLACEMENT g_prevPlacement = { sizeof(WINDOWPLACEMENT) };
+    LONG_PTR g_prevStyle = 0;
+    uint8_t g_currentQualityPreset = Protocol::QUALITY_AUTO;
+
+    void ToggleFullscreenInternal(HWND hwnd);
 
     void AddRoundRectPath(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& rect, float radius) {
         float d = radius * 2.0f;
@@ -94,52 +120,88 @@ namespace {
     std::vector<ToolbarButton> BuildToolbarButtons(HWND hwnd, int clientWidth, int tbHeight) {
         std::vector<ToolbarButton> buttons;
         float scale = GetDpiScale(hwnd);
-        float gap = 6.0f * scale;
+        float gap = 5.0f * scale;
         float btnHeight = 30.0f * scale;
         float btnY = (float)(tbHeight - btnHeight) / 2.0f;
-        float curX = 12.0f * scale;
+        float curX = 10.0f * scale;
 
+        // 1. Chế độ điều khiển / Chỉ xem
         bool isCtrl = InputHandler::IsControlling();
         std::wstring modeText = isCtrl ? L"Đang điều khiển" : L"Chỉ xem";
         std::wstring modeHint = L"Ctrl+Alt";
-        float btnModeW = (float)std::round((isCtrl ? 144.0f : 100.0f) * scale);
+        float btnModeW = (float)std::round((isCtrl ? 134.0f : 96.0f) * scale);
         buttons.push_back({ BTN_MODE, Gdiplus::RectF(curX, btnY, btnModeW, btnHeight), modeText, modeHint, true });
         curX += btnModeW + gap;
 
-        bool isMuted = AudioPlayer::IsMuted();
-        std::wstring muteText = isMuted ? L"Đã tắt tiếng" : L"Âm thanh";
-        std::wstring muteHint = L"Ctrl+M";
-        float btnMuteW = (float)std::round((isMuted ? 122.0f : 106.0f) * scale);
-        buttons.push_back({ BTN_MUTE, Gdiplus::RectF(curX, btnY, btnMuteW, btnHeight), muteText, muteHint, isMuted });
-        curX += btnMuteW + gap;
+        // 2. Chuyển đổi toàn màn hình (Fullscreen Toggle)
+        std::wstring fsText = g_isFullscreen ? L"Thu nhỏ" : L"Toàn màn hình";
+        float btnFsW = (float)std::round((g_isFullscreen ? 88.0f : 124.0f) * scale);
+        buttons.push_back({ BTN_FULLSCREEN, Gdiplus::RectF(curX, btnY, btnFsW, btnHeight), fsText, L"F11 / Esc", g_isFullscreen });
+        curX += btnFsW + gap;
 
-        float btnVolMiniW = (float)std::round(26.0f * scale);
-        buttons.push_back({ BTN_VOL_DOWN, Gdiplus::RectF(curX, btnY, btnVolMiniW, btnHeight), L"−", L"Ctrl+↓", false });
-        curX += btnVolMiniW + 2.0f * scale;
+        // 3. Phím tắt đặc biệt: Ctrl + Alt + Del
+        float btnCadW = (float)std::round(98.0f * scale);
+        buttons.push_back({ BTN_CTRL_ALT_DEL, Gdiplus::RectF(curX, btnY, btnCadW, btnHeight), L"Ctrl+Alt+Del", L"", false });
+        curX += btnCadW + gap;
 
-        int volPercent = (int)std::round(AudioPlayer::GetVolume() * 100.0f);
-        float lblVolW = (float)std::round(64.0f * scale);
-        buttons.push_back({ BTN_NONE, Gdiplus::RectF(curX, btnY, lblVolW, btnHeight), std::to_wstring(volPercent) + L"%", L"", false });
-        curX += lblVolW + 2.0f * scale;
+        // 4. Phím tắt đặc biệt: Phím Windows (Win Key)
+        float btnWinW = (float)std::round(76.0f * scale);
+        buttons.push_back({ BTN_WIN_KEY, Gdiplus::RectF(curX, btnY, btnWinW, btnHeight), L"Phím Win", L"", false });
+        curX += btnWinW + gap;
 
-        buttons.push_back({ BTN_VOL_UP, Gdiplus::RectF(curX, btnY, btnVolMiniW, btnHeight), L"+", L"Ctrl+↑", false });
-        curX += btnVolMiniW + gap * 2.0f;
+        // 5. Cấu hình chất lượng hình ảnh / Video Quality (Auto / Low / Balanced / High)
+        std::wstring qText = L"Chất lượng: Auto";
+        if (g_currentQualityPreset == Protocol::QUALITY_LOW) qText = L"Chất lượng: Thấp";
+        else if (g_currentQualityPreset == Protocol::QUALITY_BALANCED) qText = L"Chất lượng: Chuẩn";
+        else if (g_currentQualityPreset == Protocol::QUALITY_HIGH) qText = L"Chất lượng: Cao";
+        float btnQW = (float)std::round(124.0f * scale);
+        buttons.push_back({ BTN_QUALITY, Gdiplus::RectF(curX, btnY, btnQW, btnHeight), qText, L"Nhấp để đổi", false });
+        curX += btnQW + gap;
 
-        float btnTaskW = (float)std::round(132.0f * scale);
-        buttons.push_back({ BTN_TASK_MGR, Gdiplus::RectF(curX, btnY, btnTaskW, btnHeight), L"Task Manager", L"Ctrl+Tab", false });
-        curX += btnTaskW + gap;
+        // 5.1. Nhật ký Giao thức VNC / RFB 3.8 Protocol Inspector
+        bool isInspectorOpen = RfbInspector::IsOpen();
+        std::wstring rfbText = L"Giao thức RFB";
+        float btnRfbW = (float)std::round(112.0f * scale);
+        buttons.push_back({ BTN_INSPECTOR, Gdiplus::RectF(curX, btnY, btnRfbW, btnHeight), rfbText, L"Xem nhật ký gói tin VNC", isInspectorOpen });
+        curX += btnRfbW + gap;
 
-        float btnFileW = (float)std::round(124.0f * scale);
-        buttons.push_back({ BTN_FILE_EXP, Gdiplus::RectF(curX, btnY, btnFileW, btnHeight), L"File Explorer", L"Ctrl+E", false });
-        curX += btnFileW + gap;
-
+        // 6. Trò chuyện (Chat Window)
         int unread = ChatWindow::GetUnreadCount();
         std::wstring chatText = (unread > 0) ? (L"Trò chuyện (" + std::to_wstring(unread) + L")") : L"Trò chuyện";
         std::wstring chatHint = L"Ctrl+T";
-        float btnChatW = (float)std::round((unread > 0 ? 128.0f : 106.0f) * scale);
+        float btnChatW = (float)std::round((unread > 0 ? 122.0f : 96.0f) * scale);
         bool isChatActive = (unread > 0 || ChatWindow::IsOpen());
         buttons.push_back({ BTN_CHAT, Gdiplus::RectF(curX, btnY, btnChatW, btnHeight), chatText, chatHint, isChatActive });
         curX += btnChatW + gap;
+
+        // 7. Trình duyệt tệp (File Explorer)
+        float btnFileW = (float)std::round(96.0f * scale);
+        buttons.push_back({ BTN_FILE_EXP, Gdiplus::RectF(curX, btnY, btnFileW, btnHeight), L"Tệp tin", L"Ctrl+E", false });
+        curX += btnFileW + gap;
+
+        // 8. Quản lý tác vụ (Task Manager)
+        float btnTaskW = (float)std::round(102.0f * scale);
+        buttons.push_back({ BTN_TASK_MGR, Gdiplus::RectF(curX, btnY, btnTaskW, btnHeight), L"Tiến trình", L"Ctrl+Tab", false });
+        curX += btnTaskW + gap;
+
+        // 9. Âm thanh (Mute & Volume)
+        bool isMuted = AudioPlayer::IsMuted();
+        std::wstring muteText = isMuted ? L"Tắt tiếng" : L"Âm thanh";
+        float btnMuteW = (float)std::round((isMuted ? 88.0f : 84.0f) * scale);
+        buttons.push_back({ BTN_MUTE, Gdiplus::RectF(curX, btnY, btnMuteW, btnHeight), muteText, L"Ctrl+M", isMuted });
+        curX += btnMuteW + gap;
+
+        float btnVolMiniW = (float)std::round(24.0f * scale);
+        buttons.push_back({ BTN_VOL_DOWN, Gdiplus::RectF(curX, btnY, btnVolMiniW, btnHeight), L"−", L"", false });
+        curX += btnVolMiniW + 2.0f * scale;
+
+        int volPercent = (int)std::round(AudioPlayer::GetVolume() * 100.0f);
+        float lblVolW = (float)std::round(46.0f * scale);
+        buttons.push_back({ BTN_NONE, Gdiplus::RectF(curX, btnY, lblVolW, btnHeight), std::to_wstring(volPercent) + L"%", L"", false });
+        curX += lblVolW + 2.0f * scale;
+
+        buttons.push_back({ BTN_VOL_UP, Gdiplus::RectF(curX, btnY, btnVolMiniW, btnHeight), L"+", L"", false });
+        curX += btnVolMiniW + gap;
 
         return buttons;
     }
@@ -222,6 +284,10 @@ namespace {
             } else if (btn.id == BTN_CHAT && btn.isSpecial) {
                 fillColor = isPressed ? Gdiplus::Color(255, 30, 58, 138) : (isHovered ? Gdiplus::Color(255, 37, 99, 235) : Gdiplus::Color(255, 29, 78, 216));
                 borderColor = Gdiplus::Color(255, 96, 165, 250);
+                textColor = Gdiplus::Color(255, 255, 255, 255);
+            } else if (btn.id == BTN_INSPECTOR && btn.isSpecial) {
+                fillColor = isPressed ? Gdiplus::Color(255, 88, 28, 135) : (isHovered ? Gdiplus::Color(255, 126, 34, 206) : Gdiplus::Color(255, 107, 33, 168));
+                borderColor = Gdiplus::Color(255, 192, 132, 252);
                 textColor = Gdiplus::Color(255, 255, 255, 255);
             } else {
                 fillColor = isPressed ? Gdiplus::Color(255, 28, 30, 36) : (isHovered ? Gdiplus::Color(255, 52, 55, 66) : Gdiplus::Color(255, 38, 40, 48));
@@ -381,6 +447,45 @@ namespace {
         targetG.DrawImage(&memBmp, 0, 0, width, tbHeight);
     }
 
+    void ToggleFullscreenInternal(HWND hwnd) {
+        if (!hwnd) hwnd = g_hwnd;
+        if (!hwnd) return;
+
+        if (!g_isFullscreen) {
+            GetWindowPlacement(hwnd, &g_prevPlacement);
+            g_prevStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
+
+            MONITORINFO mi = { sizeof(mi) };
+            HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+            if (GetMonitorInfoW(hMon, &mi)) {
+                SetWindowLongPtrW(hwnd, GWL_STYLE, g_prevStyle & ~WS_OVERLAPPEDWINDOW);
+                SetWindowPos(hwnd, HWND_TOP,
+                    mi.rcMonitor.left, mi.rcMonitor.top,
+                    mi.rcMonitor.right - mi.rcMonitor.left,
+                    mi.rcMonitor.bottom - mi.rcMonitor.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+                g_isFullscreen = true;
+            }
+        } else {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, g_prevStyle);
+            SetWindowPlacement(hwnd, &g_prevPlacement);
+            SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            g_isFullscreen = false;
+        }
+
+        int tbHeight = GetToolbarHeight(hwnd);
+        RECT r;
+        GetClientRect(hwnd, &r);
+        if (g_hVideoWnd) {
+            int vH = r.bottom - tbHeight;
+            if (vH < 0) vH = 0;
+            MoveWindow(g_hVideoWnd, 0, tbHeight, r.right, vH, TRUE);
+            InvalidateRect(g_hVideoWnd, NULL, FALSE);
+        }
+        InvalidateRect(hwnd, NULL, TRUE);
+    }
+
     static void DispatchVideoMouse(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, uint8_t action, uint8_t btn) {
         if (!InputHandler::IsControlling()) return;
 
@@ -446,6 +551,12 @@ namespace {
 
     LRESULT CALLBACK VideoWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
+            case WM_USER_NEW_FRAME: {
+                g_paintPending.store(false, std::memory_order_release);
+                UpdateWindow(hwnd);
+                return 0;
+            }
+
             case WM_SIZE: {
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
@@ -466,36 +577,39 @@ namespace {
                     int offX = (r.right - drawW) / 2;
                     int offY = (r.bottom - drawH) / 2;
 
-                    // Tô đen viền letterbox xung quanh khung hình nếu có khoảng trống
-                    HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                    // Tô đen viền letterbox xung quanh khung hình nếu có khoảng trống (dùng static brush chống churn GDI handle)
+                    static HBRUSH s_bgBrush = CreateSolidBrush(RGB(18, 19, 23));
                     if (offX > 0) {
                         RECT rLeft = { 0, 0, offX, r.bottom };
                         RECT rRight = { offX + drawW, 0, r.right, r.bottom };
-                        FillRect(hdc, &rLeft, bgBrush);
-                        FillRect(hdc, &rRight, bgBrush);
+                        FillRect(hdc, &rLeft, s_bgBrush);
+                        FillRect(hdc, &rRight, s_bgBrush);
                     }
                     if (offY > 0) {
                         RECT rTop = { 0, 0, r.right, offY };
                         RECT rBottom = { 0, offY + drawH, r.right, r.bottom };
-                        FillRect(hdc, &rTop, bgBrush);
-                        FillRect(hdc, &rBottom, bgBrush);
+                        FillRect(hdc, &rTop, s_bgBrush);
+                        FillRect(hdc, &rBottom, s_bgBrush);
                     }
-                    DeleteObject(bgBrush);
 
-                    SetStretchBltMode(hdc, HALFTONE);
-                    SetBrushOrgEx(hdc, 0, 0, NULL);
+                    if (drawW == g_frameWidth && drawH == g_frameHeight) {
+                        SetStretchBltMode(hdc, COLORONCOLOR);
+                    } else {
+                        SetStretchBltMode(hdc, HALFTONE);
+                        SetBrushOrgEx(hdc, 0, 0, NULL);
+                    }
                     StretchDIBits(
                         hdc,
                         offX, offY, drawW, drawH,
                         0, 0, g_frameWidth, g_frameHeight,
                         g_framePixels.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY
                     );
+                    g_renderFrameCount++;
                 } else {
                     RECT r;
                     GetClientRect(hwnd, &r);
-                    HBRUSH bgBrush = CreateSolidBrush(RGB(18, 19, 23));
-                    FillRect(hdc, &r, bgBrush);
-                    DeleteObject(bgBrush);
+                    static HBRUSH s_bgBrush = CreateSolidBrush(RGB(18, 19, 23));
+                    FillRect(hdc, &r, s_bgBrush);
                 }
                 LeaveCriticalSection(&g_cs);
                 EndPaint(hwnd, &ps);
@@ -710,6 +824,7 @@ namespace {
                 int mouseY = (short)HIWORD(lp);
 
                 if (mouseY < tbHeight) {
+                    SetFocus(hwnd);
                     RECT r;
                     GetClientRect(hwnd, &r);
                     ToolbarButtonId hit = HitTestToolbar(hwnd, mouseX, mouseY, r.right, tbHeight);
@@ -737,6 +852,34 @@ namespace {
                         switch (hit) {
                             case BTN_MODE:
                                 InputHandler::ToggleControlling();
+                                break;
+                            case BTN_FULLSCREEN:
+                                ToggleFullscreenInternal(hwnd);
+                                break;
+                            case BTN_CTRL_ALT_DEL:
+                                if (g_client) {
+                                    Protocol::SpecialActionPayload act = { Protocol::ACTION_CTRL_ALT_DEL };
+                                    g_client->SendPacket(Protocol::MSG_SPECIAL_ACTION, (const char*)&act, sizeof(act));
+                                }
+                                break;
+                            case BTN_WIN_KEY:
+                                if (g_client) {
+                                    Protocol::SpecialActionPayload act = { Protocol::ACTION_WIN_KEY };
+                                    g_client->SendPacket(Protocol::MSG_SPECIAL_ACTION, (const char*)&act, sizeof(act));
+                                }
+                                break;
+                            case BTN_QUALITY:
+                                g_currentQualityPreset = (g_currentQualityPreset + 1) % 4;
+                                if (g_client) {
+                                    uint8_t targetFps = (g_currentQualityPreset == Protocol::QUALITY_LOW) ? 30 : 60;
+                                    Protocol::VideoConfigPayload cfg = { g_currentQualityPreset, targetFps };
+                                    g_client->SendPacket(Protocol::MSG_VIDEO_CONFIG, (const char*)&cfg, sizeof(cfg));
+                                }
+                                InvalidateRect(hwnd, NULL, FALSE);
+                                break;
+                            case BTN_INSPECTOR:
+                                RfbInspector::Toggle(hwnd);
+                                InvalidateRect(hwnd, NULL, FALSE);
                                 break;
                             case BTN_MUTE:
                                 AudioPlayer::ToggleMute();
@@ -795,6 +938,21 @@ namespace {
 
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN: {
+                if (wp == VK_ESCAPE && g_isFullscreen) {
+                    ToggleFullscreenInternal(hwnd);
+                    return 0;
+                }
+
+                if (wp == VK_F5) {
+                    RfbClient::RequestUpdate(false);
+                    return 0;
+                }
+
+                if (wp == VK_F11) {
+                    ToggleFullscreenInternal(hwnd);
+                    return 0;
+                }
+
                 if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000)) {
                     if ((lp & (1 << 30)) == 0) {
                         InputHandler::ToggleControlling();
@@ -883,7 +1041,20 @@ namespace {
 
             case WM_MOUSEWHEEL:  DispatchVideoMouse(hwnd, msg, wp, lp, Protocol::MOUSE_ACTION_WHEEL, Protocol::BUTTON_NONE); return 0;
 
+            case WM_CLIPBOARDUPDATE: {
+                if (g_client && g_client->GetConnectSocket() != INVALID_SOCKET) {
+                    std::string utf8Text;
+                    if (ClipboardManager::ReadText(hwnd, utf8Text)) {
+                        if (ClipboardManager::ShouldSync(utf8Text)) {
+                            g_client->SendPacket(Protocol::MSG_CLIPBOARD_TEXT, utf8Text.data(), (int)utf8Text.size());
+                        }
+                    }
+                }
+                return 0;
+            }
+
             case WM_DESTROY: {
+                ClipboardManager::Cleanup(hwnd);
                 KillTimer(hwnd, 1);
                 PostQuitMessage(0);
                 return 0;
@@ -894,15 +1065,40 @@ namespace {
 }
 
 namespace RemoteWindow {
-    HWND Create(HINSTANCE hInst, TcpClient* client) {
+    HWND GetHwnd() {
+        return g_hwnd;
+    }
+
+    HWND Create(HINSTANCE hInst, TcpClient* client, int initWidth, int initHeight) {
         g_client = client;
-        InitializeCriticalSection(&g_cs);
-        g_tjDecompressor = tjInitDecompress();
+        EnsureCriticalSection();
+        if (!g_tjDecompressor) {
+            g_tjDecompressor = tjInitDecompress();
+        }
+
+        if (initWidth > 0 && initHeight > 0) {
+            EnterCriticalSection(&g_cs);
+            g_frameWidth = initWidth;
+            g_frameHeight = initHeight;
+            g_framePixels.assign(g_frameWidth * g_frameHeight, 0xFF000000);
+
+            std::memset(&g_bmi, 0, sizeof(g_bmi));
+            g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            g_bmi.bmiHeader.biWidth = g_frameWidth;
+            g_bmi.bmiHeader.biHeight = -g_frameHeight;
+            g_bmi.bmiHeader.biPlanes = 1;
+            g_bmi.bmiHeader.biBitCount = 32;
+            g_bmi.bmiHeader.biCompression = BI_RGB;
+            LeaveCriticalSection(&g_cs);
+        }
+
+        HBRUSH hDarkBrush = CreateSolidBrush(RGB(18, 19, 23));
 
         WNDCLASSW wc = {};
         wc.lpfnWndProc = WndProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = hDarkBrush;
         wc.lpszClassName = L"MgrWindow";
         RegisterClassW(&wc);
 
@@ -910,14 +1106,17 @@ namespace RemoteWindow {
         vc.lpfnWndProc = VideoWndProc;
         vc.hInstance = hInst;
         vc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        vc.hbrBackground = hDarkBrush;
         vc.lpszClassName = L"MgrVideoWnd";
         RegisterClassW(&vc);
 
         g_hwnd = CreateWindowExW(0, L"MgrWindow", L"LanRemote",
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE,
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_MAXIMIZE | WS_CLIPCHILDREN,
             CW_USEDEFAULT, CW_USEDEFAULT, 1920, 1080, 0, 0, hInst, 0);
 
         if (g_hwnd) {
+            ClipboardManager::Initialize(g_hwnd);
+
             int tbHeight = GetToolbarHeight(g_hwnd);
             RECT r = {};
             GetClientRect(g_hwnd, &r);
@@ -931,6 +1130,11 @@ namespace RemoteWindow {
                 g_hwnd, NULL, hInst, NULL
             );
 
+            ShowWindow(g_hwnd, SW_SHOWMAXIMIZED);
+            UpdateWindow(g_hwnd);
+            ShowWindow(g_hVideoWnd, SW_SHOW);
+            UpdateWindow(g_hVideoWnd);
+
             SetTimer(g_hwnd, 1, 1000, NULL);
             g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
         }
@@ -938,7 +1142,12 @@ namespace RemoteWindow {
     }
 
     void UpdateFrame(const Protocol::VideoDeltaHeader& delta, const char* jpegData, int jpegSize) {
-        if (jpegSize <= 0 || !jpegData || !g_tjDecompressor) return;
+        if (jpegSize <= 0 || !jpegData) return;
+        EnsureCriticalSection();
+        if (!g_tjDecompressor) {
+            g_tjDecompressor = tjInitDecompress();
+        }
+        if (!g_tjDecompressor) return;
 
         // 1. Kiểm tra an toàn biên: tọa độ và kích thước không âm, không vượt giới hạn thực tế
         if (delta.x < 0 || delta.y < 0 || delta.width <= 0 || delta.height <= 0) return;
@@ -995,22 +1204,89 @@ namespace RemoteWindow {
             g_streamFrameCount++;
             g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
 
-            if (g_hVideoWnd) {
-                InvalidateRect(g_hVideoWnd, NULL, FALSE);
-                g_renderFrameCount++;
-            }
         }
 
         LeaveCriticalSection(&g_cs);
+
+        // Luôn giải phóng critical section trước khi phát tín hiệu cho GUI thread để chống Deadlock 100%
+        if (decompRes == 0 && g_hVideoWnd) {
+            InvalidateRect(g_hVideoWnd, NULL, FALSE);
+            bool expected = false;
+            if (g_paintPending.compare_exchange_strong(expected, true)) {
+                PostMessageW(g_hVideoWnd, WM_USER_NEW_FRAME, 0, 0);
+            }
+        }
+    }
+
+    void PresentFrame() {
+        if (g_hVideoWnd) {
+            InvalidateRect(g_hVideoWnd, NULL, FALSE);
+            bool expected = false;
+            if (g_paintPending.compare_exchange_strong(expected, true)) {
+                PostMessageW(g_hVideoWnd, WM_USER_NEW_FRAME, 0, 0);
+            }
+        }
+    }
+
+    void UpdateRawFrame(int x, int y, int w, int h, const uint32_t* rawPixels, bool repaint) {
+        if (!rawPixels || w <= 0 || h <= 0 || x < 0 || y < 0) return;
+        int reqW = x + w;
+        int reqH = y + h;
+        if (reqW > 16384 || reqH > 16384) return;
+
+        EnsureCriticalSection();
+        EnterCriticalSection(&g_cs);
+
+        bool needRealloc = (g_frameWidth < reqW || g_frameHeight < reqH);
+        if (needRealloc) {
+            int newW = (std::max)(g_frameWidth, reqW);
+            int newH = (std::max)(g_frameHeight, reqH);
+            std::vector<uint32_t> newPixels(newW * newH, 0);
+            if (g_frameWidth > 0 && g_frameHeight > 0) {
+                int copyW = (std::min)(g_frameWidth, newW);
+                int copyH = (std::min)(g_frameHeight, newH);
+                for (int r = 0; r < copyH; ++r) {
+                    std::memcpy(&newPixels[r * newW], &g_framePixels[r * g_frameWidth], copyW * sizeof(uint32_t));
+                }
+            }
+            g_framePixels = std::move(newPixels);
+            g_frameWidth = newW;
+            g_frameHeight = newH;
+
+            std::memset(&g_bmi, 0, sizeof(g_bmi));
+            g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            g_bmi.bmiHeader.biWidth = g_frameWidth;
+            g_bmi.bmiHeader.biHeight = -g_frameHeight;
+            g_bmi.bmiHeader.biPlanes = 1;
+            g_bmi.bmiHeader.biBitCount = 32;
+            g_bmi.bmiHeader.biCompression = BI_RGB;
+        }
+
+        for (int r = 0; r < h; ++r) {
+            std::memcpy(&g_framePixels[(y + r) * g_frameWidth + x],
+                        &rawPixels[r * w],
+                        w * sizeof(uint32_t));
+        }
+        g_streamFrameCount++;
+        g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
+        LeaveCriticalSection(&g_cs);
+
+        if (repaint) {
+            PresentFrame();
+        }
     }
 
     void Cleanup() {
+        g_paintPending.store(false, std::memory_order_relaxed);
         if (g_hwnd) {
+            ClipboardManager::Cleanup(g_hwnd);
             KillTimer(g_hwnd, 1);
             g_hwnd = NULL;
         }
         g_hVideoWnd = NULL;
         ChatWindow::Cleanup();
+        RfbInspector::Close();
+        EnsureCriticalSection();
         EnterCriticalSection(&g_cs);
         g_framePixels.clear();
         g_frameWidth = 0;
@@ -1020,6 +1296,15 @@ namespace RemoteWindow {
             g_tjDecompressor = nullptr;
         }
         LeaveCriticalSection(&g_cs);
-        DeleteCriticalSection(&g_cs);
+    }
+
+    bool IsFullscreen() {
+        return g_isFullscreen;
+    }
+
+    void ToggleFullscreen() {
+        if (g_hwnd) {
+            ToggleFullscreenInternal(g_hwnd);
+        }
     }
 }

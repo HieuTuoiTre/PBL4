@@ -19,4 +19,12 @@ namespace ScreenCapture {
 
     // 5. Yêu cầu gửi toàn bộ màn hình (Full-Frame) ở khung kế tiếp (khi Manager mới kết nối)
     void ForceFullFrame();
+
+    // 6. Cấu hình chất lượng video động (Quality Preset & Target FPS)
+    void SetVideoConfig(uint8_t qualityPreset, uint8_t targetFps);
+    uint8_t GetQualityPreset();
+    uint8_t GetTargetFps();
+
+    // 7. Lấy con trỏ đệm pixel 32-bit BGRX thô (dùng cho VNC Raw Encoding khi Client không hỗ trợ Tight)
+    const uint32_t* GetCurrentFramePixels(int& outWidth, int& outHeight);
 }
