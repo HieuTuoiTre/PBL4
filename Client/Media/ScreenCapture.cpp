@@ -19,11 +19,9 @@ namespace {
     unsigned long g_jpegBufSize = 0;
 
     // ==========================================
-    // ĐO TỐC ĐỘ MẠNG THỜI GIAN THỰC & PROGRESSIVE REFINEMENT
+    // CỐ ĐỊNH CHẤT LƯỢNG MỨC VỪA PHẢI (BALANCED) & TIẾT KIỆM BĂNG THÔNG
     // ==========================================
-    std::atomic<double> g_avgSendTimeMs(2.0); // Giả định ban đầu mạng rất tốt (<4ms)
-    std::atomic<uint8_t> g_qualityPreset(Protocol::QUALITY_AUTO);
-    std::atomic<uint8_t> g_targetFps(60);
+    std::atomic<uint8_t> g_targetFps(30);
     std::atomic<bool> g_forceFullFrame(false);
     bool g_needsRefinement = false;
     std::chrono::steady_clock::time_point g_lastMotionTime = std::chrono::steady_clock::now();
@@ -33,53 +31,14 @@ namespace {
         int subsamp;
     };
 
-    // Tự động nâng sàn chất lượng nếu mạng mạnh và phân cấp chất lượng theo diện tích thay đổi
+    // Mức nén chuẩn cân bằng tối ưu: Chất lượng 65, lấy mẫu màu TJSAMP_420 (YUV 4:2:0)
+    // Giữ hình ảnh và văn bản rõ nét, đồng thời tiết kiệm tối đa băng thông mạng (~1.5-2.5 Mbps ở 30 FPS)
     CompressionConfig GetCompressionConfig(int changedArea, int totalPixels) {
-        uint8_t preset = g_qualityPreset.load(std::memory_order_relaxed);
-        if (preset == Protocol::QUALITY_LOW) {
-            return { 30, TJSAMP_420 };
-        } else if (preset == Protocol::QUALITY_BALANCED) {
-            return { 60, TJSAMP_420 };
-        } else if (preset == Protocol::QUALITY_HIGH) {
-            return { 85, TJSAMP_420 };
-        }
-
-        double sendMs = g_avgSendTimeMs.load(std::memory_order_relaxed);
-        bool fastNetwork = (sendMs < 4.0);
-        bool slowNetwork = (sendMs > 12.0);
-
-        double ratio = (double)changedArea / (double)(totalPixels > 0 ? totalPixels : 1);
-
-        if (ratio >= 0.50) {
-            // Thay đổi diện rộng / Game 3D toàn cảnh / Video toàn màn hình
-            // Giới hạn băng thông trong khoảng 20 - 25 Mbps (mỗi frame ~50-65KB ở 1080p)
-            int q = slowNetwork ? 45 : (fastNetwork ? 52 : 48);
-            return { q, TJSAMP_420 };
-        } else if (ratio >= 0.25) {
-            // Vùng 3D của game có HUD/minimap cố định (thường chiếm 25% - 50% diện tích)
-            // Giới hạn băng thông ổn định dưới 20 - 25 Mbps
-            int q = slowNetwork ? 48 : (fastNetwork ? 56 : 52);
-            return { q, TJSAMP_420 };
-        } else if (ratio >= 0.10) {
-            // Thay đổi trung bình (kéo cửa sổ, cuộn văn bản)
-            int q = slowNetwork ? 65 : (fastNetwork ? 76 : 70);
-            return { q, TJSAMP_420 };
-        } else if (ratio >= 0.03) {
-            // Thay đổi nhỏ (gõ văn bản, mở menu xổ xuống)
-            int q = slowNetwork ? 78 : (fastNetwork ? 86 : 82);
-            return { q, TJSAMP_420 };
-        } else {
-            // Thay đổi rất nhỏ (con trỏ chuột, 1 dòng chữ, icon)
-            // TJSAMP_420 với Q82 chỉ mất ~1.5ms để nén, đảm bảo duy trì 60 FPS mượt mà tuyệt đối khi chuột di chuyển!
-            // Khi dừng di chuyển 150ms, tính năng Progressive Refinement sẽ tự động gửi khung TJSAMP_420 Q80 sắc nét tối ưu!
-            int q = slowNetwork ? 75 : 82;
-            return { q, TJSAMP_420 };
-        }
+        return { 65, TJSAMP_420 };
     }
 
-    // Nén khung hoàn thiện toàn màn hình (Progressive Refinement) sắc nét tối ưu với TJSAMP_420 Q80
-    // Thay vì gửi khung 1MB (TJSAMP_444 Q94) làm nghẽn socket và sụt FPS <10 khi đổi tab hoặc có thông báo,
-    // nén Q80 4:2:0 chỉ tốn ~4-5ms CPU và sinh ra gói chỉ ~80-120KB, truyền qua mạng chỉ mất 15-20ms.
+    // Nén khung hoàn thiện toàn màn hình (Progressive Refinement) sắc nét tối ưu khi dừng chuyển động
+    // Chỉ kích hoạt 1 lần duy nhất khi người dùng dừng tay 150ms để chữ không bị mờ
     bool EncodeRefinementFrame(const uint32_t* pixels, int width, int height,
                                std::vector<char>& outBuffer,
                                int& outX, int& outY, int& outWidth, int& outHeight) {
@@ -90,8 +49,6 @@ namespace {
         outWidth = width;
         outHeight = height;
 
-        CompressionConfig cfg = GetCompressionConfig(width * height, width * height);
-
         int compressRes = tjCompress2(
             g_tjCompressor,
             (const unsigned char*)pixels,
@@ -101,8 +58,8 @@ namespace {
             TJPF_BGRX,
             &g_jpegBuf,
             &g_jpegBufSize,
-            cfg.subsamp,
-            cfg.quality,
+            TJSAMP_420,
+            70, // Mức tinh chỉnh hình ảnh rõ nét vừa phải khi màn hình dừng
             TJFLAG_FASTDCT | TJFLAG_FASTUPSAMPLE
         );
 
@@ -662,7 +619,6 @@ namespace ScreenCapture {
     bool Initialize() {
         if (g_isInitialized) return true;
 
-        g_avgSendTimeMs.store(2.0, std::memory_order_relaxed);
         g_needsRefinement = false;
         g_lastMotionTime = std::chrono::steady_clock::now();
 
@@ -703,11 +659,7 @@ namespace ScreenCapture {
     }
 
     void ReportSendTime(double sendTimeMs) {
-        if (sendTimeMs <= 0.0) return;
-        double current = g_avgSendTimeMs.load(std::memory_order_relaxed);
-        // Exponential Moving Average: 85% lịch sử + 15% mẫu đo mới
-        double updated = 0.85 * current + 0.15 * sendTimeMs;
-        g_avgSendTimeMs.store(updated, std::memory_order_relaxed);
+        // Dự trữ nếu sau này cần phân tích độ trễ
     }
 
     void ForceFullFrame() {
@@ -737,21 +689,16 @@ namespace ScreenCapture {
     }
 
     void SetVideoConfig(uint8_t qualityPreset, uint8_t targetFps) {
-        if (qualityPreset <= Protocol::QUALITY_HIGH) {
-            g_qualityPreset.store(qualityPreset, std::memory_order_relaxed);
-        }
-        if (targetFps == 30 || targetFps == 60) {
-            g_targetFps.store(targetFps, std::memory_order_relaxed);
-        }
+        // Cố định chất lượng chuẩn vừa phải và 30 FPS
         ForceFullFrame();
     }
 
     uint8_t GetQualityPreset() {
-        return g_qualityPreset.load(std::memory_order_relaxed);
+        return Protocol::QUALITY_BALANCED;
     }
 
     uint8_t GetTargetFps() {
-        return g_targetFps.load(std::memory_order_relaxed);
+        return 30; // Cố định 30 FPS
     }
 
     const uint32_t* GetCurrentFramePixels(int& outWidth, int& outHeight) {

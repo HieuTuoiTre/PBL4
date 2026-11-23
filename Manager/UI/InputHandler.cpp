@@ -86,7 +86,7 @@ namespace InputHandler {
 
         // Truyền tải qua chuẩn giao thức VNC / RFB 3.8
         if (RfbClient::IsConnected()) {
-            bool isShift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            bool isShift = (GetKeyState(VK_SHIFT) < 0);
             RfbClient::SendKey(wp, isDown != 0, isShift);
         }
     }
