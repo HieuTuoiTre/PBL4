@@ -25,7 +25,7 @@ TcpClient g_controlClient;
 
 TcpClient g_audioClient;
 
-std::string g_managerSessionToken = Protocol::DEFAULT_AUTH_TOKEN;
+std::string g_managerSessionToken = "";
 
 void SetManagerSessionToken(const std::string& token) {
     g_managerSessionToken = token;
@@ -37,57 +37,98 @@ std::string GetManagerSessionToken() {
 
 bool ConnectAll(const std::string& ip, std::string& outError) {
 
-    // 1. Thử kết nối kênh Quản trị (Port 8080) và thực hiện xác thực phiên bảo mật (PIN + Salt)
+    // 1. Thử kết nối kênh Quản trị (Port 8080) và thực hiện xác thực Challenge-Response HMAC (không truyền PIN bản rõ)
     bool ctrlOk = false;
     std::string authError = "";
     if (g_controlClient.Connect(ip, Protocol::PORT_CONTROL)) {
-        Protocol::AuthRequestPayload authReq = {0};
-        strncpy_s(authReq.sessionToken, g_managerSessionToken.c_str(), sizeof(authReq.sessionToken) - 1);
-        authReq.clientVersion = Protocol::PROTOCOL_VERSION;
-        Crypto::GenerateRandomBytes(authReq.clientChallenge, sizeof(authReq.clientChallenge));
+        SOCKET ctrlSock = g_controlClient.GetConnectSocket();
 
-        if (g_controlClient.SendPacket(Protocol::MSG_AUTH_REQUEST, (const char*)&authReq, sizeof(authReq))) {
-            SOCKET ctrlSock = g_controlClient.GetConnectSocket();
-            fd_set readFds;
-            FD_ZERO(&readFds);
-            FD_SET(ctrlSock, &readFds);
-            timeval tv = { 3, 0 }; // 3s timeout
-            int selRet = select(0, &readFds, NULL, NULL, &tv);
-            if (selRet > 0) {
-                Protocol::PacketHeader respHeader = { (Protocol::MessageType)0, 0 };
-                if (g_controlClient.ReceiveExact((char*)&respHeader, sizeof(respHeader)) &&
-                    respHeader.type == Protocol::MSG_AUTH_RESPONSE &&
-                    respHeader.size == sizeof(Protocol::AuthResponsePayload)) {
-                    Protocol::AuthResponsePayload authResp = {0};
-                    if (g_controlClient.ReceiveExact((char*)&authResp, sizeof(authResp))) {
-                        if (authResp.status == Protocol::AUTH_SUCCESS) {
-                            // Tạo salt 32 bytes kết hợp từ cả Client và Manager
-                            uint8_t salt[32];
-                            std::memcpy(salt, authReq.clientChallenge, 16);
-                            std::memcpy(salt + 16, authResp.serverChallenge, 16);
+        auto waitReadable = [](SOCKET s, int sec) -> bool {
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(s, &fds);
+            timeval tv = { sec, 0 };
+            return select(0, &fds, NULL, NULL, &tv) > 0;
+        };
 
-                            uint8_t sessionKey[Crypto::KEY_SIZE];
-                            Crypto::DeriveKey(g_managerSessionToken, salt, sizeof(salt), sessionKey);
-                            g_controlClient.SetSessionKey(sessionKey);
-                            ctrlOk = true;
-                        } else {
-                            if (authResp.status == Protocol::AUTH_INVALID_TOKEN) {
-                                authError = "Mã PIN xác thực không chính xác! Vui lòng kiểm tra mã PIN hiển thị trên máy Client.";
-                            } else if (authResp.status == Protocol::AUTH_TIMEOUT) {
-                                authError = "Xác thực phiên bị quá thời gian chờ (Timeout).";
-                            } else if (authResp.status == Protocol::AUTH_VERSION_MISMATCH) {
-                                authError = "Phiên bản giao thức không tương thích giữa Manager và Client (Version Mismatch). Vui lòng cập nhật phần mềm lên cùng phiên bản.";
-                            } else if (authResp.status == Protocol::AUTH_REJECTED) {
-                                authError = "Kết nối bị từ chối do định dạng gói tin hoặc ranh giới phiên không hợp lệ.";
+        auto mapAuthError = [](const Protocol::AuthResponsePayload& authResp) -> std::string {
+            if (authResp.status == Protocol::AUTH_INVALID_TOKEN) {
+                return "Mã PIN xác thực không chính xác! Vui lòng kiểm tra mã PIN hiển thị trên máy Client.";
+            } else if (authResp.status == Protocol::AUTH_TIMEOUT) {
+                return "Xác thực phiên bị quá thời gian chờ (Timeout).";
+            } else if (authResp.status == Protocol::AUTH_VERSION_MISMATCH) {
+                return "Phiên bản giao thức không tương thích giữa Manager và Client (Version Mismatch). Vui lòng cập nhật phần mềm lên cùng phiên bản.";
+            } else if (authResp.status == Protocol::AUTH_REJECTED) {
+                if (authResp.message[0] != '\0') {
+                    return std::string("Kết nối bị từ chối: ") + authResp.message;
+                }
+                return "Kết nối bị từ chối do định dạng gói tin hoặc giới hạn thử mã PIN.";
+            }
+            return std::string("Máy Client từ chối kết nối: ") + authResp.message;
+        };
+
+        if (waitReadable(ctrlSock, 3)) {
+            Protocol::PacketHeader chalHeader = { (Protocol::MessageType)0, 0 };
+            if (g_controlClient.ReceiveExact((char*)&chalHeader, sizeof(chalHeader))) {
+                if (chalHeader.type == Protocol::MSG_AUTH_RESPONSE &&
+                    chalHeader.size == sizeof(Protocol::AuthResponsePayload)) {
+                    Protocol::AuthResponsePayload earlyResp = {0};
+                    if (g_controlClient.ReceiveExact((char*)&earlyResp, sizeof(earlyResp))) {
+                        earlyResp.message[sizeof(earlyResp.message) - 1] = '\0';
+                        authError = mapAuthError(earlyResp);
+                    }
+                } else if (chalHeader.type == Protocol::MSG_AUTH_CHALLENGE &&
+                           chalHeader.size == sizeof(Protocol::AuthChallengePayload)) {
+                    Protocol::AuthChallengePayload chal = {0};
+                    if (g_controlClient.ReceiveExact((char*)&chal, sizeof(chal))) {
+                        Protocol::AuthRequestPayload authReq = {0};
+                        authReq.clientVersion = Protocol::PROTOCOL_VERSION;
+                        Crypto::GenerateRandomBytes(authReq.clientChallenge, sizeof(authReq.clientChallenge));
+
+                        uint8_t salt[32];
+                        std::memcpy(salt, authReq.clientChallenge, 16);
+                        std::memcpy(salt + 16, chal.serverChallenge, 16);
+
+                        uint8_t proof[Crypto::SHA256_DIGEST_SIZE];
+                        Crypto::HmacSha256(
+                            reinterpret_cast<const uint8_t*>(g_managerSessionToken.data()),
+                            g_managerSessionToken.size(),
+                            salt, sizeof(salt), proof
+                        );
+                        std::memcpy(authReq.sessionToken, proof, sizeof(proof));
+
+                        if (g_controlClient.SendPacket(Protocol::MSG_AUTH_REQUEST, (const char*)&authReq, sizeof(authReq))) {
+                            if (waitReadable(ctrlSock, 3)) {
+                                Protocol::PacketHeader respHeader = { (Protocol::MessageType)0, 0 };
+                                if (g_controlClient.ReceiveExact((char*)&respHeader, sizeof(respHeader)) &&
+                                    respHeader.type == Protocol::MSG_AUTH_RESPONSE &&
+                                    respHeader.size == sizeof(Protocol::AuthResponsePayload)) {
+                                    Protocol::AuthResponsePayload authResp = {0};
+                                    if (g_controlClient.ReceiveExact((char*)&authResp, sizeof(authResp))) {
+                                        authResp.message[sizeof(authResp.message) - 1] = '\0';
+                                        if (authResp.status == Protocol::AUTH_SUCCESS &&
+                                            Crypto::ConstantTimeCompare(authResp.serverChallenge, chal.serverChallenge, 16)) {
+                                            uint8_t sessionKey[Crypto::KEY_SIZE];
+                                            Crypto::DeriveKey(g_managerSessionToken, salt, sizeof(salt), sessionKey);
+                                            g_controlClient.SetSessionKey(sessionKey);
+                                            std::memset(sessionKey, 0, sizeof(sessionKey));
+                                            ctrlOk = true;
+                                        } else {
+                                            authError = mapAuthError(authResp);
+                                        }
+                                    }
+                                }
                             } else {
-                                authError = std::string("Máy Client từ chối kết nối: ") + authResp.message;
+                                authError = "Quá thời gian chờ phản hồi xác thực từ máy Client (Timeout 3s).";
                             }
                         }
                     }
+                } else {
+                    authError = "Phản hồi bắt tay xác thực từ máy Client không hợp lệ.";
                 }
-            } else {
-                authError = "Quá thời gian chờ phản hồi xác thực từ máy Client (Timeout 3s).";
             }
+        } else {
+            authError = "Quá thời gian chờ thách thức xác thực từ máy Client (Timeout 3s).";
         }
         if (!ctrlOk) {
             g_controlClient.Close();

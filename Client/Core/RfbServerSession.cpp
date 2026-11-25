@@ -49,6 +49,15 @@ namespace {
     int16_t g_prevMouseY = -1;
 
     bool PerformHandshake() {
+        // Đặt timeout 5 giây cho toàn bộ pha bắt tay RFB (I-4)
+        SOCKET clientSock = g_server.GetClientSocket();
+        if (clientSock == INVALID_SOCKET) {
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
+            return false;
+        }
+        DWORD handshakeTimeout = 5000;
+        setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&handshakeTimeout, sizeof(handshakeTimeout));
+
         // State: RFBSTATE_PROTOCOL_VERSION (§7.1.1)
         SetState(Rfb::RFBSTATE_PROTOCOL_VERSION);
 
@@ -148,6 +157,13 @@ namespace {
             return false;
         }
 
+        // Khôi phục SO_RCVTIMEO = 0 sau khi bắt tay RFB hoàn tất (I-4)
+        SOCKET doneSock = g_server.GetClientSocket();
+        if (doneSock != INVALID_SOCKET) {
+            DWORD zeroTimeout = 0;
+            setsockopt(doneSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zeroTimeout, sizeof(zeroTimeout));
+        }
+
         // State: RFBSTATE_NORMAL (§7.5 & §7.6)
         SetState(Rfb::RFBSTATE_NORMAL);
         std::cout << "[RFB Server] Bắt tay RFB 3.8 hoàn tất thành công! Sẵn sàng nhận lệnh.\n";
@@ -158,7 +174,14 @@ namespace {
         // Ánh xạ sang cấu trúc MousePayload của InputInjector
         Protocol::MousePayload mp = { 0, 0, x, y, 0 };
 
-        // 1. Xử lý nút cuộn chuột (Wheel)
+        // 1. Di chuyển chuột tới tọa độ mới TRƯỚC khi bấm/nhả/cuộn (I-6)
+        if (x != g_prevMouseX || y != g_prevMouseY) {
+            mp.actionType = Protocol::MOUSE_ACTION_MOVE;
+            mp.buttonType = Protocol::BUTTON_NONE;
+            InputInjector::InjectMouse(mp);
+        }
+
+        // 2. Xử lý nút cuộn chuột (Wheel)
         if (buttonMask & Rfb::WHEEL_UP) {
             mp.actionType = Protocol::MOUSE_ACTION_WHEEL;
             mp.wheelDelta = 120;
@@ -169,7 +192,7 @@ namespace {
             InputInjector::InjectMouse(mp);
         }
 
-        // 2. Xử lý click/nhả các nút chuột
+        // 3. Xử lý click/nhả các nút chuột
         uint8_t changed = buttonMask ^ g_prevButtonMask;
 
         if (changed & Rfb::BUTTON_LEFT) {
@@ -190,13 +213,6 @@ namespace {
             InputInjector::InjectMouse(mp);
         }
 
-        // 3. Xử lý di chuyển chuột
-        if (x != g_prevMouseX || y != g_prevMouseY) {
-            mp.actionType = Protocol::MOUSE_ACTION_MOVE;
-            mp.buttonType = Protocol::BUTTON_NONE;
-            InputInjector::InjectMouse(mp);
-        }
-
         g_prevButtonMask = buttonMask;
         g_prevMouseX = x;
         g_prevMouseY = y;
@@ -209,12 +225,13 @@ namespace {
                 break;
             }
 
+            bool streamOk = true;
             switch (msgType) {
                 case Rfb::CLIENT_SET_PIXEL_FORMAT: {
                     char pad[3];
                     Rfb::RfbPixelFormat fmt;
                     if (!g_server.ReceiveExact(pad, 3) || !g_server.ReceiveExact((char*)&fmt, sizeof(fmt))) {
-                        break;
+                        streamOk = false;
                     }
                     break;
                 }
@@ -223,12 +240,14 @@ namespace {
                     uint8_t pad = 0;
                     uint16_t numEnc = 0;
                     if (!g_server.ReceiveExact((char*)&pad, 1) || !g_server.ReceiveExact((char*)&numEnc, 2)) {
+                        streamOk = false;
                         break;
                     }
                     numEnc = ntohs(numEnc);
                     std::vector<int32_t> encodings(numEnc);
                     if (numEnc > 0) {
                         if (!g_server.ReceiveExact((char*)encodings.data(), numEnc * sizeof(int32_t))) {
+                            streamOk = false;
                             break;
                         }
                     }
@@ -255,6 +274,7 @@ namespace {
                         !g_server.ReceiveExact((char*)&y, 2) ||
                         !g_server.ReceiveExact((char*)&w, 2) ||
                         !g_server.ReceiveExact((char*)&h, 2)) {
+                        streamOk = false;
                         break;
                     }
 
@@ -273,6 +293,7 @@ namespace {
                     if (!g_server.ReceiveExact((char*)&downFlag, 1) ||
                         !g_server.ReceiveExact((char*)&pad, 2) ||
                         !g_server.ReceiveExact((char*)&keysym, 4)) {
+                        streamOk = false;
                         break;
                     }
                     keysym = ntohl(keysym);
@@ -289,6 +310,7 @@ namespace {
                     if (!g_server.ReceiveExact((char*)&btnMask, 1) ||
                         !g_server.ReceiveExact((char*)&x, 2) ||
                         !g_server.ReceiveExact((char*)&y, 2)) {
+                        streamOk = false;
                         break;
                     }
                     ProcessPointerEvent(btnMask, (int16_t)ntohs(x), (int16_t)ntohs(y));
@@ -299,20 +321,33 @@ namespace {
                     char pad[3];
                     uint32_t len = 0;
                     if (!g_server.ReceiveExact(pad, 3) || !g_server.ReceiveExact((char*)&len, 4)) {
+                        streamOk = false;
                         break;
                     }
                     len = ntohl(len);
-                    if (len > 0 && len <= 1024 * 1024) {
+                    if (len > 1024 * 1024) {
+                        streamOk = false;
+                        break;
+                    }
+                    if (len > 0) {
                         std::vector<char> textBuf(len + 1, 0);
-                        g_server.ReceiveExact(textBuf.data(), len);
+                        if (!g_server.ReceiveExact(textBuf.data(), len)) {
+                            streamOk = false;
+                            break;
+                        }
                         // Cập nhật clipboard nếu có
                     }
                     break;
                 }
 
                 default:
-                    std::cerr << "[RFB Server] Bỏ qua gói tin không nhận diện được: " << (int)msgType << "\n";
+                    std::cerr << "[RFB Server] Gói tin không nhận diện được (ngắt để tránh lệch luồng): " << (int)msgType << "\n";
+                    streamOk = false;
                     break;
+            }
+
+            if (!streamOk) {
+                break;
             }
         }
 
@@ -330,10 +365,12 @@ namespace {
         uint64_t lastEmptySendTime = GetTickCount64();
 
         auto nextFrameTime = std::chrono::steady_clock::now();
-        const std::chrono::microseconds frameInterval(1000000 / 30); // Cố định 30 FPS ổn định
 
         while (g_isRunning && g_isClientConnected) {
-            nextFrameTime += frameInterval;
+            int fps = ScreenCapture::GetTargetFps();
+            if (fps < 5) fps = 5;
+            if (fps > 60) fps = 60;
+            nextFrameTime += std::chrono::microseconds(1000000 / fps);
 
             if (g_forceFull.exchange(false, std::memory_order_acq_rel)) {
                 ScreenCapture::ForceFullFrame();

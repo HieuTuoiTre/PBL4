@@ -15,7 +15,7 @@
 #endif
 
 namespace {
-    SOCKET g_udpSock = INVALID_SOCKET;
+    std::atomic<SOCKET> g_udpSock{INVALID_SOCKET};
     std::atomic<bool> g_isRunning(false);
     std::atomic<bool> g_isBusy(false);
     std::thread g_listenThread;
@@ -42,7 +42,8 @@ namespace {
     }
 
     void SendBroadcast(uint8_t type) {
-        if (g_udpSock == INVALID_SOCKET) return;
+        SOCKET sock = g_udpSock.load(std::memory_order_acquire);
+        if (sock == INVALID_SOCKET) return;
 
         Protocol::DiscoveryPacket pkt;
         FillPacket(pkt, type);
@@ -52,7 +53,7 @@ namespace {
         bcastAddr.sin_family = AF_INET;
         bcastAddr.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
         bcastAddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-        sendto(g_udpSock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
+        sendto(sock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
 
         // 2. Gửi vào Subnet Directed Broadcast của TẤT CẢ các card mạng (Wi-Fi, Ethernet, ZeroTier, VPN ảo)
         ULONG size = 0;
@@ -71,7 +72,7 @@ namespace {
                     ifBcast.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
                     ifBcast.sin_addr.s_addr = (row.dwAddr & row.dwMask) | (~row.dwMask);
 
-                    sendto(g_udpSock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&ifBcast, sizeof(ifBcast));
+                    sendto(sock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&ifBcast, sizeof(ifBcast));
                 }
             }
         }
@@ -81,31 +82,19 @@ namespace {
         loopbackAddr.sin_family = AF_INET;
         loopbackAddr.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
         inet_pton(AF_INET, "127.0.0.1", &loopbackAddr.sin_addr);
-        sendto(g_udpSock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&loopbackAddr, sizeof(loopbackAddr));
-
-        // 3. Gửi trực tiếp tới địa chỉ Subnet Broadcast của từng card mạng đang bật (Wi-Fi, Ethernet...)
-        INTERFACE_INFO ifList[24] = {};
-        DWORD bytesRet = 0;
-        if (WSAIoctl(g_udpSock, SIO_GET_INTERFACE_LIST, NULL, 0, &ifList, sizeof(ifList), &bytesRet, NULL, NULL) == 0) {
-            int count = bytesRet / sizeof(INTERFACE_INFO);
-            for (int i = 0; i < count; i++) {
-                u_long flags = ifList[i].iiFlags;
-                if ((flags & IFF_UP) && (flags & IFF_BROADCAST) && !(flags & IFF_LOOPBACK)) {
-                    sockaddr_in subBcast = ifList[i].iiBroadcastAddress.AddressIn;
-                    subBcast.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
-                    sendto(g_udpSock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&subBcast, sizeof(subBcast));
-                }
-            }
-        }
+        sendto(sock, (const char*)&pkt, sizeof(pkt), 0, (sockaddr*)&loopbackAddr, sizeof(loopbackAddr));
     }
 
     void ListenLoop() {
         while (g_isRunning) {
+            SOCKET sock = g_udpSock.load(std::memory_order_acquire);
+            if (sock == INVALID_SOCKET) break;
+
             sockaddr_in senderAddr = {};
             int senderLen = sizeof(senderAddr);
             Protocol::DiscoveryPacket recvPkt = {};
 
-            int bytes = recvfrom(g_udpSock, (char*)&recvPkt, sizeof(recvPkt), 0, (sockaddr*)&senderAddr, &senderLen);
+            int bytes = recvfrom(sock, (char*)&recvPkt, sizeof(recvPkt), 0, (sockaddr*)&senderAddr, &senderLen);
             if (bytes <= 0) {
                 if (!g_isRunning) break;
                 int err = WSAGetLastError();
@@ -125,7 +114,7 @@ namespace {
                     sockaddr_in replyAddr = senderAddr;
                     replyAddr.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
 
-                    sendto(g_udpSock, (const char*)&respPkt, sizeof(respPkt), 0, (sockaddr*)&replyAddr, sizeof(replyAddr));
+                    sendto(sock, (const char*)&respPkt, sizeof(respPkt), 0, (sockaddr*)&replyAddr, sizeof(replyAddr));
                 }
             }
         }
@@ -137,33 +126,33 @@ namespace DiscoveryResponder {
     bool Start() {
         if (g_isRunning) return true;
 
-        g_udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (g_udpSock == INVALID_SOCKET) {
+        SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s == INVALID_SOCKET) {
             return false;
         }
 
         // Vô hiệu hóa lỗi WSAECONNRESET do gói tin ICMP Port Unreachable trả về
         BOOL bNewBehavior = FALSE;
         DWORD dwBytesReturned = 0;
-        WSAIoctl(g_udpSock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
+        WSAIoctl(s, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
 
         BOOL reuse = TRUE;
-        setsockopt(g_udpSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 
         BOOL bcast = TRUE;
-        setsockopt(g_udpSock, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
+        setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
 
         sockaddr_in bindAddr = {};
         bindAddr.sin_family = AF_INET;
         bindAddr.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
         bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-        if (bind(g_udpSock, (sockaddr*)&bindAddr, sizeof(bindAddr)) == SOCKET_ERROR) {
-            closesocket(g_udpSock);
-            g_udpSock = INVALID_SOCKET;
+        if (bind(s, (sockaddr*)&bindAddr, sizeof(bindAddr)) == SOCKET_ERROR) {
+            closesocket(s);
             return false;
         }
 
+        g_udpSock.store(s, std::memory_order_release);
         g_isRunning = true;
         g_listenThread = std::thread(ListenLoop);
 
@@ -179,9 +168,9 @@ namespace DiscoveryResponder {
         SendBroadcast(Protocol::DISCOVERY_BYE);
 
         g_isRunning = false;
-        if (g_udpSock != INVALID_SOCKET) {
-            closesocket(g_udpSock);
-            g_udpSock = INVALID_SOCKET;
+        SOCKET s = g_udpSock.exchange(INVALID_SOCKET, std::memory_order_acq_rel);
+        if (s != INVALID_SOCKET) {
+            closesocket(s);
         }
 
         if (g_listenThread.joinable()) {

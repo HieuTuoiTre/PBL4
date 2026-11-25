@@ -77,17 +77,17 @@ Trạng thái tổng thể: **ĐẠT QUALITY GATE TOÀN DIỆN (100% Hoàn thàn
 
 **Việc cần làm**
 
-- [ ] Lưu preset và FPS bằng atomic state hợp lệ.
-- [ ] Xác thực preset và FPS trước khi cập nhật.
-- [ ] Ánh xạ preset sang tham số TurboJPEG hoặc cấu hình nén thực tế:
+- [x] Lưu preset và FPS bằng atomic state hợp lệ (`std::atomic<uint8_t> g_qualityPreset`, `g_targetFps`).
+- [x] Xác thực preset (`<= QUALITY_HIGH`) và clamp FPS (`[5, 60]`) trước khi cập nhật.
+- [x] Ánh xạ preset sang tham số TurboJPEG hoặc cấu hình nén thực tế:
   - LOW
   - BALANCED
   - HIGH
   - AUTO
-- [ ] Áp dụng target FPS vào pacing của capture loop.
-- [ ] Gọi `ForceFullFrame()` khi thay đổi cấu hình để tránh giữ frame cũ.
-- [ ] Cập nhật encoding và FPS một cách atomic để các getter không quan sát trạng thái nửa cập nhật.
-- [ ] Kích hoạt lại test 3.2 trong suite M4.
+- [x] Áp dụng target FPS vào pacing của capture loop (`RfbServerSession::TransmitLoop`).
+- [x] Gọi `ForceFullFrame()` khi thay đổi cấu hình để tránh giữ frame cũ.
+- [x] Cập nhật encoding và FPS một cách atomic để các getter không quan sát trạng thái nửa cập nhật.
+- [x] Kích hoạt lại test 3.2 trong suite M4 (`14/14` pass).
 - [ ] Bổ sung test cho preset không hợp lệ và FPS ngoài phạm vi.
 
 **Liên quan**
@@ -214,38 +214,39 @@ Trạng thái tổng thể: **ĐẠT QUALITY GATE TOÀN DIỆN (100% Hoàn thàn
 - [x] Xóa wrapper hoặc branch stale không còn call site (Đã dọn dẹp các branch RFB button và quality slider cũ).
 - [x] Không xóa API chưa xác định vẫn có thể dùng bởi external integration trước khi xác nhận call graph.
 
-## Verification hiện tại
+## Verification hiện tại (Cập nhật 2026-11-25 — Sau vá lỗi Phase 1–3)
 
 | Verification | Kết quả |
 |---|---|
 | CRC32 và file transfer unit suite (M3 - R-3) | 25/25 pass (100% - bao gồm Group 7 Path Traversal) |
-| Authentication handshake & PIN suite (R-1 & N-1) | 8/8 pass (100% - Session PIN, Bidirectional Salt, Key Uniqueness, Version Mismatch, Packet Validation) |
+| Remote features suite (M4 - R-2) | 14/14 pass (100% - Dynamic Quality `AUTO..HIGH` & FPS Presets) |
+| Crypto security suite (R-4, C-1, C-2) | 8/8 suites pass (100% - RFC 4231 HMAC-SHA256, OS CSPRNG, RFC 8439 AEAD, PBKDF2-HMAC-SHA256, 218.386 MB/s) |
+| Authentication handshake & PIN suite (R-1, N-1, C-2) | 8/8 pass (100% - `MSG_AUTH_CHALLENGE` HMAC-SHA256, Challenge Salt, Key Uniqueness, Version Mismatch, Packet Validation) |
 | RFB port 5900 authorization gate (CR-1) | 3/3 pass (100% - Chặn peer chưa xác thực, cho phép peer hợp lệ) |
-| Remote features suite (M4 - R-2) | 14/14 pass (100% - Dynamic Quality & FPS Presets) |
-| Crypto security suite (R-4) | 7/7 suites pass (100% - ChaCha20-Poly1305, Nonce uniqueness, >250 MB/s) |
-| Machine-readable CI Report (N-2) | tests/test_summary.json xuất tự động |
-| Manager/Client build (R-5) | Build thành công (Exit 0) |
-| Build script error handling (R-5) | Pass (Bắt errorlevel và dừng ngay khi lỗi) |
+| Manager/Client build (`build.bat test`) | Build thành công (Exit 0, `-lbcrypt`, kiểm tra `errorlevel` sau từng target) |
+
+## Tổng hợp vá lỗi bảo mật, ổn định và hiệu năng (Phase 1–3)
+
+- **Phase 1 (Critical C-1..C-6):** Thay CSPRNG bằng Windows `BCryptGenRandom` (`Shared/Crypto.cpp`), bổ sung HMAC-SHA256 & PBKDF2-HMAC-SHA256 (10.000 vòng), chuyển xác thực PIN sang Challenge-Response HMAC qua `MSG_AUTH_CHALLENGE` + rate-limit chống brute-force theo IP, chặn hạ cấp gói tin rõ sau khi thiết lập khóa phiên (`SessionManager.cpp`, `DataReceiver.cpp`), sửa `CRITICAL_SECTION` chưa khởi tạo trong `ClientChatWindow.cpp`, chặn OOM/overflow phân bổ buffer trên RFB (`RfbClientSession.cpp`, `RfbMessages.h`), khắc phục vòng đời GDI handle (`TaskManagerWindow.cpp`, `FileExplorerWindow.cpp`, `RemoteWindow.cpp`).
+- **Phase 2 (Important I-1..I-9):** Giải phóng khóa khi giải mã JPEG ngoài `CRITICAL_SECTION` + sửa lag `Ctrl+M`/fullscreen (`AudioPlayer.cpp`, `RemoteWindow.cpp`), bảo vệ `TcpServer`/`TcpClient` bằng `stateMutex`/`CopySessionKey` (`Network.h`, `Network.cpp`), xác thực IP trên cổng Audio 8082 (`SessionManager.cpp`), bổ sung timeout handshake RFB 5s, thoát vòng lặp khi lệch luồng, FPS động và gửi move trước click (`RfbServerSession.cpp`), dọn COM DXGI khi lỗi + tránh cấp phát lại GDI mỗi frame + kiểm tra biên `SetVideoConfig` (`ScreenCapture.cpp`), đồng bộ UDP discovery (`DiscoveryScanner.cpp`, `DiscoveryResponder.cpp`), sửa race UI (`FileExplorerWindow.cpp`, `ChatWindow.cpp`), chặn tên thiết bị đặc biệt Windows (`PathSanitizer.cpp`) và chia cho 0 / tự kill tiến trình (`SysMonitor.cpp`).
+- **Phase 3 (C-7, C-8, I-10):** Chuyển các thread mạng/truyền tệp sang joinable (`SessionManager.cpp`, `FileExplorerWindow.cpp`, `ClientMain.cpp`), bảo vệ `g_alertMessage` bằng `std::mutex` (`StatusOverlay.cpp`), giữ lại mã nguồn `tests/` trong `.gitignore` (chỉ ignore `tests/*.exe`, `tests/test_summary.json`), rút gọn `build.bat` kèm `-lbcrypt` và `errorlevel`.
 
 ## Thứ tự triển khai đề xuất
 
 1. Fix R-4 và R-5 build/test verification. [HOÀN THÀNH]
 2. Fix R-3 path containment. [HOÀN THÀNH]
-3. Fix R-1 và CR-1 authentication boundaries (Bảo mật mạng, Session Token & RFB Gate). [HOÀN THÀNH]
+3. Fix R-1 và CR-1 authentication boundaries (Bảo mật mạng, Challenge-Response HMAC & RFB Gate). [HOÀN THÀNH]
 4. Fix R-2 dynamic video quality. [HOÀN THÀNH]
 5. Hoàn thành Nit test consistency và observability (N-1, N-2, N-3). [HOÀN THÀNH]
-6. Chạy lại toàn bộ suite trước khi approve. [HOÀN TẤT TOÀN DIỆN]
+6. Hoàn thành toàn bộ Phase 1–3 review fixes và chạy lại 5 suite kiểm thử. [HOÀN TẤT TOÀN DIỆN]
 
 ## Quality Gate trước merge
 
-- [x] Không còn Critical issue (CR-1: Cổng 5900 - Bắt buộc xác thực RFB).
-- [x] Không còn Required issue (R-1: Auth token - CSPRNG PIN + Bidirectional Salt 32-byte).
-- [x] Path traversal prevention (R-3 - Canonical Containment).
-- [x] Crypto test build và pass (R-4 - 7/7 suites pass).
-- [x] Remote features test (R-2 - 14/14 pass).
-- [x] File transfer test (R-3 - 25/25 pass).
-- [x] Auth handshake test (R-1 & N-1 - 8/8 pass).
-- [x] RFB authorization gate test (CR-1 - 3/3 pass).
-- [x] Toàn bộ các hạng mục Nit N-1, N-2, N-3 hoàn thành.
-- [x] Manager/Client build exit 0.
-- [x] Build script trả exit code khác 0 khi có bước lỗi (R-5).
+- [x] Không còn Critical issue (C-1..C-8, CR-1).
+- [x] Không còn Required / Important issue (R-1..R-5, I-1..I-10).
+- [x] Crypto test build và pass (8/8 suites pass).
+- [x] Remote features test pass (14/14 pass).
+- [x] File transfer test pass (25/25 pass).
+- [x] Auth handshake test pass (8/8 pass).
+- [x] RFB authorization gate test pass (3/3 pass).
+- [x] Manager/Client build exit 0 (`build.bat test` + 3 security/auth suites).

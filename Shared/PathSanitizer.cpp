@@ -3,6 +3,21 @@
 #include <cctype>
 
 namespace {
+    // Kiểm tra tên thiết bị đặc biệt của Windows (CON, PRN, AUX, NUL, COM1..9, LPT1..9)
+    bool IsWindowsReservedName(const std::string& component) {
+        if (component.empty()) return false;
+        size_t dotPos = component.find('.');
+        std::string stem = (dotPos == std::string::npos) ? component : component.substr(0, dotPos);
+        for (char& ch : stem) {
+            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        }
+        if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL") return true;
+        if (stem.size() == 4 && (stem.rfind("COM", 0) == 0 || stem.rfind("LPT", 0) == 0)) {
+            if (stem[3] >= '1' && stem[3] <= '9') return true;
+        }
+        return false;
+    }
+
     // Helper so sánh chuỗi path component không phân biệt hoa thường trên Windows
     bool EqualPathComponent(const std::filesystem::path& a, const std::filesystem::path& b) {
 #if defined(_WIN32)
@@ -65,6 +80,14 @@ namespace PathSanitizer {
                     return false;
                 }
 
+                // Cấm khoảng trắng hoặc dấu chấm ở cuối thành phần và tên thiết bị đặc biệt của Windows
+                if (partStr.back() == ' ' || partStr.back() == '.') {
+                    return false;
+                }
+                if (IsWindowsReservedName(partStr)) {
+                    return false;
+                }
+
                 hasValidComponent = true;
             }
 
@@ -98,8 +121,8 @@ namespace PathSanitizer {
                 ++itCand;
             }
 
-            // candidate phải chứa toàn bộ các thành phần của base
-            return (itBase == canonicalBase.end());
+            // candidate phải nằm bên dưới thư mục base (không cho phép trùng chính base)
+            return (itBase == canonicalBase.end() && itCand != canonicalCand.end());
         } catch (...) {
             return false;
         }

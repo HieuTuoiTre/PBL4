@@ -1,4 +1,6 @@
 #include "Crypto.h"
+#include <windows.h>
+#include <bcrypt.h>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -13,19 +15,13 @@ namespace Crypto {
 
     void GenerateRandomBytes(uint8_t* out, size_t len) {
         if (!out || len == 0) return;
-        thread_local std::mt19937_64 rng([]() {
-            std::random_device rd;
-            return ((uint64_t)rd() << 32) ^ rd();
-        }());
-        size_t i = 0;
-        while (i + sizeof(uint64_t) <= len) {
-            uint64_t val = rng();
-            std::memcpy(out + i, &val, sizeof(uint64_t));
-            i += sizeof(uint64_t);
-        }
-        if (i < len) {
-            uint64_t val = rng();
-            std::memcpy(out + i, &val, len - i);
+        NTSTATUS status = BCryptGenRandom(NULL, out, static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (status == 0) return;
+
+        // Fallback via hardware/OS entropy device per byte (never mt19937)
+        std::random_device rd;
+        for (size_t i = 0; i < len; ++i) {
+            out[i] = static_cast<uint8_t>(rd() & 0xFF);
         }
     }
 
@@ -188,14 +184,76 @@ namespace Crypto {
         return Sha256Hex(reinterpret_cast<const uint8_t*>(input.data()), input.size());
     }
 
-    void DeriveKey(const std::string& passwordOrToken, const uint8_t* salt, size_t saltLen, uint8_t outKey[KEY_SIZE]) {
+    void HmacSha256(const uint8_t* key, size_t keyLen,
+                    const uint8_t* data, size_t dataLen,
+                    uint8_t outMac[SHA256_DIGEST_SIZE]) {
+        uint8_t kPad[64] = {0};
+        if (key && keyLen > 0) {
+            if (keyLen > 64) {
+                Sha256(key, keyLen, kPad);
+            } else {
+                std::memcpy(kPad, key, keyLen);
+            }
+        }
+
+        uint8_t iKeyPad[64];
+        uint8_t oKeyPad[64];
+        for (size_t i = 0; i < 64; ++i) {
+            iKeyPad[i] = kPad[i] ^ 0x36;
+            oKeyPad[i] = kPad[i] ^ 0x5c;
+        }
+
+        uint8_t innerHash[SHA256_DIGEST_SIZE];
         Sha256Context ctx;
         ctx.Init();
-        ctx.Update(reinterpret_cast<const uint8_t*>(passwordOrToken.data()), passwordOrToken.size());
-        if (salt && saltLen > 0) {
-            ctx.Update(salt, saltLen);
+        ctx.Update(iKeyPad, 64);
+        if (data && dataLen > 0) {
+            ctx.Update(data, dataLen);
         }
-        ctx.Final(outKey);
+        ctx.Final(innerHash);
+
+        ctx.Init();
+        ctx.Update(oKeyPad, 64);
+        ctx.Update(innerHash, SHA256_DIGEST_SIZE);
+        ctx.Final(outMac);
+
+        std::memset(kPad, 0, sizeof(kPad));
+        std::memset(iKeyPad, 0, sizeof(iKeyPad));
+        std::memset(oKeyPad, 0, sizeof(oKeyPad));
+        std::memset(innerHash, 0, sizeof(innerHash));
+    }
+
+    void DeriveKey(const std::string& passwordOrToken, const uint8_t* salt, size_t saltLen, uint8_t outKey[KEY_SIZE]) {
+        // PBKDF2-HMAC-SHA256 with 10,000 iterations (single 32-byte block INT_32_BE(1))
+        constexpr uint32_t PBKDF2_ITERATIONS = 10000;
+        const uint8_t* pwdBytes = reinterpret_cast<const uint8_t*>(passwordOrToken.data());
+        size_t pwdLen = passwordOrToken.size();
+
+        std::vector<uint8_t> initMsg((salt && saltLen > 0 ? saltLen : 0) + 4);
+        if (salt && saltLen > 0) {
+            std::memcpy(initMsg.data(), salt, saltLen);
+        }
+        size_t offset = (salt && saltLen > 0) ? saltLen : 0;
+        initMsg[offset + 0] = 0x00;
+        initMsg[offset + 1] = 0x00;
+        initMsg[offset + 2] = 0x00;
+        initMsg[offset + 3] = 0x01;
+
+        uint8_t u[SHA256_DIGEST_SIZE];
+        uint8_t t[SHA256_DIGEST_SIZE];
+        HmacSha256(pwdBytes, pwdLen, initMsg.data(), initMsg.size(), u);
+        std::memcpy(t, u, SHA256_DIGEST_SIZE);
+
+        for (uint32_t iter = 1; iter < PBKDF2_ITERATIONS; ++iter) {
+            HmacSha256(pwdBytes, pwdLen, u, SHA256_DIGEST_SIZE, u);
+            for (size_t j = 0; j < SHA256_DIGEST_SIZE; ++j) {
+                t[j] ^= u[j];
+            }
+        }
+
+        std::memcpy(outKey, t, KEY_SIZE);
+        std::memset(u, 0, sizeof(u));
+        std::memset(t, 0, sizeof(t));
     }
 
     // =========================================================================

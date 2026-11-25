@@ -84,7 +84,8 @@ namespace Protocol
         MSG_FILE_CANCEL = 29,
         MSG_FILE_ERROR = 30,
         MSG_SPECIAL_ACTION = 31,
-        MSG_VIDEO_CONFIG = 32
+        MSG_VIDEO_CONFIG = 32,
+        MSG_AUTH_CHALLENGE = 33
     };
 
     // --- 4. HẰNG SỐ VÀ ENUM ĐIỀU KHIỂN CHUỘT / PHÍM NỘI BỘ ---
@@ -112,8 +113,6 @@ namespace Protocol
 
     // --- 6. XÁC THỰC PHIÊN BẢO MẬT (SESSION AUTHENTICATION) ---
     constexpr uint32_t PROTOCOL_VERSION = 1;
-    // Token dự phòng tương thích cho test suite (mặc định môi trường chạy thật dùng mã PIN ngẫu nhiên 6 chữ số)
-    constexpr const char* DEFAULT_AUTH_TOKEN = "PBL4_REMOTE_DESKTOP_SECRET_2026";
 
     enum AuthStatus : uint8_t {
         AUTH_SUCCESS = 0,
@@ -123,8 +122,12 @@ namespace Protocol
         AUTH_VERSION_MISMATCH = 4
     };
 
+    struct AuthChallengePayload {
+        uint8_t serverChallenge[16]; // 16-byte random challenge từ Client trước khi xác thực
+    };
+
     struct AuthRequestPayload {
-        char sessionToken[64];
+        char sessionToken[64];       // Chứa 32-byte HMAC-SHA256(PIN, clientChallenge || serverChallenge) + zero-padding
         uint32_t clientVersion;
         uint8_t clientChallenge[16]; // 16-byte random challenge / salt từ Manager
     };
@@ -254,6 +257,7 @@ namespace Protocol
 
     // --- 15. COMPILE-TIME PACKING & SIZE ASSERTIONS (N-1) ---
     static_assert(sizeof(PacketHeader) == 5, "PacketHeader must be exactly 5 bytes");
+    static_assert(sizeof(AuthChallengePayload) == 16, "AuthChallengePayload must be 16 bytes");
     static_assert(sizeof(AuthRequestPayload) == 84, "AuthRequestPayload must be 84 bytes");
     static_assert(sizeof(AuthResponsePayload) == 81, "AuthResponsePayload must be 81 bytes");
     static_assert(sizeof(SpecialActionPayload) == 1, "SpecialActionPayload must be 1 byte");
@@ -294,6 +298,7 @@ namespace Protocol
             case MSG_CHAT_MESSAGE:
             case MSG_AUTH_REQUEST:
             case MSG_AUTH_RESPONSE:
+            case MSG_AUTH_CHALLENGE:
             case MSG_ENCRYPTED_CONTROL:
             case MSG_CLIPBOARD_TEXT:
             case MSG_FILE_UPLOAD_REQ:
@@ -321,6 +326,9 @@ namespace Protocol
             case MSG_FILE_BATCH_END:
             case MSG_FILE_CANCEL:
                 return (size == 0);
+
+            case MSG_AUTH_CHALLENGE:
+                return (size == sizeof(AuthChallengePayload));
 
             case MSG_AUTH_REQUEST:
                 return (size == sizeof(AuthRequestPayload));

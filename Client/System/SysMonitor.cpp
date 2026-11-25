@@ -58,7 +58,7 @@ namespace SysMonitor {
         // 2. LẤY PHẦN TRĂM Ổ ĐĨA C: SỬ DỤNG
         // ==========================================
         ULARGE_INTEGER freeBytes, totalBytes, totalFreeBytes;
-        if (GetDiskFreeSpaceExA("C:\\", &freeBytes, &totalBytes, &totalFreeBytes)) {
+        if (GetDiskFreeSpaceExA("C:\\", &freeBytes, &totalBytes, &totalFreeBytes) && totalBytes.QuadPart > 0) {
             uint64_t usedBytes = totalBytes.QuadPart - totalFreeBytes.QuadPart;
             payload.diskUsage = (uint8_t)((usedBytes * 100) / totalBytes.QuadPart);
         }
@@ -149,8 +149,8 @@ namespace SysMonitor {
     // 5. BUỘC DỪNG TIẾN TRÌNH THEO PID
     // ==========================================
     bool KillProcess(uint32_t pid) {
-        // Chặn không cho phép tắt các tiến trình cốt lõi của hệ thống (PID 0: Idle, PID 4: System) để chống BSOD
-        if (pid <= 4) return false;
+        // Chặn không cho phép tắt tiến trình hiện tại hoặc tiến trình cốt lõi của hệ thống (PID 0: Idle, PID 4: System)
+        if (pid <= 4 || pid == GetCurrentProcessId()) return false;
 
         HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
         if (hProcess == NULL) {

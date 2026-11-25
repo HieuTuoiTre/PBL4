@@ -24,6 +24,7 @@ class TcpServer{
         std::atomic<SOCKET> clientSocket{INVALID_SOCKET};
         int serverPort = 0;
         std::mutex sendMutex; // THÊM KHÓA CHO SERVER
+        mutable std::mutex stateMutex;
         uint8_t m_sessionKey[32] = {0};
         std::atomic<bool> m_hasSessionKey{false};
         std::string clientIP = "";
@@ -46,18 +47,24 @@ class TcpServer{
         bool SendEncryptedPacket(Protocol::MessageType type, const char* payload, int payloadSize);
         bool SendRaw(const char* data, int length);
         bool ReceiveExact(char* buffer, int length);
-        bool CanSendWithoutBlocking();
 
         void SetSessionKey(const uint8_t key[32]) {
+            std::lock_guard<std::mutex> lock(stateMutex);
             std::memcpy(m_sessionKey, key, 32);
-            m_hasSessionKey.store(true);
+            m_hasSessionKey.store(true, std::memory_order_release);
         }
         void ClearSessionKey() {
-            m_hasSessionKey.store(false);
+            std::lock_guard<std::mutex> lock(stateMutex);
+            m_hasSessionKey.store(false, std::memory_order_release);
             std::memset(m_sessionKey, 0, 32);
         }
-        bool HasSessionKey() const { return m_hasSessionKey.load(); }
-        const uint8_t* GetSessionKey() const { return m_hasSessionKey.load() ? m_sessionKey : nullptr; }
+        bool HasSessionKey() const { return m_hasSessionKey.load(std::memory_order_acquire); }
+        bool CopySessionKey(uint8_t outKey[32]) const {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            if (!m_hasSessionKey.load(std::memory_order_acquire)) return false;
+            std::memcpy(outKey, m_sessionKey, 32);
+            return true;
+        }
 
         SOCKET GetClientSocket() const { return clientSocket.load(); }
         std::string GetClientIP() const;
@@ -69,6 +76,7 @@ class TcpClient{
     private:
         std::atomic<SOCKET> connectSocket{INVALID_SOCKET};
         std::mutex sendMutex; // THÊM KHÓA CHO CLIENT
+        mutable std::mutex stateMutex;
         uint8_t m_sessionKey[32] = {0};
         std::atomic<bool> m_hasSessionKey{false};
 
@@ -88,15 +96,22 @@ class TcpClient{
         bool ReceiveExact(char* buffer, int length);
 
         void SetSessionKey(const uint8_t key[32]) {
+            std::lock_guard<std::mutex> lock(stateMutex);
             std::memcpy(m_sessionKey, key, 32);
-            m_hasSessionKey.store(true);
+            m_hasSessionKey.store(true, std::memory_order_release);
         }
         void ClearSessionKey() {
-            m_hasSessionKey.store(false);
+            std::lock_guard<std::mutex> lock(stateMutex);
+            m_hasSessionKey.store(false, std::memory_order_release);
             std::memset(m_sessionKey, 0, 32);
         }
-        bool HasSessionKey() const { return m_hasSessionKey.load(); }
-        const uint8_t* GetSessionKey() const { return m_hasSessionKey.load() ? m_sessionKey : nullptr; }
+        bool HasSessionKey() const { return m_hasSessionKey.load(std::memory_order_acquire); }
+        bool CopySessionKey(uint8_t outKey[32]) const {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            if (!m_hasSessionKey.load(std::memory_order_acquire)) return false;
+            std::memcpy(outKey, m_sessionKey, 32);
+            return true;
+        }
 
         SOCKET GetConnectSocket() const { return connectSocket.load(); }
 };

@@ -381,7 +381,6 @@ namespace {
         std::wstring fpsStr;
 
         int streamFps = g_streamFps.load();
-        int renderFps = g_renderFps.load();
         uint64_t nowMs = GetTickCount64();
         uint64_t lastFrameMs = g_lastFrameTimeMs.load(std::memory_order_relaxed);
         uint64_t msSinceLastFrame = (lastFrameMs > 0 && nowMs >= lastFrameMs) ? (nowMs - lastFrameMs) : 0;
@@ -953,6 +952,9 @@ namespace {
                     static uint64_t s_lastMuteToggleMs = 0;
                     if ((lp & (1 << 30)) == 0 || (nowKeyMs - s_lastMuteToggleMs > 400)) {
                         s_lastMuteToggleMs = nowKeyMs;
+                        if (InputHandler::IsControlling()) {
+                            InputHandler::ReleaseModifiers();
+                        }
                         AudioPlayer::ToggleMute();
                         RECT r; GetClientRect(hwnd, &r);
                         RECT toolbarRect = {0, 0, r.right, tbHeight};
@@ -1065,13 +1067,13 @@ namespace RemoteWindow {
             LeaveCriticalSection(&g_cs);
         }
 
-        HBRUSH hDarkBrush = CreateSolidBrush(RGB(18, 19, 23));
+        static HBRUSH s_darkBrush = CreateSolidBrush(RGB(18, 19, 23));
 
         WNDCLASSW wc = {};
         wc.lpfnWndProc = WndProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = hDarkBrush;
+        wc.hbrBackground = s_darkBrush;
         wc.lpszClassName = L"MgrWindow";
         RegisterClassW(&wc);
 
@@ -1079,7 +1081,7 @@ namespace RemoteWindow {
         vc.lpfnWndProc = VideoWndProc;
         vc.hInstance = hInst;
         vc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        vc.hbrBackground = hDarkBrush;
+        vc.hbrBackground = s_darkBrush;
         vc.lpszClassName = L"MgrVideoWnd";
         RegisterClassW(&vc);
 
@@ -1128,6 +1130,20 @@ namespace RemoteWindow {
         int reqH = delta.y + delta.height;
         if (reqW > 16384 || reqH > 16384) return;
 
+        std::vector<uint32_t> decodedRect((size_t)delta.width * (size_t)delta.height);
+        int decompRes = tjDecompress2(
+            g_tjDecompressor,
+            (const unsigned char*)jpegData,
+            (unsigned long)jpegSize,
+            (unsigned char*)decodedRect.data(),
+            delta.width,
+            delta.width * 4,
+            delta.height,
+            TJPF_BGRX,
+            TJFLAG_FASTDCT
+        );
+        if (decompRes != 0) return;
+
         EnterCriticalSection(&g_cs);
 
         // 2. Chỉ cấp phát mở rộng buffer khi kích thước yêu cầu vượt quá kích thước hiện tại
@@ -1137,12 +1153,12 @@ namespace RemoteWindow {
         if (needRealloc) {
             int newW = (std::max)(g_frameWidth, reqW);
             int newH = (std::max)(g_frameHeight, reqH);
-            std::vector<uint32_t> newPixels(newW * newH, 0);
+            std::vector<uint32_t> newPixels((size_t)newW * (size_t)newH, 0);
             if (g_frameWidth > 0 && g_frameHeight > 0) {
                 int copyW = (std::min)(g_frameWidth, newW);
                 int copyH = (std::min)(g_frameHeight, newH);
                 for (int y = 0; y < copyH; ++y) {
-                    std::memcpy(&newPixels[y * newW], &g_framePixels[y * g_frameWidth], copyW * sizeof(uint32_t));
+                    std::memcpy(&newPixels[(size_t)y * newW], &g_framePixels[(size_t)y * g_frameWidth], (size_t)copyW * sizeof(uint32_t));
                 }
             }
             g_framePixels = std::move(newPixels);
@@ -1158,34 +1174,22 @@ namespace RemoteWindow {
             g_bmi.bmiHeader.biCompression = BI_RGB;
         }
 
-        unsigned char* targetPtr = (unsigned char*)(g_framePixels.data() + (delta.y * g_frameWidth) + delta.x);
-        int pitch = g_frameWidth * 4;
-
-        int decompRes = tjDecompress2(
-            g_tjDecompressor,
-            (const unsigned char*)jpegData,
-            (unsigned long)jpegSize,
-            targetPtr,
-            delta.width,
-            pitch,
-            delta.height,
-            TJPF_BGRX,
-            TJFLAG_FASTDCT
-        );
-
-        if (decompRes == 0) {
-            g_streamFrameCount++;
-            g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
-
+        for (int y = 0; y < delta.height; ++y) {
+            std::memcpy(&g_framePixels[(size_t)(delta.y + y) * g_frameWidth + delta.x],
+                        &decodedRect[(size_t)y * delta.width],
+                        (size_t)delta.width * sizeof(uint32_t));
         }
+
+        g_streamFrameCount++;
+        g_lastFrameTimeMs.store(GetTickCount64(), std::memory_order_relaxed);
 
         LeaveCriticalSection(&g_cs);
 
         // Luôn giải phóng critical section trước khi phát tín hiệu cho GUI thread để chống Deadlock 100%
-        if (decompRes == 0 && g_hVideoWnd) {
-            InvalidateRect(g_hVideoWnd, NULL, FALSE);
+        if (g_hVideoWnd) {
             bool expected = false;
             if (g_paintPending.compare_exchange_strong(expected, true)) {
+                InvalidateRect(g_hVideoWnd, NULL, FALSE);
                 PostMessageW(g_hVideoWnd, WM_USER_NEW_FRAME, 0, 0);
             }
         }
@@ -1193,9 +1197,9 @@ namespace RemoteWindow {
 
     void PresentFrame() {
         if (g_hVideoWnd) {
-            InvalidateRect(g_hVideoWnd, NULL, FALSE);
             bool expected = false;
             if (g_paintPending.compare_exchange_strong(expected, true)) {
+                InvalidateRect(g_hVideoWnd, NULL, FALSE);
                 PostMessageW(g_hVideoWnd, WM_USER_NEW_FRAME, 0, 0);
             }
         }

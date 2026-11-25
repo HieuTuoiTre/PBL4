@@ -159,22 +159,29 @@ namespace {
             }
 
             if (hdr.type == Protocol::MSG_ENCRYPTED_CONTROL) {
-                const uint8_t* key = client->GetSessionKey();
-                if (!key) break;
+                uint8_t key[Crypto::KEY_SIZE];
+                if (!client->CopySessionKey(key)) break;
 
                 Protocol::PacketHeader innerHdr;
-                if (!ControlEnvelope::UnwrapPacket(key, (const uint8_t*)rawBuf.data(), hdr.size, innerHdr, plainPayload)) {
+                bool unwrapOk = ControlEnvelope::UnwrapPacket(key, (const uint8_t*)rawBuf.data(), hdr.size, innerHdr, plainPayload);
+                std::memset(key, 0, sizeof(key));
+                if (!unwrapOk) {
                     break;
                 }
 
-                // Kiểm tra gói tin bên trong sau khi giải mã (N-1)
-                if (!Protocol::ValidatePacketSize(innerHdr.type, innerHdr.size)) {
+                // Kiểm tra gói tin bên trong sau khi giải mã (N-1) và cấm lồng gói mã hóa
+                if (innerHdr.type == Protocol::MSG_ENCRYPTED_CONTROL ||
+                    !Protocol::ValidatePacketSize(innerHdr.type, innerHdr.size)) {
                     break;
                 }
 
                 const char* innerData = (innerHdr.size > 0) ? (const char*)plainPayload.data() : nullptr;
                 DispatchControlMessage(innerHdr.type, innerData, innerHdr.size);
             } else {
+                // C-3: Chặn hạ cấp gói tin rõ khi phiên đã kích hoạt mã hóa
+                if (client->HasSessionKey()) {
+                    break;
+                }
                 const char* rawData = (hdr.size > 0) ? rawBuf.data() : nullptr;
                 DispatchControlMessage(hdr.type, rawData, hdr.size);
             }

@@ -39,7 +39,7 @@ namespace {
     FileWorker g_clientUploadWorker;
     std::string g_uploadTargetDir = "";
 
-    std::string g_expectedSessionToken = Protocol::DEFAULT_AUTH_TOKEN;
+    std::string g_expectedSessionToken = "";
     std::mutex g_tokenMutex;
 
     std::string g_authorizedPeerIP = "";
@@ -49,10 +49,82 @@ namespace {
     std::string g_currentSessionId = "";
     std::mutex g_sessionIdMutex;
 
-    // Helper: Xác thực handshake với select() timeout 3 giây
+    // Rate-limit chống brute-force mã PIN theo IP (tối đa 5 lần sai -> khóa 30 giây)
+    struct AuthRateEntry {
+        std::string ip;
+        int failCount = 0;
+        uint64_t lockoutUntilMs = 0;
+    };
+    std::vector<AuthRateEntry> g_authRateLimits;
+    std::mutex g_rateLimitMutex;
+
+    std::thread g_downloadThread;
+
+    bool IsIpRateLimited(const std::string& ip) {
+        if (ip.empty()) return false;
+        std::lock_guard<std::mutex> lock(g_rateLimitMutex);
+        uint64_t now = GetTickCount64();
+        for (const auto& entry : g_authRateLimits) {
+            if (entry.ip == ip && entry.lockoutUntilMs > now) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void RecordAuthFailure(const std::string& ip) {
+        if (ip.empty()) return;
+        std::lock_guard<std::mutex> lock(g_rateLimitMutex);
+        uint64_t now = GetTickCount64();
+        for (auto& entry : g_authRateLimits) {
+            if (entry.ip == ip) {
+                if (entry.lockoutUntilMs > 0 && now >= entry.lockoutUntilMs) {
+                    entry.failCount = 0;
+                    entry.lockoutUntilMs = 0;
+                }
+                entry.failCount++;
+                if (entry.failCount >= 5) {
+                    entry.lockoutUntilMs = now + 30000;
+                }
+                return;
+            }
+        }
+        if (g_authRateLimits.size() >= 64) {
+            g_authRateLimits.erase(g_authRateLimits.begin());
+        }
+        g_authRateLimits.push_back({ip, 1, 0});
+    }
+
+    void ResetAuthRateLimit(const std::string& ip) {
+        std::lock_guard<std::mutex> lock(g_rateLimitMutex);
+        for (auto it = g_authRateLimits.begin(); it != g_authRateLimits.end(); ++it) {
+            if (it->ip == ip) {
+                g_authRateLimits.erase(it);
+                return;
+            }
+        }
+    }
+
+    // Helper: Xác thực handshake Challenge-Response HMAC-SHA256 với select() timeout 3 giây
     bool PerformAuthHandshake(TcpServer& server) {
         SOCKET ctrlSock = server.GetClientSocket();
         if (ctrlSock == INVALID_SOCKET) return false;
+
+        std::string clientIP = server.GetClientIP();
+        if (IsIpRateLimited(clientIP)) {
+            Protocol::AuthResponsePayload resp = {0};
+            resp.status = Protocol::AUTH_REJECTED;
+            strncpy_s(resp.message, "Too many failed attempts. Retry later.", sizeof(resp.message) - 1);
+            server.SendPacket(Protocol::MSG_AUTH_RESPONSE, (const char*)&resp, sizeof(resp));
+            return false;
+        }
+
+        // 0. Sinh và gửi serverChallenge (16-byte ngẫu nhiên) trước khi nhận proof từ Manager
+        Protocol::AuthChallengePayload challenge = {0};
+        Crypto::GenerateRandomBytes(challenge.serverChallenge, sizeof(challenge.serverChallenge));
+        if (!server.SendPacket(Protocol::MSG_AUTH_CHALLENGE, (const char*)&challenge, sizeof(challenge))) {
+            return false;
+        }
 
         // 1. Thiết lập SO_RCVTIMEO = 3000ms phòng vệ chống treo socket nếu gửi ngắt quãng
         DWORD rcvTimeout = 3000;
@@ -96,7 +168,6 @@ namespace {
         if (!server.ReceiveExact((char*)&req, sizeof(req))) {
             return false;
         }
-        req.sessionToken[sizeof(req.sessionToken) - 1] = '\0';
 
         // 4.1. Kiểm tra phiên bản giao thức (N-1)
         if (req.clientVersion != Protocol::PROTOCOL_VERSION) {
@@ -107,26 +178,54 @@ namespace {
             return false;
         }
 
-        // 5. Kiểm tra tính hợp lệ của Token trong constant time
+        // 5. Tính HMAC-SHA256(PIN, clientChallenge || serverChallenge) và đối chiếu trong constant time (C-2)
         std::string expectedToken = SessionManager::GetExpectedToken();
-        char expectedBuf[64] = {0};
-        strncpy_s(expectedBuf, expectedToken.c_str(), sizeof(expectedBuf) - 1);
+        if (expectedToken.empty()) {
+            Protocol::AuthResponsePayload resp = {0};
+            resp.status = Protocol::AUTH_REJECTED;
+            strncpy_s(resp.message, "Session PIN not initialized", sizeof(resp.message) - 1);
+            server.SendPacket(Protocol::MSG_AUTH_RESPONSE, (const char*)&resp, sizeof(resp));
+            return false;
+        }
+        uint8_t salt[32];
+        std::memcpy(salt, req.clientChallenge, 16);
+        std::memcpy(salt + 16, challenge.serverChallenge, 16);
 
-        if (!Crypto::ConstantTimeCompare((const uint8_t*)req.sessionToken, (const uint8_t*)expectedBuf, sizeof(req.sessionToken))) {
+        uint8_t expectedProof[Crypto::SHA256_DIGEST_SIZE];
+        Crypto::HmacSha256(
+            reinterpret_cast<const uint8_t*>(expectedToken.data()),
+            expectedToken.size(),
+            salt,
+            sizeof(salt),
+            expectedProof
+        );
+
+        bool proofOk = Crypto::ConstantTimeCompare(
+            reinterpret_cast<const uint8_t*>(req.sessionToken),
+            expectedProof,
+            Crypto::SHA256_DIGEST_SIZE
+        );
+        Crypto::SecureZero(expectedProof, sizeof(expectedProof));
+
+        if (!proofOk) {
+            Crypto::SecureZero(salt, sizeof(salt));
+            RecordAuthFailure(clientIP);
             Protocol::AuthResponsePayload resp = {0};
             resp.status = Protocol::AUTH_INVALID_TOKEN;
             strncpy_s(resp.message, "Invalid session token", sizeof(resp.message) - 1);
             server.SendPacket(Protocol::MSG_AUTH_RESPONSE, (const char*)&resp, sizeof(resp));
             return false;
         }
+        ResetAuthRateLimit(clientIP);
 
-        // 6. Xác thực thành công: Gửi phản hồi SUCCESS kèm 16-byte random challenge
+        // 6. Xác thực thành công: Phản hồi SUCCESS kèm lại đúng serverChallenge để hai bên đồng bộ salt
         Protocol::AuthResponsePayload resp = {0};
         resp.status = Protocol::AUTH_SUCCESS;
         strncpy_s(resp.message, "Authenticated successfully", sizeof(resp.message) - 1);
-        Crypto::GenerateRandomBytes(resp.serverChallenge, sizeof(resp.serverChallenge));
+        std::memcpy(resp.serverChallenge, challenge.serverChallenge, sizeof(resp.serverChallenge));
 
         if (!server.SendPacket(Protocol::MSG_AUTH_RESPONSE, (const char*)&resp, sizeof(resp))) {
+            Crypto::SecureZero(salt, sizeof(salt));
             return false;
         }
 
@@ -141,17 +240,14 @@ namespace {
         }
 
         // Cấp quyền cho IP này trên cổng RFB 5900 (hạn chờ 30 giây để hoàn tất kết nối RFB)
-        std::string clientIP = server.GetClientIP();
         SessionManager::AuthorizePeer(clientIP, 30000);
 
-        // 7. Sinh khóa phiên đối xứng ChaCha20 từ token kết hợp 32-byte salt (clientChallenge + serverChallenge)
-        uint8_t salt[32];
-        std::memcpy(salt, req.clientChallenge, 16);
-        std::memcpy(salt + 16, resp.serverChallenge, 16);
-
+        // 7. Sinh khóa phiên đối xứng ChaCha20 từ PIN + 32-byte salt (PBKDF2-HMAC-SHA256)
         uint8_t sessionKey[Crypto::KEY_SIZE];
         Crypto::DeriveKey(expectedToken, salt, sizeof(salt), sessionKey);
         server.SetSessionKey(sessionKey);
+        Crypto::SecureZero(sessionKey, sizeof(sessionKey));
+        Crypto::SecureZero(salt, sizeof(salt));
 
         // 8. Khôi phục SO_RCVTIMEO = 0 (vô hạn) cho luồng nhận điều khiển sau handshake
         DWORD zeroTimeout = 0;
@@ -167,7 +263,11 @@ namespace {
             case Protocol::MSG_FILE_DOWNLOAD_REQ: {
                 if (payload && size > 0) {
                     std::string reqPath(payload, size);
-                    std::thread([reqPath]() {
+                    g_fileTransferCancel = true;
+                    if (g_downloadThread.joinable()) {
+                        g_downloadThread.join();
+                    }
+                    g_downloadThread = std::thread([reqPath]() {
                         g_fileTransferCancel = false;
                         auto items = FileWorker::ScanDirectoryTree(reqPath);
                         if (items.empty()) {
@@ -255,7 +355,7 @@ namespace {
                         if (isDir || items.size() > 1) {
                             g_controlServer.SendPacket(Protocol::MSG_FILE_BATCH_END, nullptr, 0);
                         }
-                    }).detach();
+                    });
                 }
                 break;
             }
@@ -478,20 +578,23 @@ namespace {
             }
 
             if (header.type == Protocol::MSG_ENCRYPTED_CONTROL) {
-                const uint8_t* key = g_controlServer.GetSessionKey();
-                if (!key) {
+                uint8_t key[Crypto::KEY_SIZE];
+                if (!g_controlServer.CopySessionKey(key)) {
                     g_isConnected = false;
                     break;
                 }
 
                 Protocol::PacketHeader innerHdr;
-                if (!ControlEnvelope::UnwrapPacket(key, (const uint8_t*)rawBuf.data(), header.size, innerHdr, plainPayload)) {
+                bool unwrapOk = ControlEnvelope::UnwrapPacket(key, (const uint8_t*)rawBuf.data(), header.size, innerHdr, plainPayload);
+                Crypto::SecureZero(key, sizeof(key));
+                if (!unwrapOk) {
                     g_isConnected = false;
                     break;
                 }
 
-                // Kiểm tra tính hợp lệ của gói tin bên trong sau khi giải mã (N-1)
-                if (!Protocol::ValidatePacketSize(innerHdr.type, innerHdr.size)) {
+                // Kiểm tra tính hợp lệ của gói tin bên trong sau khi giải mã (N-1) và cấm lồng gói mã hóa
+                if (innerHdr.type == Protocol::MSG_ENCRYPTED_CONTROL ||
+                    !Protocol::ValidatePacketSize(innerHdr.type, innerHdr.size)) {
                     g_isConnected = false;
                     break;
                 }
@@ -499,6 +602,11 @@ namespace {
                 const char* innerData = (innerHdr.size > 0) ? (const char*)plainPayload.data() : nullptr;
                 DispatchClientControlMessage(innerHdr.type, innerData, innerHdr.size);
             } else {
+                // C-3: Chặn hạ cấp gói tin rõ khi phiên đã kích hoạt mã hóa
+                if (g_controlServer.HasSessionKey()) {
+                    g_isConnected = false;
+                    break;
+                }
                 DispatchClientControlMessage(header.type, rawBuf.data(), header.size);
             }
         }
@@ -538,8 +646,13 @@ namespace SessionManager {
                 continue;
             }
 
-            // Bước 2: Chấp nhận kết nối Audio (8082) tùy chọn trong 1 giây
-            g_audioServer.AcceptConnection(1000);
+            // Bước 2: Chấp nhận kết nối Audio (8082) tùy chọn trong 1 giây và xác minh IP đã ủy quyền (I-5)
+            if (g_audioServer.AcceptConnection(1000)) {
+                std::string audioIP = g_audioServer.GetClientIP();
+                if (!SessionManager::IsPeerAuthorized(audioIP)) {
+                    g_audioServer.CloseClient();
+                }
+            }
 
             // Phiên kết nối quản trị đã sẵn sàng!
             g_isConnected = true;
@@ -579,6 +692,7 @@ namespace SessionManager {
 
             // Mất kết nối hoặc app dừng: Dọn dẹp phiên hiện tại
             g_isConnected = false;
+            g_fileTransferCancel = true;
             SessionManager::RevokeAuthorizedPeer();
             RfbServer::DisconnectClient();
             ClipboardManager::Reset();
@@ -594,6 +708,7 @@ namespace SessionManager {
             g_overlay.SetVisible(false);
 
             if (rxThread.joinable()) rxThread.join();
+            if (g_downloadThread.joinable()) g_downloadThread.join();
         }
 
         SessionManager::RevokeAuthorizedPeer();
@@ -607,6 +722,7 @@ namespace SessionManager {
     void Stop() {
         g_isRunning = false;
         g_isConnected = false;
+        g_fileTransferCancel = true;
         SessionManager::RevokeAuthorizedPeer();
         RfbServer::DisconnectClient();
         ClipboardManager::Reset();
@@ -616,6 +732,9 @@ namespace SessionManager {
         ClientChatWindow::Close();
         g_controlServer.Close();
         g_audioServer.Close();
+        if (g_downloadThread.joinable() && std::this_thread::get_id() != g_downloadThread.get_id()) {
+            g_downloadThread.join();
+        }
         g_overlay.Destroy();
     }
 
@@ -634,6 +753,10 @@ namespace SessionManager {
     }
 
     std::string GenerateNewPin() {
+        {
+            std::lock_guard<std::mutex> lock(g_rateLimitMutex);
+            g_authRateLimits.clear();
+        }
         // Sinh mã PIN ngẫu nhiên gồm 6 chữ số (100000 - 999999) sử dụng CSPRNG
         uint32_t val = 0;
         Crypto::GenerateRandomBytes(reinterpret_cast<uint8_t*>(&val), sizeof(val));

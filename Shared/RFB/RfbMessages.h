@@ -143,6 +143,9 @@ namespace Rfb {
      * @brief Builds a Tight/JPEG Rectangle payload for standard VNC viewers.
      */
     inline std::vector<char> BuildTightJpegRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const char* jpegData, size_t jpegLen) {
+        if (!jpegData || jpegLen == 0 || jpegLen >= 4194304) {
+            return {};
+        }
         std::vector<char> buf;
         buf.reserve(sizeof(RfbRectangleHeader) + 4 + jpegLen);
 

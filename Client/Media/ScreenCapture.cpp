@@ -163,17 +163,26 @@ namespace {
         // 2. Lấy DXGI Output 1 (Màn hình chính)
         IDXGIDevice* dxgiDevice = nullptr;
         hr = g_d3dDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice);
-        if (FAILED(hr) || !dxgiDevice) return false;
+        if (FAILED(hr) || !dxgiDevice) {
+            CleanupDxgi();
+            return false;
+        }
 
         IDXGIAdapter* dxgiAdapter = nullptr;
         hr = dxgiDevice->GetParent(__uuidof(IDXGIAdapter), (void**)&dxgiAdapter);
         dxgiDevice->Release();
-        if (FAILED(hr) || !dxgiAdapter) return false;
+        if (FAILED(hr) || !dxgiAdapter) {
+            CleanupDxgi();
+            return false;
+        }
 
         IDXGIOutput* dxgiOutput = nullptr;
         hr = dxgiAdapter->EnumOutputs(0, &dxgiOutput);
         dxgiAdapter->Release();
-        if (FAILED(hr) || !dxgiOutput) return false;
+        if (FAILED(hr) || !dxgiOutput) {
+            CleanupDxgi();
+            return false;
+        }
 
         DXGI_OUTPUT_DESC outputDesc;
         dxgiOutput->GetDesc(&outputDesc);
@@ -183,7 +192,10 @@ namespace {
         IDXGIOutput1* dxgiOutput1 = nullptr;
         hr = dxgiOutput->QueryInterface(__uuidof(IDXGIOutput1), (void**)&dxgiOutput1);
         dxgiOutput->Release();
-        if (FAILED(hr) || !dxgiOutput1) return false;
+        if (FAILED(hr) || !dxgiOutput1) {
+            CleanupDxgi();
+            return false;
+        }
 
         // 3. Khởi tạo Desktop Duplication
         hr = dxgiOutput1->DuplicateOutput(g_d3dDevice, &g_dxgiDupl);
@@ -486,6 +498,11 @@ namespace {
     }
 
     bool InitGdi() {
+        int curW = GetSystemMetrics(SM_CXSCREEN);
+        int curH = GetSystemMetrics(SM_CYSCREEN);
+        if (g_hCaptureDC && g_hDibBitmap && g_dibPixels && g_gdiWidth == curW && g_gdiHeight == curH) {
+            return true;
+        }
         CleanupGdi();
 
         HDESK hInputDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
@@ -700,9 +717,12 @@ namespace ScreenCapture {
     }
 
     void SetVideoConfig(uint8_t qualityPreset, uint8_t targetFps) {
-        g_qualityPreset.store(qualityPreset, std::memory_order_release);
+        if (qualityPreset <= Protocol::QUALITY_HIGH) {
+            g_qualityPreset.store(qualityPreset, std::memory_order_release);
+        }
         if (targetFps > 0) {
-            g_targetFps.store(targetFps, std::memory_order_release);
+            uint8_t clampedFps = (targetFps < 5) ? 5 : (targetFps > 60 ? 60 : targetFps);
+            g_targetFps.store(clampedFps, std::memory_order_release);
         }
         ForceFullFrame();
     }

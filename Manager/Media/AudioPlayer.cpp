@@ -7,10 +7,9 @@
 #include <cstdint>
 
 #include <cstring>
-
 #include <algorithm>
-
 #include <cmath>
+#include <atomic>
 
 #define AUDIO_RING_SIZE 32
 #define SAMPLES_PER_CHUNK 960  // 40ms ở 24.000 Hz, Mono 16-bit (960 frames * 1 channel = 960 samples = 1920 bytes)
@@ -44,11 +43,13 @@ namespace {
 
     int g_audioIdx = 0;
 
-    bool g_isMuted = false;
+    std::atomic<bool> g_isMuted{false};
 
     bool g_prebuffering = true;
 
-    float g_volume = 1.5f;
+    std::atomic<float> g_volume{1.5f};
+
+    std::atomic<bool> g_needReset{false};
 
     CRITICAL_SECTION g_audioCs;
 
@@ -77,7 +78,8 @@ namespace AudioPlayer {
             g_hWaveOut = NULL;
         }
 
-        g_isMuted = defaultMuted;
+        g_isMuted.store(defaultMuted, std::memory_order_release);
+        g_needReset.store(false, std::memory_order_release);
         g_prebuffering = true;
         g_audioIdx = 0;
         g_stagingBuffer.clear();
@@ -124,7 +126,15 @@ namespace AudioPlayer {
 
         EnterCriticalSection(&g_audioCs);
 
-        if (!g_hWaveOut || g_isMuted) {
+        if (g_needReset.exchange(false, std::memory_order_acq_rel)) {
+            if (g_hWaveOut && pWaveOutReset) {
+                pWaveOutReset(g_hWaveOut);
+            }
+            g_stagingBuffer.clear();
+            g_prebuffering = true;
+        }
+
+        if (!g_hWaveOut || g_isMuted.load(std::memory_order_acquire)) {
             LeaveCriticalSection(&g_audioCs);
             return;
         }
@@ -133,7 +143,7 @@ namespace AudioPlayer {
         const int16_t* pcmSamples = (const int16_t*)rawData;
         int sampleCount = byteSize / (int)sizeof(int16_t);
 
-        float gain = g_volume;
+        float gain = g_volume.load(std::memory_order_acquire);
         if (gain != 1.0f) {
             std::vector<int16_t> amplified(sampleCount);
             const float THRESHOLD = 26000.0f;
@@ -214,53 +224,34 @@ namespace AudioPlayer {
     }
 
     void ToggleMute() {
-        if (!g_csInitialized) return;
-        EnterCriticalSection(&g_audioCs);
-        g_isMuted = !g_isMuted;
-
-        if (g_isMuted && g_hWaveOut && pWaveOutReset) {
-            pWaveOutReset(g_hWaveOut);
-            g_stagingBuffer.clear();
-            g_prebuffering = true;
+        bool nowMuted = !g_isMuted.load(std::memory_order_acquire);
+        g_isMuted.store(nowMuted, std::memory_order_release);
+        if (nowMuted) {
+            // Tránh gọi pWaveOutReset đồng bộ trên UI thread để không làm đơ giao diện (I-3)
+            g_needReset.store(true, std::memory_order_release);
         }
-        LeaveCriticalSection(&g_audioCs);
     }
 
     bool IsMuted() {
-        if (!g_csInitialized) return false;
-        EnterCriticalSection(&g_audioCs);
-        bool muted = g_isMuted;
-        LeaveCriticalSection(&g_audioCs);
-        return muted;
+        return g_isMuted.load(std::memory_order_acquire);
     }
 
     void SetVolume(float volume) {
-        if (!g_csInitialized) return;
-        EnterCriticalSection(&g_audioCs);
-        g_volume = std::clamp(volume, 0.0f, 3.0f);
-        LeaveCriticalSection(&g_audioCs);
+        g_volume.store(std::clamp(volume, 0.0f, 3.0f), std::memory_order_release);
     }
 
     float GetVolume() {
-        if (!g_csInitialized) return 1.0f;
-        EnterCriticalSection(&g_audioCs);
-        float vol = g_volume;
-        LeaveCriticalSection(&g_audioCs);
-        return vol;
+        return g_volume.load(std::memory_order_acquire);
     }
 
     void IncreaseVolume() {
-        if (!g_csInitialized) return;
-        EnterCriticalSection(&g_audioCs);
-        g_volume = (std::min)(3.0f, g_volume + 0.1f);
-        LeaveCriticalSection(&g_audioCs);
+        float cur = g_volume.load(std::memory_order_acquire);
+        g_volume.store((std::min)(3.0f, cur + 0.1f), std::memory_order_release);
     }
 
     void DecreaseVolume() {
-        if (!g_csInitialized) return;
-        EnterCriticalSection(&g_audioCs);
-        g_volume = (std::max)(0.0f, g_volume - 0.1f);
-        LeaveCriticalSection(&g_audioCs);
+        float cur = g_volume.load(std::memory_order_acquire);
+        g_volume.store((std::max)(0.0f, cur - 0.1f), std::memory_order_release);
     }
 
     void Cleanup() {
@@ -284,6 +275,12 @@ namespace AudioPlayer {
             FreeLibrary(g_hWinMM);
             g_hWinMM = NULL;
         }
+        pWaveOutOpen = nullptr;
+        pWaveOutPrepareHeader = nullptr;
+        pWaveOutWrite = nullptr;
+        pWaveOutUnprepareHeader = nullptr;
+        pWaveOutReset = nullptr;
+        pWaveOutClose = nullptr;
 
         g_stagingBuffer.clear();
         LeaveCriticalSection(&g_audioCs);
