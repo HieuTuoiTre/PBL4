@@ -1,6 +1,22 @@
-<mxfile host="app.diagrams.net">
-  <diagram name="Trang-1" id="Kde-OVLRFT0dIkyYZh1v">
-    <mxGraphModel>
+<mxfile host="app.diagrams.net" pages="3">
+  <diagram name="Hiếu" id="Kde-OVLRFT0dIkyYZh1v">
+    <mxGraphModel dx="984" dy="619" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="9gcBXyhAiJJubfLb9FjL" name="Nghĩa">
+    <mxGraphModel dx="984" dy="619" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="-aYz5EX3VmNY6KyTCgBA" name="Khoa">
+    <mxGraphModel dx="984" dy="619" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
