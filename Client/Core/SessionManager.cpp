@@ -438,11 +438,7 @@ namespace {
             }
 
             case Protocol::MSG_VIDEO_CONFIG: {
-                if (payload && size >= sizeof(Protocol::VideoConfigPayload)) {
-                    Protocol::VideoConfigPayload cfg;
-                    memcpy(&cfg, payload, sizeof(cfg));
-                    ScreenCapture::SetVideoConfig(cfg.qualityPreset, cfg.targetFps);
-                }
+                // Đã khóa cứng chất lượng BALANCED & 30 FPS: bỏ qua yêu cầu đổi cấu hình để tránh giật/ForceFullFrame
                 break;
             }
 

@@ -716,23 +716,18 @@ namespace ScreenCapture {
         g_isInitialized = false;
     }
 
-    void SetVideoConfig(uint8_t qualityPreset, uint8_t targetFps) {
-        if (qualityPreset <= Protocol::QUALITY_HIGH) {
-            g_qualityPreset.store(qualityPreset, std::memory_order_release);
-        }
-        if (targetFps > 0) {
-            uint8_t clampedFps = (targetFps < 5) ? 5 : (targetFps > 60 ? 60 : targetFps);
-            g_targetFps.store(clampedFps, std::memory_order_release);
-        }
-        ForceFullFrame();
+    void SetVideoConfig(uint8_t /*qualityPreset*/, uint8_t /*targetFps*/) {
+        // Khóa cứng chất lượng BALANCED (65) và 30 FPS để giữ độ ổn định tối đa
+        g_qualityPreset.store(Protocol::QUALITY_BALANCED, std::memory_order_release);
+        g_targetFps.store(30, std::memory_order_release);
     }
 
     uint8_t GetQualityPreset() {
-        return g_qualityPreset.load(std::memory_order_acquire);
+        return Protocol::QUALITY_BALANCED;
     }
 
     uint8_t GetTargetFps() {
-        return g_targetFps.load(std::memory_order_acquire);
+        return 30;
     }
 
     const uint32_t* GetCurrentFramePixels(int& outWidth, int& outHeight) {

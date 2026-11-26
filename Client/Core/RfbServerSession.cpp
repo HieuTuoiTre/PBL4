@@ -367,10 +367,7 @@ namespace {
         auto nextFrameTime = std::chrono::steady_clock::now();
 
         while (g_isRunning && g_isClientConnected) {
-            int fps = ScreenCapture::GetTargetFps();
-            if (fps < 5) fps = 5;
-            if (fps > 60) fps = 60;
-            nextFrameTime += std::chrono::microseconds(1000000 / fps);
+            nextFrameTime += std::chrono::microseconds(1000000 / 30); // Khóa cứng 30 FPS ổn định
 
             if (g_forceFull.exchange(false, std::memory_order_acq_rel)) {
                 ScreenCapture::ForceFullFrame();

@@ -132,9 +132,9 @@ void TestVideoQualityPresets() {
                      "AUTO=0, LOW=1, BALANCED=2, HIGH=3");
     }
 
-    // 3.2 Dynamic configuration update via ScreenCapture API
+    // 3.2 Locked quality & FPS verification (BALANCED @ 30 FPS)
     {
-        ScreenCapture::SetVideoConfig(Protocol::QUALITY_LOW, 30);
+        ScreenCapture::SetVideoConfig(Protocol::QUALITY_LOW, 15);
         uint8_t p1 = ScreenCapture::GetQualityPreset();
         uint8_t fps1 = ScreenCapture::GetTargetFps();
 
@@ -142,14 +142,10 @@ void TestVideoQualityPresets() {
         uint8_t p2 = ScreenCapture::GetQualityPreset();
         uint8_t fps2 = ScreenCapture::GetTargetFps();
 
-        ScreenCapture::SetVideoConfig(Protocol::QUALITY_AUTO, 60);
-        uint8_t p3 = ScreenCapture::GetQualityPreset();
-
-        ReportResult("3.2 Dynamic Quality & FPS Preset Switching",
-                     p1 == Protocol::QUALITY_LOW && fps1 == 30 &&
-                     p2 == Protocol::QUALITY_HIGH && fps2 == 60 &&
-                     p3 == Protocol::QUALITY_AUTO,
-                     "Preset & Target FPS atomically updated in ScreenCapture");
+        ReportResult("3.2 Locked BALANCED Quality & 30 FPS",
+                     p1 == Protocol::QUALITY_BALANCED && fps1 == 30 &&
+                     p2 == Protocol::QUALITY_BALANCED && fps2 == 30,
+                     "Preset locked to QUALITY_BALANCED and FPS locked to 30");
     }
 }
 
