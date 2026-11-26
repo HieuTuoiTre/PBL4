@@ -8,6 +8,9 @@ namespace{
     constexpr UINT WM_TRAYICON = WM_USER + 1;
 
     constexpr UINT ID_TRAY_EXIT = 1001;
+    constexpr UINT ID_TRAY_PIN_INFO = 1002;
+    constexpr UINT ID_TRAY_COPY_PIN = 1003;
+    constexpr UINT ID_TRAY_NEW_PIN = 1004;
 
     constexpr UINT TRAY_ICON_ID = 1;
 
@@ -17,6 +20,7 @@ namespace{
     NOTIFYICONDATA g_nid = {0};
     bool g_isInitialized = false;
     UINT g_uTaskbarRestartMsg = 0;
+    std::string g_currentPin = "";
 
     LRESULT CALLBACK TrayWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     void ShowContextMenu(HWND hWnd);
@@ -92,17 +96,49 @@ namespace TrayIcon {
         return g_hWnd;
     }
 
+    void SetPin(const std::string& pin) {
+        g_currentPin = pin;
+        if (!g_isInitialized || !g_hWnd) return;
+
+        std::wstring tipW = L"Remote Desktop Client - PIN: " + std::wstring(pin.begin(), pin.end());
+        wcsncpy_s(g_nid.szTip, tipW.c_str(), sizeof(g_nid.szTip) / sizeof(wchar_t) - 1);
+        Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+    }
+
+    std::string GetPin() {
+        return g_currentPin;
+    }
+
+    void ShowPinNotification() {
+        if (!g_isInitialized || !g_hWnd) return;
+
+        g_nid.uFlags |= NIF_INFO;
+        wcscpy_s(g_nid.szInfoTitle, L"Remote Desktop Client - Mã PIN");
+        std::wstring infoW = L"Mã PIN kết nối mới của bạn: " + std::wstring(g_currentPin.begin(), g_currentPin.end()) +
+                             L"\nHãy nhập mã này trên máy Manager để kết nối.";
+        wcsncpy_s(g_nid.szInfo, infoW.c_str(), sizeof(g_nid.szInfo) / sizeof(wchar_t) - 1);
+        g_nid.dwInfoFlags = NIIF_INFO;
+        Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+    }
+
 } // namespace TrayIcon
 
 namespace {
 
     void ShowContextMenu(HWND hWnd) {
-        // 1. Tạo một Popup Menu rỗng
+        // 1. Tạo một Popup Menu
         HMENU hMenu = CreatePopupMenu();
         if (!hMenu) return;
 
-        // 2. Thêm một mục menu "Thoát"
-        InsertMenuW(hMenu, 0, MF_BYPOSITION | MF_STRING, ID_TRAY_EXIT, L"Thoát");
+        std::wstring pinW = std::wstring(g_currentPin.begin(), g_currentPin.end());
+        std::wstring pinTitle = L"Mã PIN: " + (pinW.empty() ? L"(Chưa tạo)" : pinW);
+
+        // 2. Thêm các mục menu
+        InsertMenuW(hMenu, 0, MF_BYPOSITION | MF_GRAYED | MF_STRING, ID_TRAY_PIN_INFO, pinTitle.c_str());
+        InsertMenuW(hMenu, 1, MF_BYPOSITION | MF_STRING, ID_TRAY_COPY_PIN, L"Sao chép mã PIN");
+        InsertMenuW(hMenu, 2, MF_BYPOSITION | MF_STRING, ID_TRAY_NEW_PIN, L"Đổi mã PIN mới");
+        InsertMenuW(hMenu, 3, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+        InsertMenuW(hMenu, 4, MF_BYPOSITION | MF_STRING, ID_TRAY_EXIT, L"Thoát");
 
         // 3. Lấy vị trí hiện tại của con trỏ chuột trên màn hình
         POINT pt;
@@ -149,13 +185,22 @@ namespace {
             }
             break;
 
-        case WM_COMMAND:
-            // Xử lý khi người dùng chọn một mục trên menu
-            if (LOWORD(wParam) == ID_TRAY_EXIT) {
-                // Bắn thông điệp WM_QUIT vào hàng đợi để vòng lặp GetMessage ở ClientMain dừng lại
+        case WM_COMMAND: {
+            UINT cmd = LOWORD(wParam);
+            if (cmd == ID_TRAY_EXIT) {
                 PostQuitMessage(0);
+            } else if (cmd == ID_TRAY_COPY_PIN) {
+                if (!g_currentPin.empty()) {
+                    ClipboardManager::WriteText(hWnd, g_currentPin);
+                }
+            } else if (cmd == ID_TRAY_NEW_PIN) {
+                std::string newPin = SessionManager::GenerateNewPin();
+                TrayIcon::SetPin(newPin);
+                TrayIcon::ShowPinNotification();
+                ClipboardManager::WriteText(hWnd, newPin);
             }
             break;
+        }
 
         case WM_CLIPBOARDUPDATE: {
             if (SessionManager::IsConnected()) {

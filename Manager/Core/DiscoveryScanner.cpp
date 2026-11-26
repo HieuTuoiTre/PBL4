@@ -20,7 +20,7 @@
 
 namespace {
 
-    SOCKET g_udpSock = INVALID_SOCKET;
+    std::atomic<SOCKET> g_udpSock{INVALID_SOCKET};
 
     std::atomic<bool> g_isRunning(false);
 
@@ -30,13 +30,15 @@ namespace {
 
     void ListenLoop() {
         while (g_isRunning) {
+            SOCKET sock = g_udpSock.load(std::memory_order_acquire);
+            if (sock == INVALID_SOCKET) break;
 
             sockaddr_in senderAddr = {};
             int senderLen = sizeof(senderAddr);
 
             Protocol::DiscoveryPacket pkt = {};
 
-            int bytes = recvfrom(g_udpSock, (char*)&pkt, sizeof(pkt), 0, (sockaddr*)&senderAddr, &senderLen);
+            int bytes = recvfrom(sock, (char*)&pkt, sizeof(pkt), 0, (sockaddr*)&senderAddr, &senderLen);
 
             if (bytes <= 0) {
 
@@ -55,6 +57,9 @@ namespace {
                 if (pkt.type == Protocol::DISCOVERY_QUERY) {
                     continue;
                 }
+
+                pkt.computerName[sizeof(pkt.computerName) - 1] = '\0';
+                pkt.userName[sizeof(pkt.userName) - 1] = '\0';
 
                 char ipStr[INET_ADDRSTRLEN] = {0};
                 inet_ntop(AF_INET, &senderAddr.sin_addr, ipStr, sizeof(ipStr));
@@ -88,32 +93,32 @@ namespace DiscoveryScanner {
 
         g_callback = onUpdate;
 
-        g_udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (g_udpSock == INVALID_SOCKET) {
+        SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s == INVALID_SOCKET) {
             return false;
         }
 
         BOOL bNewBehavior = FALSE;
         DWORD dwBytesReturned = 0;
-        WSAIoctl(g_udpSock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
+        WSAIoctl(s, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
 
         BOOL reuse = TRUE;
-        setsockopt(g_udpSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 
         BOOL bcast = TRUE;
-        setsockopt(g_udpSock, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
+        setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
 
         sockaddr_in bindAddr = {};
         bindAddr.sin_family = AF_INET;
         bindAddr.sin_port = htons(Protocol::PORT_DISCOVERY_MGR);
         bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-        if (bind(g_udpSock, (sockaddr*)&bindAddr, sizeof(bindAddr)) == SOCKET_ERROR) {
-            closesocket(g_udpSock);
-            g_udpSock = INVALID_SOCKET;
+        if (bind(s, (sockaddr*)&bindAddr, sizeof(bindAddr)) == SOCKET_ERROR) {
+            closesocket(s);
             return false;
         }
 
+        g_udpSock.store(s, std::memory_order_release);
         g_isRunning = true;
         g_listenThread = std::thread(ListenLoop);
 
@@ -122,7 +127,8 @@ namespace DiscoveryScanner {
     }
 
     void TriggerScan() {
-        if (g_udpSock == INVALID_SOCKET) return;
+        SOCKET sock = g_udpSock.load(std::memory_order_acquire);
+        if (sock == INVALID_SOCKET) return;
 
         Protocol::DiscoveryPacket queryPkt = {};
         memcpy(queryPkt.magic, "LAND", 4);
@@ -133,7 +139,7 @@ namespace DiscoveryScanner {
         bcastAddr.sin_family = AF_INET;
         bcastAddr.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
         bcastAddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-        sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
+        sendto(sock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
 
         // 2. Quét qua TẤT CẢ các card mạng (Wi-Fi, Ethernet, ZeroTier, VPN ảo):
         // Tính địa chỉ Subnet Directed Broadcast của từng card để gói tin đi xuyên qua card mạng ảo ZeroTier
@@ -153,7 +159,7 @@ namespace DiscoveryScanner {
                     ifBcast.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
                     ifBcast.sin_addr.s_addr = (row.dwAddr & row.dwMask) | (~row.dwMask);
 
-                    sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&ifBcast, sizeof(ifBcast));
+                    sendto(sock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&ifBcast, sizeof(ifBcast));
                 }
             }
         }
@@ -163,21 +169,7 @@ namespace DiscoveryScanner {
         loopbackAddr.sin_family = AF_INET;
         loopbackAddr.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
         inet_pton(AF_INET, "127.0.0.1", &loopbackAddr.sin_addr);
-        sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&loopbackAddr, sizeof(loopbackAddr));
-
-        INTERFACE_INFO ifList[24] = {};
-        DWORD bytesRet = 0;
-        if (WSAIoctl(g_udpSock, SIO_GET_INTERFACE_LIST, NULL, 0, &ifList, sizeof(ifList), &bytesRet, NULL, NULL) == 0) {
-            int count = bytesRet / sizeof(INTERFACE_INFO);
-            for (int i = 0; i < count; i++) {
-                u_long flags = ifList[i].iiFlags;
-                if ((flags & IFF_UP) && (flags & IFF_BROADCAST) && !(flags & IFF_LOOPBACK)) {
-                    sockaddr_in subBcast = ifList[i].iiBroadcastAddress.AddressIn;
-                    subBcast.sin_port = htons(Protocol::PORT_DISCOVERY_CLIENT);
-                    sendto(g_udpSock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&subBcast, sizeof(subBcast));
-                }
-            }
-        }
+        sendto(sock, (const char*)&queryPkt, sizeof(queryPkt), 0, (sockaddr*)&loopbackAddr, sizeof(loopbackAddr));
     }
 
     void Stop() {
@@ -185,9 +177,9 @@ namespace DiscoveryScanner {
 
         g_isRunning = false;
 
-        if (g_udpSock != INVALID_SOCKET) {
-            closesocket(g_udpSock);
-            g_udpSock = INVALID_SOCKET;
+        SOCKET s = g_udpSock.exchange(INVALID_SOCKET, std::memory_order_acq_rel);
+        if (s != INVALID_SOCKET) {
+            closesocket(s);
         }
 
         if (g_listenThread.joinable()) {

@@ -126,9 +126,21 @@ bool TcpServer::AcceptConnection(int timeoutMs){
         CloseClient();
     }
 
-    clientSocket = accept(listenSocket, NULL, NULL);
+    sockaddr_in clientAddr = {};
+    int addrLen = sizeof(clientAddr);
+    clientSocket = accept(listenSocket, (sockaddr*)&clientAddr, &addrLen);
     if (clientSocket == INVALID_SOCKET){
         return false;
+    }
+
+    char ipBuf[INET_ADDRSTRLEN] = {0};
+    std::string resolvedIP = "127.0.0.1";
+    if (inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(ipBuf))) {
+        resolvedIP = ipBuf;
+    }
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        clientIP = resolvedIP;
     }
 
     // Áp dụng bộ tham số tối ưu socket nâng cao (TCP_NODELAY, buffer kênh riêng, Keep-Alive)
@@ -136,7 +148,29 @@ bool TcpServer::AcceptConnection(int timeoutMs){
     return true;
 }
 
+std::string TcpServer::GetClientIP() const {
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        if (!clientIP.empty()) return clientIP;
+    }
+    SOCKET s = clientSocket.load();
+    if (s == INVALID_SOCKET) return "";
+    sockaddr_in addr = {};
+    int len = sizeof(addr);
+    if (getpeername(s, (sockaddr*)&addr, &len) == 0) {
+        char ipBuf[INET_ADDRSTRLEN] = {0};
+        if (inet_ntop(AF_INET, &addr.sin_addr, ipBuf, sizeof(ipBuf))) {
+            return std::string(ipBuf);
+        }
+    }
+    return "";
+}
+
 void TcpServer::Close(){
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        clientIP.clear();
+    }
     ClearSessionKey();
     SOCKET sClient = clientSocket.exchange(INVALID_SOCKET);
     SOCKET sListen = listenSocket.exchange(INVALID_SOCKET);
@@ -151,6 +185,10 @@ void TcpServer::Close(){
 }
 
 void TcpServer::CloseClient(){
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        clientIP.clear();
+    }
     ClearSessionKey();
     SOCKET sClient = clientSocket.exchange(INVALID_SOCKET);
     if (sClient != INVALID_SOCKET){
@@ -162,7 +200,8 @@ void TcpServer::CloseClient(){
 
 bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
     // If session key is active, route all non-auth and non-envelope control packets through encryption
-    if (m_hasSessionKey.load() &&
+    if (m_hasSessionKey.load(std::memory_order_acquire) &&
+        type != Protocol::MSG_AUTH_CHALLENGE &&
         type != Protocol::MSG_AUTH_REQUEST &&
         type != Protocol::MSG_AUTH_RESPONSE &&
         type != Protocol::MSG_ENCRYPTED_CONTROL) {
@@ -172,7 +211,8 @@ bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int 
     // Khóa mutex trước để đảm bảo tính an toàn đa luồng, sau đó mới kiểm tra trạng thái socket
     std::lock_guard<std::mutex> lock(sendMutex);
 
-    if (clientSocket == INVALID_SOCKET){
+    SOCKET s = clientSocket.load();
+    if (s == INVALID_SOCKET){
         return false;
     }
 
@@ -180,12 +220,12 @@ bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int 
     header.type = type;
     header.size = payloadSize;
 
-    if (!SendExact(clientSocket, (const char*)&header, sizeof(Protocol::PacketHeader))) {
+    if (!SendExact(s, (const char*)&header, sizeof(Protocol::PacketHeader))) {
         return false;
     }
 
     if (payloadSize > 0 && payload != nullptr){
-        if (!SendExact(clientSocket, payload, payloadSize)) {
+        if (!SendExact(s, payload, payloadSize)) {
             return false;
         }
     }
@@ -195,25 +235,30 @@ bool TcpServer::SendPacket(Protocol::MessageType type, const char* payload, int 
 
 bool TcpServer::SendRaw(const char* data, int length) {
     std::lock_guard<std::mutex> lock(sendMutex);
-    if (clientSocket == INVALID_SOCKET) {
+    SOCKET s = clientSocket.load();
+    if (s == INVALID_SOCKET) {
         return false;
     }
-    return SendExact(clientSocket, data, length);
+    return SendExact(s, data, length);
 }
 
 bool TcpServer::SendEncryptedPacket(Protocol::MessageType type, const char* payload, int payloadSize) {
-    if (!m_hasSessionKey.load()) return false;
-    return ControlEnvelope::SendEncryptedPacket(this, m_sessionKey, type, payload, payloadSize);
+    uint8_t keyCopy[32];
+    if (!CopySessionKey(keyCopy)) return false;
+    bool ok = ControlEnvelope::SendEncryptedPacket(this, keyCopy, type, payload, payloadSize);
+    std::memset(keyCopy, 0, sizeof(keyCopy));
+    return ok;
 }
 
 bool TcpServer::ReceiveExact(char* buffer, int length){
-    if (clientSocket == INVALID_SOCKET){
+    SOCKET s = clientSocket.load();
+    if (s == INVALID_SOCKET){
         return false;
     }
 
     int byteReceived = 0;
     while (byteReceived < length){
-        int result = recv(clientSocket, buffer + byteReceived, length - byteReceived, 0);
+        int result = recv(s, buffer + byteReceived, length - byteReceived, 0);
         if (result <= 0){
             return false;
         }
@@ -221,18 +266,6 @@ bool TcpServer::ReceiveExact(char* buffer, int length){
     }
 
     return true;
-}
-
-bool TcpServer::CanSendWithoutBlocking(){
-    if (clientSocket == INVALID_SOCKET){
-        return false;
-    }
-    fd_set writeFds;
-    FD_ZERO(&writeFds);
-    FD_SET(clientSocket, &writeFds);
-    timeval tv = { 0, 0 }; // 0 ms: Polling tức thì
-    int result = select(0, NULL, &writeFds, NULL, &tv);
-    return (result > 0);
 }
 
 //Tcp client
@@ -313,7 +346,8 @@ void TcpClient::Close(){
 
 bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int payloadSize){
     // If session key is active, route all non-auth and non-envelope control packets through encryption
-    if (m_hasSessionKey.load() &&
+    if (m_hasSessionKey.load(std::memory_order_acquire) &&
+        type != Protocol::MSG_AUTH_CHALLENGE &&
         type != Protocol::MSG_AUTH_REQUEST &&
         type != Protocol::MSG_AUTH_RESPONSE &&
         type != Protocol::MSG_ENCRYPTED_CONTROL) {
@@ -323,7 +357,8 @@ bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int 
     // Khóa mutex trước để đảm bảo tính an toàn đa luồng, sau đó mới kiểm tra trạng thái socket
     std::lock_guard<std::mutex> lock(sendMutex);
 
-    if (connectSocket == INVALID_SOCKET){
+    SOCKET s = connectSocket.load();
+    if (s == INVALID_SOCKET){
         return false;
     }
 
@@ -331,12 +366,12 @@ bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int 
     header.type = type;
     header.size = payloadSize;
 
-    if (!SendExact(connectSocket, (const char*)&header, sizeof(Protocol::PacketHeader))) {
+    if (!SendExact(s, (const char*)&header, sizeof(Protocol::PacketHeader))) {
         return false;
     }
 
     if (payloadSize > 0 && payload != nullptr){
-        if (!SendExact(connectSocket, payload, payloadSize)) {
+        if (!SendExact(s, payload, payloadSize)) {
             return false;
         }
     }
@@ -346,25 +381,30 @@ bool TcpClient::SendPacket(Protocol::MessageType type, const char* payload, int 
 
 bool TcpClient::SendRaw(const char* data, int length) {
     std::lock_guard<std::mutex> lock(sendMutex);
-    if (connectSocket == INVALID_SOCKET) {
+    SOCKET s = connectSocket.load();
+    if (s == INVALID_SOCKET) {
         return false;
     }
-    return SendExact(connectSocket, data, length);
+    return SendExact(s, data, length);
 }
 
 bool TcpClient::SendEncryptedPacket(Protocol::MessageType type, const char* payload, int payloadSize) {
-    if (!m_hasSessionKey.load()) return false;
-    return ControlEnvelope::SendEncryptedPacket(this, m_sessionKey, type, payload, payloadSize);
+    uint8_t keyCopy[32];
+    if (!CopySessionKey(keyCopy)) return false;
+    bool ok = ControlEnvelope::SendEncryptedPacket(this, keyCopy, type, payload, payloadSize);
+    std::memset(keyCopy, 0, sizeof(keyCopy));
+    return ok;
 }
 
 bool TcpClient::ReceiveExact(char* buffer, int length){
-    if (connectSocket == INVALID_SOCKET){
+    SOCKET s = connectSocket.load();
+    if (s == INVALID_SOCKET){
         return false;
     }
 
     int byteReceived = 0;
     while (byteReceived < length){
-        int result = recv(connectSocket, buffer + byteReceived, length - byteReceived, 0);
+        int result = recv(s, buffer + byteReceived, length - byteReceived, 0);
         if (result <= 0){
             return false;
         }

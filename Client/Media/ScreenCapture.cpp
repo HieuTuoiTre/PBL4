@@ -21,6 +21,7 @@ namespace {
     // ==========================================
     // CỐ ĐỊNH CHẤT LƯỢNG MỨC VỪA PHẢI (BALANCED) & TIẾT KIỆM BĂNG THÔNG
     // ==========================================
+    std::atomic<uint8_t> g_qualityPreset(Protocol::QUALITY_BALANCED);
     std::atomic<uint8_t> g_targetFps(30);
     std::atomic<bool> g_forceFullFrame(false);
     bool g_needsRefinement = false;
@@ -34,7 +35,17 @@ namespace {
     // Mức nén chuẩn cân bằng tối ưu: Chất lượng 65, lấy mẫu màu TJSAMP_420 (YUV 4:2:0)
     // Giữ hình ảnh và văn bản rõ nét, đồng thời tiết kiệm tối đa băng thông mạng (~1.5-2.5 Mbps ở 30 FPS)
     CompressionConfig GetCompressionConfig(int changedArea, int totalPixels) {
-        return { 65, TJSAMP_420 };
+        uint8_t preset = g_qualityPreset.load(std::memory_order_acquire);
+        switch (preset) {
+            case Protocol::QUALITY_LOW:
+                return { 50, TJSAMP_420 };
+            case Protocol::QUALITY_HIGH:
+                return { 80, TJSAMP_420 };
+            case Protocol::QUALITY_BALANCED:
+            case Protocol::QUALITY_AUTO:
+            default:
+                return { 65, TJSAMP_420 };
+        }
     }
 
     // Nén khung hoàn thiện toàn màn hình (Progressive Refinement) sắc nét tối ưu khi dừng chuyển động
@@ -152,17 +163,26 @@ namespace {
         // 2. Lấy DXGI Output 1 (Màn hình chính)
         IDXGIDevice* dxgiDevice = nullptr;
         hr = g_d3dDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice);
-        if (FAILED(hr) || !dxgiDevice) return false;
+        if (FAILED(hr) || !dxgiDevice) {
+            CleanupDxgi();
+            return false;
+        }
 
         IDXGIAdapter* dxgiAdapter = nullptr;
         hr = dxgiDevice->GetParent(__uuidof(IDXGIAdapter), (void**)&dxgiAdapter);
         dxgiDevice->Release();
-        if (FAILED(hr) || !dxgiAdapter) return false;
+        if (FAILED(hr) || !dxgiAdapter) {
+            CleanupDxgi();
+            return false;
+        }
 
         IDXGIOutput* dxgiOutput = nullptr;
         hr = dxgiAdapter->EnumOutputs(0, &dxgiOutput);
         dxgiAdapter->Release();
-        if (FAILED(hr) || !dxgiOutput) return false;
+        if (FAILED(hr) || !dxgiOutput) {
+            CleanupDxgi();
+            return false;
+        }
 
         DXGI_OUTPUT_DESC outputDesc;
         dxgiOutput->GetDesc(&outputDesc);
@@ -172,7 +192,10 @@ namespace {
         IDXGIOutput1* dxgiOutput1 = nullptr;
         hr = dxgiOutput->QueryInterface(__uuidof(IDXGIOutput1), (void**)&dxgiOutput1);
         dxgiOutput->Release();
-        if (FAILED(hr) || !dxgiOutput1) return false;
+        if (FAILED(hr) || !dxgiOutput1) {
+            CleanupDxgi();
+            return false;
+        }
 
         // 3. Khởi tạo Desktop Duplication
         hr = dxgiOutput1->DuplicateOutput(g_d3dDevice, &g_dxgiDupl);
@@ -475,6 +498,11 @@ namespace {
     }
 
     bool InitGdi() {
+        int curW = GetSystemMetrics(SM_CXSCREEN);
+        int curH = GetSystemMetrics(SM_CYSCREEN);
+        if (g_hCaptureDC && g_hDibBitmap && g_dibPixels && g_gdiWidth == curW && g_gdiHeight == curH) {
+            return true;
+        }
         CleanupGdi();
 
         HDESK hInputDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
@@ -688,9 +716,10 @@ namespace ScreenCapture {
         g_isInitialized = false;
     }
 
-    void SetVideoConfig(uint8_t qualityPreset, uint8_t targetFps) {
-        // Cố định chất lượng chuẩn vừa phải và 30 FPS
-        ForceFullFrame();
+    void SetVideoConfig(uint8_t /*qualityPreset*/, uint8_t /*targetFps*/) {
+        // Khóa cứng chất lượng BALANCED (65) và 30 FPS để giữ độ ổn định tối đa
+        g_qualityPreset.store(Protocol::QUALITY_BALANCED, std::memory_order_release);
+        g_targetFps.store(30, std::memory_order_release);
     }
 
     uint8_t GetQualityPreset() {
@@ -698,7 +727,7 @@ namespace ScreenCapture {
     }
 
     uint8_t GetTargetFps() {
-        return 30; // Cố định 30 FPS
+        return 30;
     }
 
     const uint32_t* GetCurrentFramePixels(int& outWidth, int& outHeight) {

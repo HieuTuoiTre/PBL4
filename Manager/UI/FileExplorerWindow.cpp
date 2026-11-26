@@ -2,6 +2,7 @@
 
 #include "../../Shared/Utils.h"
 #include "../../Shared/CRC32.h"
+#include "../../Shared/PathSanitizer.h"
 #include "../FileTransfer/FileManager.h"
 
 #include <commctrl.h>
@@ -69,6 +70,7 @@ namespace {
 
     std::atomic<bool> g_transferActive(false);
     std::atomic<bool> g_transferCancelled(false);
+    std::thread g_uploadThread;
     std::string g_batchRootName = "";
     uint32_t g_batchTotalFiles = 0;
     uint32_t g_batchCurrentFileIdx = 0;
@@ -946,12 +948,18 @@ namespace {
             }
 
             case WM_FILE_BATCH_START_MSG: {
+                EnterCriticalSection(&g_fileCs);
+                std::string rootName = g_batchRootName;
+                uint32_t totalFiles = g_batchTotalFiles;
+                uint64_t totalBytes = g_batchTotalBytes;
+                LeaveCriticalSection(&g_fileCs);
+
                 ShowWindow(g_hProgressBar, SW_SHOW);
                 SendMessageW(g_hProgressBar, PBM_SETRANGE32, 0, 100);
                 SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
 
-                std::wstring statusStr = L"⏳ Bắt đầu truyền batch: " + Utils::Utf8ToWide(g_batchRootName) +
-                                         L" (" + std::to_wstring(g_batchTotalFiles) + L" tệp, " + FormatBytes(g_batchTotalBytes) + L")";
+                std::wstring statusStr = L"⏳ Bắt đầu truyền batch: " + Utils::Utf8ToWide(rootName) +
+                                         L" (" + std::to_wstring(totalFiles) + L" tệp, " + FormatBytes(totalBytes) + L")";
                 if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 return 0;
             }
@@ -1013,8 +1021,12 @@ namespace {
             }
 
             case WM_FILE_BATCH_END_MSG: {
+                EnterCriticalSection(&g_fileCs);
+                std::string rootName = g_batchRootName;
+                LeaveCriticalSection(&g_fileCs);
+
                 SendMessageW(g_hProgressBar, PBM_SETPOS, 100, 0);
-                std::wstring statusStr = L"✓ Đã hoàn tất toàn bộ cây thư mục/batch: " + Utils::Utf8ToWide(g_batchRootName) +
+                std::wstring statusStr = L"✓ Đã hoàn tất toàn bộ cây thư mục/batch: " + Utils::Utf8ToWide(rootName) +
                                          L" • Tất cả các tệp đều đã được kiểm tra toàn vẹn CRC32 thành công";
                 if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 return 0;
@@ -1028,8 +1040,12 @@ namespace {
             }
 
             case WM_FILE_ERROR_MSG: {
+                EnterCriticalSection(&g_fileCs);
+                std::string errMsg = g_lastErrorMessage;
+                LeaveCriticalSection(&g_fileCs);
+
                 SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
-                std::wstring statusStr = L"✖ Lỗi truyền tải: " + Utils::Utf8ToWide(g_lastErrorMessage);
+                std::wstring statusStr = L"✖ Lỗi truyền tải: " + Utils::Utf8ToWide(errMsg);
                 if (g_hStatusLabel) SetWindowTextW(g_hStatusLabel, statusStr.c_str());
                 return 0;
             }
@@ -1057,19 +1073,23 @@ namespace {
                     }
                     if (id == IDC_FILE_UPLOAD_FILE) {
                         std::wstring localFile = PickFile(hwnd);
-                        if (!localFile.empty()) {
-                            std::thread([localFile]() {
-                                UploadSingleFile(localFile, g_curPath);
-                            }).detach();
+                        if (!localFile.empty() && !g_transferActive) {
+                            if (g_uploadThread.joinable()) g_uploadThread.join();
+                            std::string targetDir = g_curPath;
+                            g_uploadThread = std::thread([localFile, targetDir]() {
+                                UploadSingleFile(localFile, targetDir);
+                            });
                         }
                         return 0;
                     }
                     if (id == IDC_FILE_UPLOAD_DIR) {
                         std::wstring localFolder = PickFolder(hwnd);
-                        if (!localFolder.empty()) {
-                            std::thread([localFolder]() {
-                                UploadFolder(localFolder, g_curPath);
-                            }).detach();
+                        if (!localFolder.empty() && !g_transferActive) {
+                            if (g_uploadThread.joinable()) g_uploadThread.join();
+                            std::string targetDir = g_curPath;
+                            g_uploadThread = std::thread([localFolder, targetDir]() {
+                                UploadFolder(localFolder, targetDir);
+                            });
                         }
                         return 0;
                     }
@@ -1127,6 +1147,7 @@ namespace {
             }
 
             case WM_CLOSE:
+                g_transferCancelled = true;
                 DestroyWindow(hwnd);
                 g_hFileWnd = NULL;
                 g_hFileList = NULL;
@@ -1140,13 +1161,21 @@ namespace {
                 g_hAddressEdit = NULL;
                 g_hProgressBar = NULL;
                 g_hStatusLabel = NULL;
+                if (g_uploadThread.joinable()) {
+                    g_uploadThread.join();
+                }
                 if (g_hImageList) {
                     ImageList_Destroy(g_hImageList);
                     g_hImageList = NULL;
                 }
-                if (g_hFontNormal) DeleteObject(g_hFontNormal);
-                if (g_hFontBtn) DeleteObject(g_hFontBtn);
-                if (g_hBgBrush) DeleteObject(g_hBgBrush);
+                if (g_hFontNormal) {
+                    DeleteObject(g_hFontNormal);
+                    g_hFontNormal = NULL;
+                }
+                if (g_hFontBtn) {
+                    DeleteObject(g_hFontBtn);
+                    g_hFontBtn = NULL;
+                }
                 return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1217,17 +1246,19 @@ namespace FileExplorerWindow {
     void OnFileInfo(const Protocol::FileInfoPayload& info) {
         if (!g_csInit) return;
         EnterCriticalSection(&g_fileCs);
-        std::string fileName = info.fileName;
+        std::string safeFileName = PathSanitizer::SanitizeFileName(info.fileName);
+        std::string safePath;
+        if (!PathSanitizer::ResolveSafePath("downloads", safeFileName, safePath)) {
+            LeaveCriticalSection(&g_fileCs);
+            return;
+        }
 
-        size_t slashPos = fileName.find_last_of("\\/");
-        if (slashPos != std::string::npos) fileName = fileName.substr(slashPos + 1);
-
-        g_downloadingFile = fileName;
+        g_downloadingFile = safeFileName;
         g_totalFileSize = info.fileSize;
         g_downloadedBytes = 0;
         g_transferStartTimeMs = GetTickCount64();
 
-        g_fileMgr.OpenFileForWrite(g_downloadingFile);
+        g_fileMgr.OpenForWrite(safePath, info.fileSize, 0);
         LeaveCriticalSection(&g_fileCs);
 
         if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_START_DL, 0, 0);
@@ -1238,11 +1269,15 @@ namespace FileExplorerWindow {
         EnterCriticalSection(&g_fileCs);
         std::string relPath = header.relativePath;
 
-        std::string savePath = "downloads/" + relPath;
+        std::string safePath;
+        if (!PathSanitizer::ResolveSafePath("downloads", relPath, safePath)) {
+            LeaveCriticalSection(&g_fileCs);
+            return;
+        }
 
         if (header.isDirectory) {
             try {
-                std::filesystem::create_directories(std::filesystem::u8path(savePath));
+                std::filesystem::create_directories(std::filesystem::u8path(safePath));
             } catch (...) {}
             LeaveCriticalSection(&g_fileCs);
             return;
@@ -1253,7 +1288,7 @@ namespace FileExplorerWindow {
         g_downloadedBytes = 0;
         g_transferStartTimeMs = GetTickCount64();
 
-        g_fileMgr.OpenForWrite(savePath, header.fileSize, header.expectedCrc32);
+        g_fileMgr.OpenForWrite(safePath, header.fileSize, header.expectedCrc32);
         LeaveCriticalSection(&g_fileCs);
 
         if (g_hFileWnd) PostMessageW(g_hFileWnd, WM_FILE_START_DL, 0, 0);

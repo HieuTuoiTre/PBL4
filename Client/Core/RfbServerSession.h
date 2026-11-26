@@ -7,8 +7,21 @@
 
 #include <string>
 #include <atomic>
+#include <functional>
 
 namespace RfbServer {
+
+    using AuthValidator = std::function<bool(const std::string& peerIp)>;
+
+    /**
+     * @brief Cấu hình hàm ủy quyền cho kết nối RFB (mặc định kiểm tra SessionManager).
+     */
+    void SetAuthorizationValidator(AuthValidator validator);
+
+    /**
+     * @brief Ngắt kết nối client RFB hiện tại ngay lập tức.
+     */
+    void DisconnectClient();
 
     /**
      * @brief Starts the RFB 3.8 / VNC Server listening on the specified port (default 5900).

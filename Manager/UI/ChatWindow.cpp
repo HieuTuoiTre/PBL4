@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <vector>
 #include <string>
+#include <atomic>
 
 #define WM_CHAT_NEW_MESSAGE (WM_APP + 201)
 #define IDC_CHAT_HISTORY    2001
@@ -24,7 +25,7 @@ namespace {
     TcpClient* g_client = nullptr;
     CRITICAL_SECTION g_cs;
     bool g_csInit = false;
-    int g_unreadCount = 0;
+    std::atomic<int> g_unreadCount{0};
     std::vector<std::wstring> g_pendingMessages;
 
     float GetDpiScale(HWND hwnd) {

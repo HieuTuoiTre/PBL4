@@ -18,6 +18,18 @@ namespace SessionManager {
     void SetExpectedToken(const std::string& token);
     std::string GetExpectedToken();
 
+    // Sinh mã PIN ngẫu nhiên 6 chữ số
+    std::string GenerateNewPin();
+
+    // Quản lý cấp quyền kết nối cổng RFB 5900 dựa trên cổng 8080
+    bool IsPeerAuthorized(const std::string& ip);
+    void AuthorizePeer(const std::string& ip, uint64_t durationMs = 30000);
+    void RevokeAuthorizedPeer();
+    std::string GetAuthorizedPeerIP();
+
+    // Correlation / Session ID cho việc truy vết nhật ký (N-2)
+    std::string GetCurrentSessionId();
+
     // Kiểm tra trạng thái kết nối phiên
     bool IsConnected();
 

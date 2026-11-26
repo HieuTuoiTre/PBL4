@@ -176,9 +176,19 @@ namespace {
         g_serverHeight = (int)ntohs(sInit.framebufferHeight);
         uint32_t nameLen = ntohl(sInit.nameLength);
 
-        std::vector<char> nameBuf(nameLen + 1, 0);
-        if (nameLen > 0 && nameLen < 2048) {
-            g_client.ReceiveExact(nameBuf.data(), nameLen);
+        if (nameLen > 2048) {
+            outError = "ServerInit nameLength vượt ngưỡng an toàn (> 2048 bytes)!";
+            SetState(Rfb::RFBSTATE_UNINITIALISED);
+            return false;
+        }
+
+        if (nameLen > 0) {
+            std::vector<char> nameBuf(nameLen + 1, 0);
+            if (!g_client.ReceiveExact(nameBuf.data(), (int)nameLen)) {
+                outError = "Lỗi nhận tên máy chủ trong ServerInit!";
+                SetState(Rfb::RFBSTATE_UNINITIALISED);
+                return false;
+            }
             g_serverDesktopName = nameBuf.data();
         }
 
@@ -273,6 +283,10 @@ namespace {
                                 // Tight Solid Fill Rectangle (RFC 6143 / Tight spec: 3 bytes RGB)
                                 uint8_t rgb[3] = {0};
                                 if (!g_client.ReceiveExact((char*)rgb, 3)) return;
+                                if (rw == 0 || rh == 0 || (uint32_t)rx + rw > 16384 || (uint32_t)ry + rh > 16384 ||
+                                    (uint64_t)rw * rh * 4 > 64ULL * 1024 * 1024) {
+                                    return;
+                                }
                                 uint32_t color = 0xFF000000 | ((uint32_t)rgb[0] << 16) | ((uint32_t)rgb[1] << 8) | (uint32_t)rgb[2];
                                 std::vector<uint32_t> fillBuf((size_t)rw * rh, color);
                                 RemoteWindow::UpdateRawFrame((int)rx, (int)ry, (int)rw, (int)rh, fillBuf.data(), false);
@@ -303,7 +317,7 @@ namespace {
                                     jpegBuf.resize(jpegLen);
                                     if (!g_client.ReceiveExact(jpegBuf.data(), (int)jpegLen)) return;
 
-                                    Protocol::VideoDeltaHeader delta = { (int16_t)rx, (int16_t)ry, (int16_t)rw, (int16_t)rh };
+                                    Protocol::VideoDeltaHeader delta = { (int32_t)rx, (int32_t)ry, (int32_t)rw, (int32_t)rh };
                                     RemoteWindow::UpdateFrame(delta, jpegBuf.data(), (int)jpegLen);
 
                                     std::stringstream ss;
@@ -319,6 +333,10 @@ namespace {
                                 return;
                             }
                         } else if (enc == Rfb::ENCODING_RAW) {
+                            if (rw == 0 || rh == 0 || (uint32_t)rx + rw > 16384 || (uint32_t)ry + rh > 16384 ||
+                                (uint64_t)rw * rh * 4 > 64ULL * 1024 * 1024) {
+                                return;
+                            }
                             size_t rawBytes = (size_t)rw * rh * 4;
                             std::vector<char> rawPixels(rawBytes);
                             if (!g_client.ReceiveExact(rawPixels.data(), (int)rawBytes)) return;
@@ -347,9 +365,14 @@ namespace {
                         return;
                     }
                     len = ntohl(len);
-                    if (len > 0 && len <= 1024 * 1024) {
+                    if (len > 1024 * 1024) {
+                        return;
+                    }
+                    if (len > 0) {
                         std::vector<char> textBuf(len + 1, 0);
-                        g_client.ReceiveExact(textBuf.data(), len);
+                        if (!g_client.ReceiveExact(textBuf.data(), (int)len)) {
+                            return;
+                        }
                     }
                     break;
                 }
@@ -359,7 +382,7 @@ namespace {
                     break;
 
                 default:
-                    break;
+                    return;
             }
         }
     }

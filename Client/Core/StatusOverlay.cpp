@@ -1,9 +1,11 @@
 #include "StatusOverlay.h"
 #include <chrono>
+#include <mutex>
 
 static const wchar_t* OVERLAY_CLASS_NAME = L"ClientStatusOverlayClass";
 static const wchar_t* ALERT_CLASS_NAME = L"ConnectionAlertPopupClass";
 static std::wstring g_alertMessage = L"";
+static std::mutex g_alertMutex;
 
 StatusOverlay::StatusOverlay() 
     : m_hwnd(nullptr), m_hInstance(nullptr), 
@@ -241,7 +243,10 @@ void ConnectionAlert::Show(HINSTANCE hInstance, const std::wstring& message) {
     if (!hInstance) hInstance = GetModuleHandleW(NULL);
 
     std::thread([hInstance, message]() {
-        g_alertMessage = message;
+        {
+            std::lock_guard<std::mutex> lock(g_alertMutex);
+            g_alertMessage = message;
+        }
 
         WNDCLASSEXW wc = { 0 };
         wc.cbSize = sizeof(WNDCLASSEXW);
@@ -355,8 +360,13 @@ void ConnectionAlert::Draw(HWND hwnd) {
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     SelectObject(memDC, hBodyFont);
 
+    std::wstring msgCopy;
+    {
+        std::lock_guard<std::mutex> lock(g_alertMutex);
+        msgCopy = g_alertMessage;
+    }
     RECT bodyRect = { 16, 32, rect.right - 16, rect.bottom - 10 };
-    DrawTextW(memDC, g_alertMessage.c_str(), -1, &bodyRect, DT_SINGLELINE | DT_LEFT);
+    DrawTextW(memDC, msgCopy.c_str(), -1, &bodyRect, DT_SINGLELINE | DT_LEFT);
 
     // Blit to screen
     BitBlt(hdc, 0, 0, rect.right, rect.bottom, memDC, 0, 0, SRCCOPY);

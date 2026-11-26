@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 #define WM_CHAT_CLIENT_SHOW       (WM_APP + 301)
 #define WM_CHAT_CLIENT_HIDE       (WM_APP + 302)
@@ -27,8 +28,7 @@ namespace {
     HBRUSH g_hBgBrush = NULL;
 
     TcpServer* g_controlServer = nullptr;
-    CRITICAL_SECTION g_cs;
-    bool g_csInit = false;
+    std::mutex g_cs;
 
     std::vector<std::wstring> g_pendingMessages;
     std::thread g_uiThread;
@@ -137,12 +137,13 @@ namespace {
                 SendMessageW(g_hHistoryEdit, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
                 SendMessageW(g_hInputEdit, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-                EnterCriticalSection(&g_cs);
-                for (const auto& line : g_pendingMessages) {
-                    AppendMessageToHistory(line);
+                {
+                    std::lock_guard<std::mutex> lock(g_cs);
+                    for (const auto& line : g_pendingMessages) {
+                        AppendMessageToHistory(line);
+                    }
+                    g_pendingMessages.clear();
                 }
-                g_pendingMessages.clear();
-                LeaveCriticalSection(&g_cs);
 
                 SetFocus(g_hInputEdit);
                 return 0;
@@ -254,12 +255,13 @@ namespace {
             }
 
             case WM_CHAT_CLIENT_NEW_MSG: {
-                EnterCriticalSection(&g_cs);
-                for (const auto& line : g_pendingMessages) {
-                    AppendMessageToHistory(line);
+                {
+                    std::lock_guard<std::mutex> lock(g_cs);
+                    for (const auto& line : g_pendingMessages) {
+                        AppendMessageToHistory(line);
+                    }
+                    g_pendingMessages.clear();
                 }
-                g_pendingMessages.clear();
-                LeaveCriticalSection(&g_cs);
 
                 ShowWindow(hwnd, SW_SHOW);
                 ShowWindow(hwnd, SW_RESTORE);
@@ -343,11 +345,6 @@ namespace {
 namespace ClientChatWindow {
 
     void Initialize(TcpServer* controlServer) {
-        if (!g_csInit) {
-            InitializeCriticalSection(&g_cs);
-            g_csInit = true;
-        }
-
         g_controlServer = controlServer;
 
         if (!g_isThreadRunning.load()) {
@@ -387,11 +384,6 @@ namespace ClientChatWindow {
     }
 
     void OnMessageReceived(const Protocol::ChatMessagePayload& msg) {
-        if (!g_csInit) {
-            InitializeCriticalSection(&g_cs);
-            g_csInit = true;
-        }
-
         std::wstring timeStr = GetCurrentTimeString();
         std::string senderStr = (strlen(msg.sender) > 0) ? msg.sender : "Quản lý";
         std::wstring senderW = Utils::Utf8ToWide(senderStr);
@@ -399,9 +391,10 @@ namespace ClientChatWindow {
 
         std::wstring formattedLine = timeStr + L" " + senderW + L": " + contentW;
 
-        EnterCriticalSection(&g_cs);
-        g_pendingMessages.push_back(formattedLine);
-        LeaveCriticalSection(&g_cs);
+        {
+            std::lock_guard<std::mutex> lock(g_cs);
+            g_pendingMessages.push_back(formattedLine);
+        }
 
         if (g_hClientChatWnd && IsWindow(g_hClientChatWnd)) {
             PostMessageW(g_hClientChatWnd, WM_CHAT_CLIENT_NEW_MSG, 0, 0);
@@ -422,9 +415,10 @@ namespace ClientChatWindow {
             }
         }
         g_uiThreadId = 0;
-        EnterCriticalSection(&g_cs);
-        g_pendingMessages.clear();
-        LeaveCriticalSection(&g_cs);
+        {
+            std::lock_guard<std::mutex> lock(g_cs);
+            g_pendingMessages.clear();
+        }
         g_controlServer = nullptr;
     }
 }

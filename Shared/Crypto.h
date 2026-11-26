@@ -62,7 +62,25 @@ namespace Crypto {
     std::string Sha256Hex(const uint8_t* data, size_t len);
 
     /**
-     * @brief Derives a 32-byte cryptographic key from a password or session token and optional salt.
+     * @brief Securely zeroes sensitive memory without compiler dead-store elimination.
+     */
+    inline void SecureZero(void* ptr, size_t len) {
+        if (!ptr || len == 0) return;
+        volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
+        while (len--) {
+            *p++ = 0;
+        }
+    }
+
+    /**
+     * @brief Computes RFC 2104 HMAC-SHA256 authentication code.
+     */
+    void HmacSha256(const uint8_t* key, size_t keyLen,
+                    const uint8_t* data, size_t dataLen,
+                    uint8_t outMac[SHA256_DIGEST_SIZE]);
+
+    /**
+     * @brief Derives a 32-byte cryptographic key from a password or session token and optional salt using PBKDF2-HMAC-SHA256.
      * @param passwordOrToken User password or pre-shared key token string.
      * @param salt Optional salt buffer (can be nullptr if saltLen == 0).
      * @param saltLen Length of salt buffer in bytes.

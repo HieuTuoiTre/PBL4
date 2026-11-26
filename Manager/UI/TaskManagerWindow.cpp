@@ -936,9 +936,8 @@ namespace {
                     ImageList_Destroy(g_hImageList);
                     g_hImageList = NULL;
                 }
-                if (g_hFontNormal) DeleteObject(g_hFontNormal);
-                if (g_hFontBtn) DeleteObject(g_hFontBtn);
-                if (g_hBgBrush) DeleteObject(g_hBgBrush);
+                if (g_hFontNormal) { DeleteObject(g_hFontNormal); g_hFontNormal = NULL; }
+                if (g_hFontBtn) { DeleteObject(g_hFontBtn); g_hFontBtn = NULL; }
                 return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);

@@ -71,14 +71,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
+    // 3.5 Sinh mã PIN ngẫu nhiên 6 chữ số cho phiên làm việc
+    std::string sessionPin = SessionManager::GenerateNewPin();
+    TrayIcon::SetPin(sessionPin);
+    TrayIcon::ShowPinNotification();
+
     // 4. Đẩy vòng lặp mạng sang một luồng (Thread) chạy ngầm riêng biệt
     std::thread networkThread([]() {
         // Cổng cơ sở 8080 (mở 8080 cho Control, 8081 cho Video, 8082 cho Audio)
         SessionManager::StartServer(Protocol::PORT_CONTROL); 
     });
-    
-    // Tách rời luồng này khỏi luồng chính (Main Thread)
-    networkThread.detach();
 
     // 4.1 Khởi động chuẩn giao thức VNC / RFB 3.8 trên cổng 5900
     RfbServer::Start(Rfb::PORT_VNC);
@@ -97,7 +99,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // 6. Dọn dẹp tài nguyên trước khi tắt hẳn ứng dụng
     RfbServer::Stop();                // Tắt máy chủ VNC / RFB
     TrayIcon::Cleanup();              // Xóa icon khỏi màn hình
-    SessionManager::Stop();           // Đóng socket, tắt luồng mạng
+    SessionManager::Stop();           // Đóng socket, báo hiệu tắt luồng mạng
+    if (networkThread.joinable()) {
+        networkThread.join();         // Chờ luồng mạng thoát hẳn trước khi Cleanup Winsock
+    }
     DiscoveryResponder::Stop();       // Dừng lắng nghe UDP và gửi thông báo DISCOVERY_BYE
     Network::Cleanup();               // Tắt Winsock
 

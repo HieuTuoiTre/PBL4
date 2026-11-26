@@ -25,4 +25,5 @@ Instruction.txt
 
 graphify-out/
 teamwork/
-tests/
+tests/*.exe
+tests/test_summary.json

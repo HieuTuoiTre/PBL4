@@ -17,6 +17,9 @@
 #define WM_CLIENT_UPDATE  (WM_APP + 202)
 #define TIMER_SCAN_ID     1001
 
+extern void SetManagerSessionToken(const std::string& token);
+extern std::string GetManagerSessionToken();
+
 namespace {
 
     struct ClientDisplayItem {
@@ -31,6 +34,7 @@ namespace {
     HWND g_hConnectWnd = NULL;
     HWND g_hListClients = NULL;
     HWND g_hEditIp = NULL;
+    HWND g_hEditPin = NULL;
     HWND g_hBtnConnect = NULL;
     HWND g_hBtnLocalhost = NULL;
     HWND g_hBtnScan = NULL;
@@ -41,6 +45,7 @@ namespace {
     WNDPROC g_oldHeaderProc = NULL;
     HWND g_hHoveredBtn = NULL;
     bool g_editHasFocus = false;
+    bool g_pinHasFocus = false;
     bool g_hasAutoFilledIp = false;
     bool g_userManuallyEditedIp = false;
     HIMAGELIST g_hImageList = NULL;
@@ -56,6 +61,7 @@ namespace {
     HBRUSH g_hWhiteBrush = NULL;
 
     WNDPROC g_oldEditProc = NULL;
+    WNDPROC g_oldPinEditProc = NULL;
     ConnectWindow::ConnectCallback g_callback = nullptr;
 
     bool g_isOpen = false;
@@ -75,7 +81,8 @@ namespace {
         IDC_BTN_LOCALHOST = 103,
         IDC_BTN_SCAN      = 104,
         IDC_BTN_EXIT      = 105,
-        IDC_CHK_COMPAT    = 106
+        IDC_CHK_COMPAT    = 106,
+        IDC_EDIT_PIN      = 107
     };
 
     void AddRoundRectPath(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& rect, float radius) {
@@ -215,6 +222,27 @@ namespace {
         return CallWindowProcW(g_oldEditProc, hWnd, uMsg, wParam, lParam);
     }
 
+    LRESULT CALLBACK PinEditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        if (uMsg == WM_KEYDOWN) {
+            if (wParam == VK_RETURN) {
+                SendMessageW(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(IDC_BTN_CONNECT, BN_CLICKED), 0);
+                return 0;
+            } else if (wParam == VK_ESCAPE) {
+                SendMessageW(GetParent(hWnd), WM_CLOSE, 0, 0);
+                return 0;
+            }
+        } else if (uMsg == WM_SETFOCUS) {
+            g_pinHasFocus = true;
+            RECT rc = { 210, 392, 340, 434 };
+            InvalidateRect(GetParent(hWnd), &rc, FALSE);
+        } else if (uMsg == WM_KILLFOCUS) {
+            g_pinHasFocus = false;
+            RECT rc = { 210, 392, 340, 434 };
+            InvalidateRect(GetParent(hWnd), &rc, FALSE);
+        }
+        return CallWindowProcW(g_oldPinEditProc, hWnd, uMsg, wParam, lParam);
+    }
+
     void RefreshListViewUI() {
         if (!g_hListClients) return;
 
@@ -291,6 +319,19 @@ namespace {
         std::wstring trimmed = ws.substr(start, end - start + 1);
         std::string ipStr = Utils::WideToUtf8(trimmed);
 
+        wchar_t pinBuf[64] = {0};
+        GetWindowTextW(g_hEditPin, pinBuf, 63);
+        std::wstring pinWs = pinBuf;
+        size_t pstart = pinWs.find_first_not_of(L" \t\r\n");
+        size_t pend = pinWs.find_last_not_of(L" \t\r\n");
+        if (pstart == std::wstring::npos) {
+            SetStatus(L"⚠ Vui lòng nhập Mã PIN kết nối từ máy Client!", 2);
+            SetFocus(g_hEditPin);
+            return;
+        }
+        std::string pinStr = Utils::WideToUtf8(pinWs.substr(pstart, pend - pstart + 1));
+        SetManagerSessionToken(pinStr);
+
         g_targetIP = ipStr;
         g_isConnecting = true;
 
@@ -301,6 +342,7 @@ namespace {
         EnableWindow(g_hBtnLocalhost, FALSE);
         EnableWindow(g_hBtnScan, FALSE);
         EnableWindow(g_hEditIp, FALSE);
+        EnableWindow(g_hEditPin, FALSE);
         EnableWindow(g_hListClients, FALSE);
         if (g_hChkCompat) EnableWindow(g_hChkCompat, FALSE);
 
@@ -631,27 +673,35 @@ namespace {
 
                 g_hEditIp = CreateWindowExW(0, L"EDIT", L"",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                    76, 405, 168, 20, hwnd, (HMENU)IDC_EDIT_IP, GetModuleHandle(NULL), NULL);
+                    70, 405, 130, 20, hwnd, (HMENU)IDC_EDIT_IP, GetModuleHandle(NULL), NULL);
                 SendMessageW(g_hEditIp, WM_SETFONT, (WPARAM)g_hFontEdit, TRUE);
 
                 g_oldEditProc = (WNDPROC)SetWindowLongPtrW(g_hEditIp, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
+                g_hEditPin = CreateWindowExW(0, L"EDIT", L"",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                    248, 405, 74, 20, hwnd, (HMENU)IDC_EDIT_PIN, GetModuleHandle(NULL), NULL);
+                SendMessageW(g_hEditPin, WM_SETFONT, (WPARAM)g_hFontEdit, TRUE);
+                SendMessageW(g_hEditPin, EM_SETLIMITTEXT, 8, 0);
+
+                g_oldPinEditProc = (WNDPROC)SetWindowLongPtrW(g_hEditPin, GWLP_WNDPROC, (LONG_PTR)PinEditSubclassProc);
+
                 g_hBtnLocalhost = CreateWindowExW(0, L"BUTTON", L"Localhost",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                    262, 394, 88, 36, hwnd, (HMENU)IDC_BTN_LOCALHOST, GetModuleHandle(NULL), NULL);
+                    338, 394, 78, 36, hwnd, (HMENU)IDC_BTN_LOCALHOST, GetModuleHandle(NULL), NULL);
 
-                g_hChkCompat = CreateWindowExW(0, L"BUTTON", L"Tương thích TightVNC",
+                g_hChkCompat = CreateWindowExW(0, L"BUTTON", L"Tương thích VNC",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                    362, 400, 175, 24, hwnd, (HMENU)IDC_CHK_COMPAT, GetModuleHandle(NULL), NULL);
+                    424, 400, 120, 24, hwnd, (HMENU)IDC_CHK_COMPAT, GetModuleHandle(NULL), NULL);
                 SendMessageW(g_hChkCompat, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
                 g_hBtnConnect = CreateWindowExW(0, L"BUTTON", L"↗  Kết nối",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                    552, 402, 102, 38, hwnd, (HMENU)IDC_BTN_CONNECT, GetModuleHandle(NULL), NULL);
+                    552, 400, 102, 38, hwnd, (HMENU)IDC_BTN_CONNECT, GetModuleHandle(NULL), NULL);
 
                 g_hBtnExit = CreateWindowExW(0, L"BUTTON", L"Thoát",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                    662, 402, 70, 38, hwnd, (HMENU)IDC_BTN_EXIT, GetModuleHandle(NULL), NULL);
+                    662, 400, 70, 38, hwnd, (HMENU)IDC_BTN_EXIT, GetModuleHandle(NULL), NULL);
 
                 SetTimer(hwnd, TIMER_SCAN_ID, 3500, NULL);
 
@@ -731,16 +781,17 @@ namespace {
                     Gdiplus::SolidBrush card1TitleBrush(Gdiplus::Color(255, 15, 23, 42));
                     g.DrawString(L"Danh sách máy Client đang bật trong mạng LAN", -1, &fontCard1, Gdiplus::PointF(40.0f, 102.0f), &sfLeft, &card1TitleBrush);
 
-                    Gdiplus::RectF card2Rect(24.0f, 356.0f, 340.0f, 84.0f);
+                    Gdiplus::RectF card2Rect(24.0f, 356.0f, 308.0f, 84.0f);
                     Gdiplus::GraphicsPath card2Path;
                     AddRoundRectPath(card2Path, card2Rect, 10.0f);
                     g.FillPath(&whiteBrush, &card2Path);
                     g.DrawPath(&cardBorder, &card2Path);
 
                     Gdiplus::Font fontCard2(&ff, 12.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                    g.DrawString(L"Hoặc nhập địa chỉ IP Client thủ công:", -1, &fontCard2, Gdiplus::PointF(38.0f, 368.0f), &sfLeft, &card1TitleBrush);
+                    g.DrawString(L"Hoặc nhập IP & Mã PIN Client thủ công:", -1, &fontCard2, Gdiplus::PointF(38.0f, 368.0f), &sfLeft, &card1TitleBrush);
 
-                    Gdiplus::RectF ipBoxRect(38.0f, 394.0f, 214.0f, 36.0f);
+                    // IP Box
+                    Gdiplus::RectF ipBoxRect(38.0f, 394.0f, 166.0f, 36.0f);
                     Gdiplus::GraphicsPath ipBoxPath;
                     AddRoundRectPath(ipBoxPath, ipBoxRect, 6.0f);
 
@@ -748,13 +799,13 @@ namespace {
                                             g_editHasFocus ? 1.6f : 1.0f);
                     g.DrawPath(&ipBorderPen, &ipBoxPath);
 
-                    Gdiplus::RectF miniScr(46.0f, 404.0f, 22.0f, 15.0f);
+                    Gdiplus::RectF miniScr(44.0f, 404.0f, 22.0f, 15.0f);
                     Gdiplus::GraphicsPath miniScrPath;
                     AddRoundRectPath(miniScrPath, miniScr, 1.5f);
                     Gdiplus::Pen miniPen(Gdiplus::Color(255, 71, 85, 105), 1.2f);
                     g.DrawPath(&miniPen, &miniScrPath);
-                    g.DrawLine(&miniPen, 57.0f, 419.0f, 57.0f, 422.0f);
-                    g.DrawLine(&miniPen, 52.0f, 422.0f, 62.0f, 422.0f);
+                    g.DrawLine(&miniPen, 55.0f, 419.0f, 55.0f, 422.0f);
+                    g.DrawLine(&miniPen, 50.0f, 422.0f, 60.0f, 422.0f);
 
                     Gdiplus::Font fontMiniIP(&ff, 8.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                     Gdiplus::SolidBrush ipTextBrush(Gdiplus::Color(255, 71, 85, 105));
@@ -762,6 +813,21 @@ namespace {
                     sfCenter.SetAlignment(Gdiplus::StringAlignmentCenter);
                     sfCenter.SetLineAlignment(Gdiplus::StringAlignmentCenter);
                     g.DrawString(L"IP", -1, &fontMiniIP, miniScr, &sfCenter, &ipTextBrush);
+
+                    // PIN Box
+                    Gdiplus::RectF pinBoxRect(212.0f, 394.0f, 114.0f, 36.0f);
+                    Gdiplus::GraphicsPath pinBoxPath;
+                    AddRoundRectPath(pinBoxPath, pinBoxRect, 6.0f);
+
+                    Gdiplus::Pen pinBorderPen(g_pinHasFocus ? Gdiplus::Color(255, 37, 99, 235) : Gdiplus::Color(255, 203, 213, 225),
+                                             g_pinHasFocus ? 1.6f : 1.0f);
+                    g.DrawPath(&pinBorderPen, &pinBoxPath);
+
+                    Gdiplus::RectF miniPin(218.0f, 404.0f, 26.0f, 15.0f);
+                    Gdiplus::GraphicsPath miniPinPath;
+                    AddRoundRectPath(miniPinPath, miniPin, 1.5f);
+                    g.DrawPath(&miniPen, &miniPinPath);
+                    g.DrawString(L"PIN", -1, &fontMiniIP, miniPin, &sfCenter, &ipTextBrush);
                 }
 
                 BitBlt(hdc, 0, 0, clientW, clientH, memDC, 0, 0, SRCCOPY);
@@ -839,9 +905,12 @@ namespace {
 
                 int x = LOWORD(lp);
                 int y = HIWORD(lp);
-                if (x >= 38 && x <= 252 && y >= 394 && y <= 430) {
+                if (x >= 38 && x <= 204 && y >= 394 && y <= 430) {
                     SetFocus(g_hEditIp);
                     SendMessageW(g_hEditIp, EM_SETSEL, 0, -1);
+                } else if (x >= 212 && x <= 326 && y >= 394 && y <= 430) {
+                    SetFocus(g_hEditPin);
+                    SendMessageW(g_hEditPin, EM_SETSEL, 0, -1);
                 }
                 break;
             }
@@ -1115,6 +1184,7 @@ namespace {
                     EnableWindow(g_hBtnLocalhost, TRUE);
                     EnableWindow(g_hBtnScan, TRUE);
                     EnableWindow(g_hEditIp, TRUE);
+                    EnableWindow(g_hEditPin, TRUE);
                     EnableWindow(g_hListClients, TRUE);
                     if (g_hChkCompat) EnableWindow(g_hChkCompat, TRUE);
 
